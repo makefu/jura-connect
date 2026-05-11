@@ -12,7 +12,7 @@
         # Build the library itself with a stock setuptools backend.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_connect";
-          version = "0.4.0";
+          version = "0.5.0";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];

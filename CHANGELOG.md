@@ -4,6 +4,20 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-05-11
+
+### Added
+- `jura-connect command --json` emits the command result as JSON on
+  stdout. The handshake banner, watch announcement, watched frames,
+  and every error / refusal message move to stderr, so a pipeline
+  like ``jura-connect command --name K --json counters | jq`` is
+  parseable verbatim.
+- Library-level `to_dict()` on `MaintenanceCounters`,
+  `MaintenancePercent`, `MachineStatus`, `MachineInfo`, and
+  `CommandResult`. Composite types recurse, plain-string command
+  replies (`lock` / `raw` / etc.) pass through. Everything is plain
+  ``json.dumps``-able.
+
 ## [0.4.0] — 2026-05-11
 
 ### Changed

@@ -137,6 +137,37 @@ handshake -> CORRECT  (@hp4)
 (progress) frames; the parsers and the maintenance helpers all just
 call into the same `JuraClient.request()` / `iter_frames()`.
 
+### JSON output for scripting
+
+Pass `--json` and the command's result is emitted on stdout as a JSON
+object; the handshake banner, watch announcement, watched frames, and
+all error/refusal messages move to stderr so stdout is parseable
+verbatim:
+
+```sh
+$ jura-connect command --name Kaffeebert --json counters | jq .
+{
+  "name": "counters",
+  "value": {
+    "cleaning": 21,
+    "filter_change": 1,
+    "decalc": 8,
+    "cappu_rinse": 344,
+    "coffee_rinse": 3617,
+    "cappu_clean": 91,
+    "raw_hex": "0015000100080158..."
+  }
+}
+```
+
+Composite values like `info` nest the same way:
+``payload["value"]["maintenance_counters"]["cleaning"]``. String
+replies (`lock`, `unlock`, `raw`, the destructive commands' wire
+responses) come through as ``payload["value"]`` directly. Every
+structured result type — `MaintenanceCounters`, `MaintenancePercent`,
+`MachineStatus`, `MachineInfo`, `CommandResult` — exposes the same
+`to_dict()` from Python.
+
 ### Destructive commands (gated)
 
 Commands that change the machine's physical state — start cleaning
