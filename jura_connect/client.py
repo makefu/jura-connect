@@ -522,61 +522,6 @@ class JuraClient:
             )
         return value
 
-    def write_setting_bank(
-        self,
-        bank_command: str,
-        bank_args: tuple[str, ...],
-        new_values: dict[str, str],
-        *,
-        timeout: float = 3.0,
-    ) -> str:
-        """Bulk-write a settings bank via the BANK command.
-
-        On EF1091 the ``<BANK Command="@TM:00,FC" CommandArgument=
-        "02080913">`` covers hardness, units, language, auto_off.
-        Individual ``@TM:<arg>,<val>`` writes against these args are
-        silently dropped by the firmware (ACKed with ``@tm:00`` but
-        the machine ignores them) — the bulk form is the only one
-        that commits.
-
-        The wire payload is the concatenation of (arg, current_or_new
-        value) pairs in ``bank_args`` order, followed by the same
-        ``ByteOperations.d`` checksum as the individual write. For
-        args in ``new_values`` we use the new value; for args NOT in
-        ``new_values`` we read the current value from the dongle
-        first (so the unchanged settings stay the same).
-
-        Args:
-            bank_command: e.g. ``"@TM:00,FC"``.
-            bank_args: ordered tuple of P_Arguments
-                (e.g. ``("02", "08", "09", "13")``).
-            new_values: ``{P_Argument: new_value_hex}`` for the args
-                being changed. Args not present are read-then-written.
-            timeout: per-frame timeout.
-
-        Returns the dongle's reply (typically ``"@tm:00"``).
-        """
-        block_parts: list[str] = []
-        for arg in bank_args:
-            arg = arg.upper()
-            new = new_values.get(arg) or new_values.get(arg.lower())
-            if new is None:
-                new = self.read_setting(arg, timeout=timeout)
-            block_parts.append(arg)
-            block_parts.append(new.upper())
-        block = "".join(block_parts)
-        # bank_command is e.g. "@TM:00,FC". Strip the "@TM:" prefix to
-        # get the checksum input ("00,FC"); the checksum is computed
-        # over the full payload after the "@TM:" framing.
-        wire_args = (
-            bank_command[len("@TM:") :]
-            if bank_command.startswith("@TM:")
-            else bank_command
-        )
-        checksum = _settings_checksum(f"{wire_args},{block}")
-        wire = f"{bank_command},{block}{checksum}"
-        return self.request(wire, match=r"(?i)^@(tm:00|an:error)", timeout=timeout)
-
     def write_setting(
         self,
         p_argument: str,
@@ -624,35 +569,14 @@ class JuraClient:
         """
         arg = p_argument.upper()
         value = value_hex.upper()
+        checksum = _settings_checksum(f"{arg},{value}")
+        cmd = f"@TM:{arg},{value}{checksum}"
 
-        # Route through the BANK bulk write when this arg is part of
-        # one. v0.9.2 used the individual @TM:<arg>,<val><csum> form
-        # uniformly, but the TT237W firmware drops those silently for
-        # bank args (it replies @tm:00 instead of @tm:<arg> and the
-        # machine setting doesn't change). The bank command
-        # @TM:00,FC,<full_block><csum> is the only form the dongle
-        # actually applies for those settings.
-        bank = None
-        if self.profile is not None:
-            bank = self.profile.bank_for_arg(arg)
-
-        # Wrap the entire exchange in @TS:01 / @TS:00. The unlock runs
-        # in `finally` so a mid-write exception can't leave the
-        # keypad locked.
+        # Wrap in @TS:01 / @TS:00. The unlock runs in `finally` so a
+        # mid-write exception can't leave the keypad locked.
         self.lock_screen()
         try:
-            if bank is not None:
-                reply = self.write_setting_bank(
-                    bank.command, bank.args, {arg: value}, timeout=timeout
-                )
-            else:
-                checksum = _settings_checksum(f"{arg},{value}")
-                cmd = f"@TM:{arg},{value}{checksum}"
-                reply = self.request(
-                    cmd,
-                    match=rf"(?i)^@(tm:{arg}|an:error)",
-                    timeout=timeout,
-                )
+            reply = self.request(cmd, match=r"^@(tm|an)", timeout=timeout)
         finally:
             try:
                 self.unlock_screen()
@@ -671,15 +595,11 @@ class JuraClient:
                 # than masking it.
                 return reply
             if stored.upper() != value:
-                bank_hint = (
-                    " (used bank write @TM:00,FC,…)"
-                    if bank is not None
-                    else " (used individual @TM:<arg>,<val> write)"
-                )
                 raise ValueError(
                     f"setting write for arg={arg}: dongle ACKed "
-                    f"({reply!r}){bank_hint} but the read-back value "
-                    f"is {stored!r}, not {value!r}. The write was "
+                    f"({reply!r}) but the read-back value is "
+                    f"{stored!r}, not {value!r}. Even with the "
+                    f"@TS:01/@TS:00 lock wrapper the write was "
                     f"silently dropped — this setting may be "
                     f"read-only on your firmware, the value may be "
                     f"outside an undocumented range, or the machine "

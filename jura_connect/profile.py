@@ -155,31 +155,6 @@ class SettingDef:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class SettingBank:
-    """One <BANK> entry inside <MACHINESETTINGS>.
-
-    ``command`` is the wire prefix used for bulk writes
-    (e.g. ``"@TM:00,FC"`` on EF1091). ``args`` lists the
-    ``P_Argument`` values whose values are packed into the bulk
-    payload, in the order the dongle expects (lifted verbatim from
-    the XML's ``CommandArgument`` attribute, split into 2-char
-    chunks). On EF1091 this is ``("02", "08", "09", "13")`` —
-    hardness, units, language, auto-off.
-
-    Bulk write wire format:
-
-        @TM:00,FC,<arg1><val1><arg2><val2>...<argN><valN><csum>
-
-    Values are variable-length; the dongle parses each value's
-    length from its leading byte (e.g. AutoOFF ``0x21,<u8>`` means
-    "1 byte of minutes follows", ``0x22,<u16>`` means "2 bytes").
-    """
-
-    command: str  # e.g. "@TM:00,FC"
-    args: tuple[str, ...]  # e.g. ("02", "08", "09", "13")
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
 class MachineProfile:
     """Static description of one machine variant.
 
@@ -192,7 +167,6 @@ class MachineProfile:
     alerts: tuple[AlertDef, ...]
     products: tuple[ProductDef, ...]
     settings: tuple[SettingDef, ...]
-    setting_banks: tuple[SettingBank, ...]
     has_pmode: bool  # whether the XML carries a PROGRAMMODE section
 
     # Derived lookup tables, populated in __post_init__. The default
@@ -212,20 +186,6 @@ class MachineProfile:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
         object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
-
-    def bank_for_arg(self, p_argument: str) -> SettingBank | None:
-        """Find the ``SettingBank`` (if any) that owns ``p_argument``.
-
-        Returns ``None`` for non-bank settings (which use the simple
-        per-arg ``@TM:<arg>,<val><csum>`` write). On EF1091 the bank
-        covers hardness/units/language/auto_off; brightness,
-        milk_rinsing and frother_instructions are individual.
-        """
-        target = p_argument.upper()
-        for bank in self.setting_banks:
-            if target in bank.args:
-                return bank
-        return None
 
 
 # --------------------------------------------------------------------- #
@@ -304,7 +264,6 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
     has_pmode = root.find(".//{*}PROGRAMMODE") is not None
 
     settings = _parse_machine_settings(root)
-    setting_banks = _parse_setting_banks(root)
 
     return MachineProfile(
         code=code,
@@ -312,36 +271,8 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         alerts=tuple(alerts),
         products=tuple(products),
         settings=settings,
-        setting_banks=setting_banks,
         has_pmode=has_pmode,
     )
-
-
-def _parse_setting_banks(root: ET.Element) -> tuple[SettingBank, ...]:
-    """Parse the ``<BANK>`` children of ``<MACHINESETTINGS>``.
-
-    Each bank declares a bulk-write address (``Command``) and an
-    ordered list of ``P_Argument`` values packed into the bulk
-    payload (``CommandArgument``). On EF1091:
-
-        <BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913" />
-
-    yields one ``SettingBank(command="@TM:00,FC",
-    args=("02", "08", "09", "13"))``. We split ``CommandArgument``
-    into 2-character chunks.
-    """
-    container = root.find(".//{*}MACHINESETTINGS")
-    if container is None:
-        return ()
-    banks: list[SettingBank] = []
-    for bank_el in container.findall("{*}BANK"):
-        cmd = bank_el.get("Command") or ""
-        arg_blob = bank_el.get("CommandArgument") or ""
-        if not cmd or not arg_blob or len(arg_blob) % 2:
-            continue
-        args = tuple(arg_blob[i : i + 2].upper() for i in range(0, len(arg_blob), 2))
-        banks.append(SettingBank(command=cmd, args=args))
-    return tuple(banks)
 
 
 # Map XML element tag (local-name) and SliderType attribute -> kind.
