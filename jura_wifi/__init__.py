@@ -34,9 +34,11 @@ from .client import (
 )
 from .commands import (
     COMMANDS,
+    DESTRUCTIVE_PREFIXES,
     CommandError,
     CommandResult,
     CommandSpec,
+    DestructiveCommandError,
     get_command,
     list_commands,
     run_named,
@@ -51,6 +53,8 @@ __all__ = [
     "CommandResult",
     "CommandSpec",
     "CredentialStore",
+    "DESTRUCTIVE_PREFIXES",
+    "DestructiveCommandError",
     "HandshakeError",
     "HandshakeResult",
     "JuraClient",

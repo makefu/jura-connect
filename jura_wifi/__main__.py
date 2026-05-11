@@ -32,7 +32,7 @@ from .client import (
     HandshakeError,
     JuraClient,
 )
-from .commands import CommandError, list_commands, run_named
+from .commands import CommandError, DestructiveCommandError, list_commands, run_named
 from .credentials import CredentialStore, MachineCredentials, default_path
 from .discovery import JURA_PORT, discover, probe, scan_tcp
 
@@ -145,9 +145,20 @@ def cmd_pair(args: argparse.Namespace) -> int:
 def _print_command_list() -> None:
     specs = list_commands()
     width = max(len(s.usage()) for s in specs)
+    safe = [s for s in specs if not s.destructive]
+    destructive = [s for s in specs if s.destructive]
     print("available commands:")
-    for s in specs:
-        print(f"  {s.usage().ljust(width)}  {s.description}")
+    print("  read-only:")
+    for s in safe:
+        print(f"    {s.usage().ljust(width)}  {s.description}")
+    if destructive:
+        print()
+        print(
+            "  destructive (require --allow-destructive-commands; "
+            "see 'jura-wifi command --help'):"
+        )
+        for s in destructive:
+            print(f"    {s.usage().ljust(width)}  {s.description}")
 
 
 def cmd_command(args: argparse.Namespace) -> int:
@@ -191,8 +202,17 @@ def cmd_command(args: argparse.Namespace) -> int:
     try:
         try:
             result = run_named(
-                client, args.command, args.args, timeout=args.cmd_timeout
+                client,
+                args.command,
+                args.args,
+                timeout=args.cmd_timeout,
+                allow_destructive=args.allow_destructive_commands,
             )
+        except DestructiveCommandError as exc:
+            # Print the gated-command explanation verbatim. It already
+            # tells the user what the command does and how to override.
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
         except CommandError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -322,6 +342,18 @@ def build_parser() -> argparse.ArgumentParser:
     cm.add_argument(
         "--watch", type=float, default=0.0,
         help="after the command, listen N seconds for unsolicited frames",
+    )
+    cm.add_argument(
+        "--allow-destructive-commands",
+        action="store_true",
+        help=(
+            "explicitly permit destructive commands "
+            "(clean / decalc / set-pin / set-ssid / reset-counters / …). "
+            "Without this flag any destructive command is refused with a "
+            "warning. These can consume supplies, lock you out of the "
+            "machine, or render the dongle unreachable; use only when you "
+            "really mean it."
+        ),
     )
     cm.set_defaults(func=cmd_command)
 

@@ -37,6 +37,7 @@ import time
 from collections.abc import Iterator
 
 from . import protocol
+from .commands import DESTRUCTIVE_PREFIXES
 
 log = logging.getLogger(__name__)
 
@@ -46,20 +47,11 @@ DEFAULT_MAINT_COUNTERS = bytes.fromhex("0015000100080158 0E21 005B".replace(" ",
 DEFAULT_MAINT_PERCENT = bytes.fromhex("50FF1E")
 DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
-# Commands the simulator considers "destructive" and refuses to honour.
-DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
-    b"@TG:21",  # cappu clean
-    b"@TG:23",  # cappu rinse
-    b"@TG:24",  # cleaning process
-    b"@TG:25",  # decalc process
-    b"@TG:26",  # filter change
-    b"@TG:7E",  # reset counter (with/without arg)
-    b"@TG:FF",  # reset something
-    b"@TF:02",  # restart machine
-    b"@AN:02",  # power off
-    b"@TP:",    # start product
-    b"@HW:",    # write (pin/ssid/password/name)
-)
+# DESTRUCTIVE_PREFIXES is re-exported for backwards compatibility with
+# tests that still import it from this module; the canonical home is
+# :mod:`jura_wifi.commands`. The simulator refuses-by-default for the
+# same prefixes the client gate refuses-by-default.
+__all__ = ["DESTRUCTIVE_PREFIXES", "Simulator", "SimulatorConfig", "run_in_thread"]
 
 
 @dataclasses.dataclass(slots=True)

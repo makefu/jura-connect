@@ -105,3 +105,98 @@ def test_creds_json_output(capsys, tmp_path) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["name"] == "a"
     assert payload[0]["address"] == "1.2.3.4"
+
+
+# --------------------------------------------------------------------- #
+# Destructive-command CLI behaviour
+# --------------------------------------------------------------------- #
+
+
+def _setup_paired_simulator(sim, tmp_path):
+    """Pair against the simulator and return (host, port, store_path, hash)."""
+    host, port = sim.address
+    from jura_wifi.client import JuraClient
+    from jura_wifi.credentials import CredentialStore, MachineCredentials
+
+    c = JuraClient(host, port=port, conn_id="cli-tests", auth_hash="")
+    r = c.pair(timeout=2.0)
+    c.close()
+    assert r.new_hash
+    store_path = tmp_path / "creds.json"
+    CredentialStore(store_path).put(
+        MachineCredentials(
+            name="Sim",
+            address=f"{host}:{port}",
+            conn_id="cli-tests",
+            auth_hash=r.new_hash,
+        )
+    )
+    return host, port, store_path, r.new_hash
+
+
+def test_command_list_groups_safe_and_destructive(capsys) -> None:
+    rc = main(["--store", "/dev/null", "command", "--list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "read-only" in out
+    assert "destructive" in out
+    # The destructive group must mention how to actually use them.
+    assert "--allow-destructive-commands" in out
+
+
+def test_cli_refuses_destructive_command_without_flag(sim, tmp_path, capsys) -> None:
+    host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
+    rc = main([
+        "--store", str(store_path),
+        "command",
+        "--name", "Sim",
+        "--address", f"{host}:{port}",
+        "--auth-hash", h,
+        "--conn-id", "cli-tests",
+        "--handshake-timeout", "3",
+        "--cmd-timeout", "2",
+        "clean",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "'clean'" in err
+    assert "cleaning cycle" in err or "consumes" in err
+    assert "--allow-destructive-commands" in err
+
+
+def test_cli_allows_destructive_command_with_flag(sim, tmp_path, capsys) -> None:
+    host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
+    rc = main([
+        "--store", str(store_path),
+        "command",
+        "--name", "Sim",
+        "--address", f"{host}:{port}",
+        "--auth-hash", h,
+        "--conn-id", "cli-tests",
+        "--handshake-timeout", "3",
+        "--cmd-timeout", "2",
+        "--allow-destructive-commands",
+        "clean",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "@an:error" in out
+
+
+def test_cli_refuses_destructive_raw_payload_without_flag(sim, tmp_path, capsys) -> None:
+    host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
+    rc = main([
+        "--store", str(store_path),
+        "command",
+        "--name", "Sim",
+        "--address", f"{host}:{port}",
+        "--auth-hash", h,
+        "--conn-id", "cli-tests",
+        "--handshake-timeout", "3",
+        "--cmd-timeout", "2",
+        "raw", "@TG:24",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "@TG:24" in err
+    assert "--allow-destructive-commands" in err
