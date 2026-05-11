@@ -4,6 +4,26 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-05-11
+
+### Changed
+- **Breaking:** the Python package was renamed from `jura_wifi` to
+  `jura_connect` and the console script from `jura-wifi` to
+  `jura-connect`. The repository directory was already named
+  `jura-connect`; this release makes the module and the CLI follow
+  suit so a single name (`jura-connect`) covers the project, the
+  module, the CLI, the Nix flake attribute, and the credentials
+  directory under `$XDG_DATA_HOME`.
+- Migration: ``from jura_wifi import …`` → ``from jura_connect import …``;
+  ``jura-wifi <subcommand>`` → ``jura-connect <subcommand>``. The
+  on-disk credentials path is unchanged.
+
+### Removed
+- Stale `jura_wifi/README.md` (the in-package duplicate that still
+  described the long-removed `connect --cmd` interface and an "8-char
+  hex" auth hash). The top-level `README.md` is the single source of
+  truth.
+
 ## [0.3.0] — 2026-05-11
 
 ### Added
