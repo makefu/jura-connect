@@ -1,4 +1,4 @@
-"""Command-line interface for ``jura_wifi``.
+"""Command-line interface for ``jura_connect``.
 
 Subcommands::
 
@@ -9,13 +9,13 @@ Subcommands::
     creds            inspect or remove stored credentials
 
 Named commands (use ``command --list`` to see them, or
-``jura_wifi.commands.list_commands()`` from Python) are defined in
-:mod:`jura_wifi.commands`. Destructive process commands are
+``jura_connect.commands.list_commands()`` from Python) are defined in
+:mod:`jura_connect.commands`. Destructive process commands are
 intentionally absent — for those use ``command raw '@…'`` with
 explicit intent.
 
 The pairing hash is written to ``$XDG_DATA_HOME/jura-connect/credentials.json``
-(see :mod:`jura_wifi.credentials`). Pass ``--store`` to override.
+(see :mod:`jura_connect.credentials`). Pass ``--store`` to override.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
             print("no hosts accepted TCP either", file=sys.stderr)
             return 1
         for ip in hits:
-            print(f"tcp/{JURA_PORT} open -> {ip}  (try: jura-wifi pair {ip})")
+            print(f"tcp/{JURA_PORT} open -> {ip}  (try: jura-connect pair {ip})")
         return 0
     print("no machines responded", file=sys.stderr)
     return 1
@@ -155,7 +155,7 @@ def _print_command_list() -> None:
         print()
         print(
             "  destructive (require --allow-destructive-commands; "
-            "see 'jura-wifi command --help'):"
+            "see 'jura-connect command --help'):"
         )
         for s in destructive:
             print(f"    {s.usage().ljust(width)}  {s.description}")
@@ -181,7 +181,7 @@ def cmd_command(args: argparse.Namespace) -> int:
         return 2
     if not auth_hash:
         print(
-            "no auth-hash: run 'jura-wifi pair' first or pass --auth-hash",
+            "no auth-hash: run 'jura-connect pair' first or pass --auth-hash",
             file=sys.stderr,
         )
         return 2
@@ -265,7 +265,7 @@ def cmd_creds(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="jura-wifi")
+    p = argparse.ArgumentParser(prog="jura-connect")
     p.add_argument(
         "--version",
         action="version",

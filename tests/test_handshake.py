@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from jura_wifi.client import HandshakeError, JuraClient
+from jura_connect.client import HandshakeError, JuraClient
 
 
 def test_pair_succeeds_with_empty_hash_and_yields_a_hash(sim) -> None:
@@ -94,7 +94,7 @@ def test_handshake_error_on_garbage_reply() -> None:
     import socket
     import threading
 
-    from jura_wifi import protocol
+    from jura_connect import protocol
 
     server = socket.socket()
     server.bind(("127.0.0.1", 0))

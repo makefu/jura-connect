@@ -297,7 +297,7 @@ def tcp_probe(address: str, port: int = JURA_PORT, timeout: float = 2.0) -> bool
     Useful when the dongle does not reply to UDP scans (e.g. TT237W firmware)
     but accepts TCP connections. A successful return does *not* prove that
     the listener is a Jura machine — pair it with the encrypted ``@HP``
-    handshake in :mod:`jura_wifi.client` to confirm.
+    handshake in :mod:`jura_connect.client` to confirm.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
@@ -384,7 +384,7 @@ def scan_tcp(
 
     Returns a list of IPv4 addresses (as strings) that completed a TCP
     handshake. Use as a fallback when UDP discovery does not return — the
-    dongle still answers TCP. Pair with :func:`jura_wifi.client.JuraClient`
+    dongle still answers TCP. Pair with :func:`jura_connect.client.JuraClient`
     to confirm a hit is actually a coffee machine.
     """
     nets = list(networks) if networks is not None else _local_ipv4_networks()

@@ -36,7 +36,7 @@ CommandRunner = Callable[["CommandSpec", JuraClient, "tuple[str, ...]", float], 
 
 
 # Wire-level prefixes that mutate the machine. These are the patterns
-# both :class:`~jura_wifi.simulator.Simulator` refuses-by-default and
+# both :class:`~jura_connect.simulator.Simulator` refuses-by-default and
 # the registry refuses-by-default through the destructive gate.
 DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     b"@TG:21",  # CappuClean

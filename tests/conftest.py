@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from jura_wifi.simulator import Simulator, SimulatorConfig
+from jura_connect.simulator import Simulator, SimulatorConfig
 
 
 @pytest.fixture

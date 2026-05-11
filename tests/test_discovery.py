@@ -6,7 +6,7 @@ import datetime
 
 import pytest
 
-from jura_wifi.discovery import parse_reply
+from jura_connect.discovery import parse_reply
 
 
 def _build_reply(

@@ -64,7 +64,7 @@ once the decoder has past the sync byte it never expects another `*`.
 
 A self-inverse, per-nibble permutation. The exact same routine encrypts
 and decrypts; client and simulator both call into
-`jura_wifi.crypto.encode_payload` and `decode_payload`.
+`jura_connect.crypto.encode_payload` and `decode_payload`.
 
 ### 2.1 S-boxes
 
@@ -267,7 +267,7 @@ Live example from Kaffeebert:
 
 Bits are addressed globally: `byte_index * 8 + bit_within_byte`. The
 client decodes the well-known S8 alert subset (cf.
-`jura_wifi.client._STATUS_BITS`). Live frame from Kaffeebert:
+`jura_connect.client._STATUS_BITS`). Live frame from Kaffeebert:
 `@TF:0004000008000000` → byte 1, bit 2 set → `no_beans`.
 
 ### 5.5 **Destructive** commands — kept off the public API
@@ -332,10 +332,10 @@ machine.
 ### 6.3 End-to-end workflow
 
 ```text
-┌──────────┐  jura-wifi discover           ┌────────────────┐
+┌──────────┐  jura-connect discover           ┌────────────────┐
 │          │ ─────────────────────────────►│  finds machine │
 │  user    │                               │  at 192.168.…  │
-│          │  jura-wifi pair <ip>          └────────────────┘
+│          │  jura-connect pair <ip>          └────────────────┘
 │          │ ──────────────────┐
 │          │                   │   open TCP/51515
 │          │                   ▼
@@ -355,7 +355,7 @@ machine.
 │          │           │ credentials.json (0600) │
 │          │           └─────────────────────────┘
 │          │
-│          │  jura-wifi connect --name Kaffeebert --read-info
+│          │  jura-connect connect --name Kaffeebert --read-info
 │          │ ──────────────────┐
 │          │                   ▼
 │          │   CredentialStore.get("Kaffeebert")
@@ -376,14 +376,14 @@ machine.
 
 | Module                       | Responsibility |
 | ---------------------------- | -------------- |
-| `jura_wifi/crypto.py`        | per-nibble permutation, escape handling |
-| `jura_wifi/protocol.py`      | frame writer/reader on top of `crypto` |
-| `jura_wifi/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
-| `jura_wifi/client.py`        | `JuraClient` + structured read results + handshake state machine |
-| `jura_wifi/commands.py`      | named-command registry (`info` / `counters` / `mem-read` / …) used by CLI and library |
-| `jura_wifi/credentials.py`   | XDG-located JSON persistence (atomic write, 0600) |
-| `jura_wifi/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
-| `jura_wifi/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds`) |
+| `jura_connect/crypto.py`        | per-nibble permutation, escape handling |
+| `jura_connect/protocol.py`      | frame writer/reader on top of `crypto` |
+| `jura_connect/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
+| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine |
+| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `mem-read` / …) used by CLI and library |
+| `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600) |
+| `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
+| `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds`) |
 | `tests/`                     | pytest suite — driven through the simulator end-to-end |
 | `flake.nix`                  | dev shell + package + checks (passthrough pytest) |
 

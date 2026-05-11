@@ -1,12 +1,12 @@
 """In-process Jura coffee-machine simulator.
 
 A small TCP server that speaks the same WiFi protocol as the real
-machine. Uses the *same* :mod:`jura_wifi.crypto` and
-:mod:`jura_wifi.protocol` modules as the client, so encoding /
+machine. Uses the *same* :mod:`jura_connect.crypto` and
+:mod:`jura_connect.protocol` modules as the client, so encoding /
 decoding is verified symmetric by construction (no mocking).
 
 Used by the test-suite via :func:`run_in_thread`, but can also be
-launched as a standalone process via ``python -m jura_wifi.simulator``.
+launched as a standalone process via ``python -m jura_connect.simulator``.
 
 The simulator models:
 
@@ -49,7 +49,7 @@ DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
 # DESTRUCTIVE_PREFIXES is re-exported for backwards compatibility with
 # tests that still import it from this module; the canonical home is
-# :mod:`jura_wifi.commands`. The simulator refuses-by-default for the
+# :mod:`jura_connect.commands`. The simulator refuses-by-default for the
 # same prefixes the client gate refuses-by-default.
 __all__ = ["DESTRUCTIVE_PREFIXES", "Simulator", "SimulatorConfig", "run_in_thread"]
 

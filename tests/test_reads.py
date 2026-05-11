@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from jura_wifi.client import JuraClient
+from jura_connect.client import JuraClient
 
 
 def _paired(sim) -> JuraClient:

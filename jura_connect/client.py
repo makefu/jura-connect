@@ -5,8 +5,8 @@ Layers:
 * :class:`JuraConnection` -- raw framed transport (write/read encoded frames).
 * :class:`JuraClient`     -- handshake (`@HP:`) + structured read operations.
 
-Wire framing and crypto live in :mod:`jura_wifi.protocol` / :mod:`jura_wifi.crypto`
-and are shared with the in-tree :mod:`jura_wifi.simulator`.
+Wire framing and crypto live in :mod:`jura_connect.protocol` / :mod:`jura_connect.crypto`
+and are shared with the in-tree :mod:`jura_connect.simulator`.
 
 Handshake (matches the J.O.E. Android app's ``WifiCommandConnectionSetup``)::
 

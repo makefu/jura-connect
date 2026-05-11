@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import stat
 
-from jura_wifi.client import JuraClient
-from jura_wifi.credentials import CredentialStore, MachineCredentials
+from jura_connect.client import JuraClient
+from jura_connect.credentials import CredentialStore, MachineCredentials
 
 
 def test_store_round_trip(tmp_path) -> None:

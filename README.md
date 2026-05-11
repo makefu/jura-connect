@@ -29,15 +29,15 @@ The package is pure Python ≥ 3.11 with no runtime dependencies. The
 recommended way is via the flake:
 
 ```sh
-nix shell .#jura-wifi            # binary + library available in the shell
-nix run .#jura-wifi -- discover  # run the CLI directly
+nix shell .#jura-connect            # binary + library available in the shell
+nix run .#jura-connect -- discover  # run the CLI directly
 ```
 
 Or build/install with the bundled `pyproject.toml`:
 
 ```sh
-pip install .                    # adds the `jura-wifi` console script
-python -m jura_wifi discover
+pip install .                    # adds the `jura-connect` console script
+python -m jura_connect discover
 ```
 
 ## Quickstart
@@ -46,12 +46,12 @@ python -m jura_wifi discover
 
 ```sh
 # 1. Find the machine on your LAN
-$ jura-wifi discover
-tcp/51515 open -> 192.168.1.42  (try: jura_wifi pair 192.168.1.42)
+$ jura-connect discover
+tcp/51515 open -> 192.168.1.42  (try: jura_connect pair 192.168.1.42)
 
 # 2. Run the pairing flow. The machine will show a "Connect" prompt
 #    on its own display; press OK there to accept this device.
-$ jura-wifi pair 192.168.1.42 --name Kaffeebert
+$ jura-connect pair 192.168.1.42 --name Kaffeebert
 connecting to 192.168.1.42:51515 as conn-id 'jura-connect-7f31a8c2'
 look at the coffee machine -- a 'Connect' prompt should appear.
   -> Coffee machine should be showing a 'Connect' prompt — press OK on the machine to accept this device (waiting up to 60s).
@@ -69,7 +69,7 @@ The CLI exposes a `command` subcommand that takes a *named* read
 command, not a raw hex code. Discover the catalog with:
 
 ```sh
-$ jura-wifi command --list
+$ jura-connect command --list
 available commands:
   read-only:
     info                     full read-only snapshot (status + counters + percent)
@@ -82,7 +82,7 @@ available commands:
     register-read <bank>     read a register bank (@TR:<bank>); firmware-specific
     raw <frame>              send a verbatim '@…' command; payload checked against the destructive set
 
-  destructive (require --allow-destructive-commands; see 'jura-wifi command --help'):
+  destructive (require --allow-destructive-commands; see 'jura-connect command --help'):
     clean                    [destructive] start coffee-system cleaning cycle (@TG:24)
     decalc                   [destructive] start descaling cycle (@TG:25)
     filter-change            [destructive] run water-filter change procedure (@TG:26)
@@ -99,10 +99,10 @@ available commands:
 ```
 
 The same catalogue is reachable from Python as
-`jura_wifi.list_commands()`. Run a command by name:
+`jura_connect.list_commands()`. Run a command by name:
 
 ```sh
-$ jura-wifi command --name Kaffeebert info
+$ jura-connect command --name Kaffeebert info
 handshake -> CORRECT  (@hp4)
 == machine info ==
   conn-id        : jura-connect-7f31a8c2
@@ -113,11 +113,11 @@ handshake -> CORRECT  (@hp4)
   maintenance    : cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
   maintenance %  : cleaning=80 filter=255 decalc=30
 
-$ jura-wifi command --name Kaffeebert counters
+$ jura-connect command --name Kaffeebert counters
 handshake -> CORRECT  (@hp4)
 cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
 
-$ jura-wifi command --name Kaffeebert status --watch 5
+$ jura-connect command --name Kaffeebert status --watch 5
 handshake -> CORRECT  (@hp4)
 bits=0004000008000000  alerts=no_beans
 watching status for 5.0s ...
@@ -128,7 +128,7 @@ watching status for 5.0s ...
 For one-off advanced use, `raw` echoes any wire command verbatim:
 
 ```sh
-$ jura-wifi command --name Kaffeebert raw '@TG:43'
+$ jura-connect command --name Kaffeebert raw '@TG:43'
 handshake -> CORRECT  (@hp4)
 @tg:4300150001000801580E21005B
 ```
@@ -145,7 +145,7 @@ machine PIN — live in the same registry but are refused by default
 *before* anything is sent. The error you get spells out the risk:
 
 ```sh
-$ jura-wifi command --name Kaffeebert clean
+$ jura-connect command --name Kaffeebert clean
 handshake -> CORRECT  (@hp4)
 refused: 'clean' is a destructive command — starts a real cleaning
 cycle (~5 min) that consumes a cleaning tablet and locks the machine
@@ -158,12 +158,12 @@ Pass `--allow-destructive-commands` once you've read what the command
 does and have any required supplies / containers / cups in place:
 
 ```sh
-$ jura-wifi command --name Kaffeebert --allow-destructive-commands clean
+$ jura-connect command --name Kaffeebert --allow-destructive-commands clean
 ```
 
 The list of gated wire prefixes (`@TG:21/23/24/25/26/7E/FF`, `@TF:02`,
 `@AN:02`, `@TP:`, `@HW:`) is exported as
-`jura_wifi.DESTRUCTIVE_PREFIXES`. The `raw` escape hatch inspects its
+`jura_connect.DESTRUCTIVE_PREFIXES`. The `raw` escape hatch inspects its
 argument against the same list, so `command raw '@TG:24'` is gated
 too — the bypass cannot be used by accident.
 
@@ -176,18 +176,18 @@ when the machine was last serviced once it's been zeroed.
 ### List / remove stored credentials
 
 ```sh
-$ jura-wifi creds
+$ jura-connect creds
 # /home/you/.local/share/jura-connect/credentials.json
 Kaffeebert            192.168.1.42     conn-id=jura-connect-7f31a8c2  hash=13908FE4D3EB986B...  paired_at=2026-05-11T08:42:00Z
 
-$ jura-wifi creds --delete Kaffeebert
+$ jura-connect creds --delete Kaffeebert
 removed 'Kaffeebert' from .../credentials.json
 ```
 
 ## Library API
 
 ```python
-from jura_wifi import (
+from jura_connect import (
     JuraClient, CredentialStore, MachineCredentials,
     discover, run_named, list_commands,
 )
@@ -262,7 +262,7 @@ The test-suite covers:
 
 This project follows [Semantic Versioning](https://semver.org/). See
 [`CHANGELOG.md`](CHANGELOG.md) for the release history; the current
-version is also exposed as `jura_wifi.__version__` and `jura-wifi --version`.
+version is also exposed as `jura_connect.__version__` and `jura-connect --version`.
 
 ## Protocol reference
 

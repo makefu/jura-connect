@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import pytest
 
-from jura_wifi import commands
-from jura_wifi.client import (
+from jura_connect import commands
+from jura_connect.client import (
     JuraClient,
     MachineInfo,
     MachineStatus,
     MaintenanceCounters,
     MaintenancePercent,
 )
-from jura_wifi.commands import CommandError, DestructiveCommandError, run_named
+from jura_connect.commands import CommandError, DestructiveCommandError, run_named
 
 
 def _paired(sim) -> JuraClient:

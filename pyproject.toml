@@ -3,7 +3,7 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jura_wifi"
+name = "jura_connect"
 version = "0.3.0"
 description = "Python WiFi interface for Jura coffee machines (TT237W / S8)"
 requires-python = ">=3.11"
@@ -13,10 +13,10 @@ authors = [{ name = "jura-connect contributors" }]
 dependencies = []
 
 [project.scripts]
-jura-wifi = "jura_wifi.__main__:main"
+jura-connect = "jura_connect.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["jura_wifi*"]
+include = ["jura_connect*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -13,7 +13,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   `brew <recipe>`, `set-pin <pin>`, `set-ssid <ssid>`,
   `set-password <pwd>`, `set-name <name>`.
 - Each destructive command carries a human-readable `danger`
-  explanation that the new `jura_wifi.DestructiveCommandError`
+  explanation that the new `jura_connect.DestructiveCommandError`
   surfaces verbatim, so users see *what* the command does on the
   machine and *how to recover* if it bites.
 - New CLI flag `--allow-destructive-commands` and matching
@@ -29,15 +29,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.2.0] — 2026-05-11
 
 ### Added
-- `jura_wifi.commands` — named-command registry mapping user-friendly
+- `jura_connect.commands` — named-command registry mapping user-friendly
   names (`info`, `counters`, `percent`, `status`, `lock`, `unlock`,
   `mem-read`, `register-read`, `raw`) to wire-level commands. The
   registry is the single source of truth for both the CLI and library
-  callers (`jura_wifi.run_named(client, "info")`).
+  callers (`jura_connect.run_named(client, "info")`).
 - `format()` methods on `MaintenanceCounters`, `MaintenancePercent`,
   `MachineStatus`, and `MachineInfo` — presentation logic now lives
   next to the data, not in the CLI.
-- `__version__` exposed from `jura_wifi`; `--version` flag on the CLI.
+- `__version__` exposed from `jura_connect`; `--version` flag on the CLI.
 - Host can now be passed as `host:port` to the `command` subcommand
   (useful for tests and non-standard deployments).
 - New tests: `tests/test_commands.py` (registry round-trips via
@@ -46,8 +46,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - **Breaking:** CLI subcommand `connect` was renamed to `command`. The
   hex-code interface (`--read '@TG:43'`) was removed; use named
-  commands instead, e.g. `jura-wifi command --name K counters`. For
-  raw access use `jura-wifi command --name K raw '@TG:43'`.
+  commands instead, e.g. `jura-connect command --name K counters`. For
+  raw access use `jura-connect command --name K raw '@TG:43'`.
 - CLI command output formatting moved into library `format()`
   methods so the CLI is now a thin shell over the library.
 

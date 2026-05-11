@@ -11,7 +11,7 @@ import secrets
 
 import pytest
 
-from jura_wifi import crypto
+from jura_connect import crypto
 
 
 def _valid_key(k: int) -> bool:

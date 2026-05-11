@@ -11,7 +11,7 @@
         python = pkgs.python313;
         # Build the library itself with a stock setuptools backend.
         package = python.pkgs.buildPythonPackage {
-          pname = "jura_wifi";
+          pname = "jura_connect";
           version = "0.3.0";
           src = ./.;
           pyproject = true;
@@ -24,12 +24,12 @@
           doCheck = true;
           meta = {
             description = "Python WiFi interface for Jura coffee machines (TT237W / S8)";
-            mainProgram = "jura-wifi";
+            mainProgram = "jura-connect";
           };
         };
         # A separate `checks.tests` derivation that runs pytest as a
         # passthrough build, so `nix flake check` exercises the full suite.
-        tests = pkgs.runCommand "jura-wifi-tests"
+        tests = pkgs.runCommand "jura-connect-tests"
           {
             nativeBuildInputs = [
               (python.withPackages (ps: [ ps.pytest ]))
@@ -45,7 +45,7 @@
           '';
       in {
         packages.default = package;
-        packages.jura-wifi = package;
+        packages.jura-connect = package;
         apps.default = flake-utils.lib.mkApp { drv = package; };
         checks.tests = tests;
         checks.default = tests;

@@ -3,20 +3,20 @@
 Reverse-engineered from the J.O.E. (Jura Operating Experience) Android
 APK. Layered as:
 
-* :mod:`jura_wifi.crypto`     -- byte-level WiFi obfuscation cipher
+* :mod:`jura_connect.crypto`     -- byte-level WiFi obfuscation cipher
   (port of ``WifiCryptoUtil``); self-inverse, shared client/server.
-* :mod:`jura_wifi.protocol`   -- frame helpers (``* … \\r\\n``) used by
+* :mod:`jura_connect.protocol`   -- frame helpers (``* … \\r\\n``) used by
   both the client and the in-tree simulator.
-* :mod:`jura_wifi.discovery`  -- UDP/51515 broadcast scan + TCP fallback
+* :mod:`jura_connect.discovery`  -- UDP/51515 broadcast scan + TCP fallback
   sweep for firmwares that don't answer UDP.
-* :mod:`jura_wifi.client`     -- ``@HP:`` handshake, unset-PIN pair flow,
+* :mod:`jura_connect.client`     -- ``@HP:`` handshake, unset-PIN pair flow,
   structured read commands.
-* :mod:`jura_wifi.commands`   -- named-command registry; the entry point
+* :mod:`jura_connect.commands`   -- named-command registry; the entry point
   for "send the *counters* command" without hard-coding ``@TG:43``.
-* :mod:`jura_wifi.simulator`  -- TCP server speaking the same protocol;
+* :mod:`jura_connect.simulator`  -- TCP server speaking the same protocol;
   used by the test-suite to exercise the client end-to-end without a
   physical machine.
-* :mod:`jura_wifi.credentials` -- JSON file storage of pairing secrets.
+* :mod:`jura_connect.credentials` -- JSON file storage of pairing secrets.
 """
 
 __version__ = "0.3.0"

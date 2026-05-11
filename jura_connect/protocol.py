@@ -7,11 +7,11 @@ A "frame" on the wire is exactly:
 ``<encoded_body>`` always starts with a *key byte* (or the escape pair
 ``0x1B <key^0x80>`` when the key value clashes with the reserved set).
 The body bytes after the key are obfuscated by
-:func:`jura_wifi.crypto.encode_payload`; reserved bytes inside the body
+:func:`jura_connect.crypto.encode_payload`; reserved bytes inside the body
 are re-escaped with the same ``0x1B`` rule.
 
 The same primitives back both ends of the protocol: the client uses them
-to talk to a real coffee machine, and :mod:`jura_wifi.simulator` uses
+to talk to a real coffee machine, and :mod:`jura_connect.simulator` uses
 them to *be* a coffee machine in tests.
 """
 
