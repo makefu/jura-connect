@@ -4,6 +4,35 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-05-11
+
+### Added
+- `jura-connect command brews` — new named read command returning the
+  per-product brew counter table (the same data the J.O.E. app shows
+  on its Statistics screen). Wire protocol is the paginated
+  `@TR:32,<page>` (16 pages × 4 u16 slots = 64-slot table indexed by
+  product code); decoded into `jura_connect.ProductCounters` with
+  `total`, `by_name`, and `by_code` views.
+- `jura_connect.PRODUCT_NAMES` — code → human name map derived from
+  the per-machine XMLs under `apk/assets/documents/xml/`. Covers the
+  TT237W family (S8, ENA8, Z8); unknown codes still surface via
+  `by_code`.
+- `MachineStatus.errors` / `.info` / `.process` — the status bits are
+  now categorised by severity, lifted from the machine XML's
+  `ALERT.Type` attribute. `active_alerts` is preserved for backwards
+  compatibility.
+
+### Fixed
+- The `status` and `info` CLI output no longer mis-reports
+  informational bits as active errors. `no_beans` on the S8 EB is
+  `Type="info"` (bean bin low, not blocked) and now appears under
+  ``info flags``, not under ``errors``. Same correction for the
+  periodic maintenance prompts (`filter_alert`, `decalc_alert`,
+  `cleaning_alert`, `cappu_rinse_alert`), which surface under
+  ``process flags``.
+- The `@TR:32` "known unknown" entry in `docs/PROTOCOL.md` is removed
+  — the paginated form is now documented and implemented.
+
 ## [0.6.1] — 2026-05-11
 
 ### Added
