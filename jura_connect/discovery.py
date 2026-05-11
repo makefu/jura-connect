@@ -182,7 +182,11 @@ def _broadcast_addresses() -> list[str]:
             if family != socket.AF_INET:
                 continue
             ip = sockaddr[0]
-            if ip.startswith("127."):
+            # AF_INET narrows sockaddr to (host: str, port: int) at
+            # runtime, but the stdlib's stub leaves it as the union
+            # `str | int`. Make it explicit so the type-checker can
+            # narrow without `cast()`.
+            if not isinstance(ip, str) or ip.startswith("127."):
                 continue
             net = ipaddress.IPv4Network(f"{ip}/24", strict=False)
             bcast = str(net.broadcast_address)
@@ -362,7 +366,7 @@ def _local_ipv4_networks() -> list[ipaddress.IPv4Network]:
                 if family != socket.AF_INET:
                     continue
                 ip = sockaddr[0]
-                if ip.startswith("127."):
+                if not isinstance(ip, str) or ip.startswith("127."):
                     continue
                 net = ipaddress.IPv4Network(f"{ip}/24", strict=False)
                 if net not in nets:

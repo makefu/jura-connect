@@ -105,7 +105,7 @@ class CredentialStore:
             paired_at=entry.get("paired_at"),
         )
 
-    def list(self) -> list[MachineCredentials]:
+    def entries(self) -> list[MachineCredentials]:
         out: list[MachineCredentials] = []
         for name, entry in sorted(self._read().items()):
             out.append(

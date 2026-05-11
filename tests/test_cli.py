@@ -53,17 +53,26 @@ def test_command_runs_info_through_simulator(sim, tmp_path, capsys) -> None:
 
     # Now exercise the CLI against the running simulator. Note: --address
     # overrides the name lookup so we can target the simulator's port.
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", r.new_hash,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "3",
-        "info",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            r.new_hash,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "3",
+            "info",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "machine info" in out
@@ -72,12 +81,16 @@ def test_command_runs_info_through_simulator(sim, tmp_path, capsys) -> None:
 
 
 def test_command_missing_credentials_errors(capsys, tmp_path) -> None:
-    rc = main([
-        "--store", str(tmp_path / "empty.json"),
-        "command",
-        "info",
-        "--name", "DoesNotExist",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(tmp_path / "empty.json"),
+            "command",
+            "info",
+            "--name",
+            "DoesNotExist",
+        ]
+    )
     assert rc == 2
     err = capsys.readouterr().err
     assert "no address" in err or "no auth-hash" in err
@@ -97,9 +110,7 @@ def test_creds_json_output(capsys, tmp_path) -> None:
     from jura_connect.credentials import CredentialStore, MachineCredentials
 
     p = tmp_path / "creds.json"
-    CredentialStore(p).put(
-        MachineCredentials("a", "1.2.3.4", "cid", "h" * 64)
-    )
+    CredentialStore(p).put(MachineCredentials("a", "1.2.3.4", "cid", "h" * 64))
     rc = main(["--store", str(p), "creds", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -146,17 +157,26 @@ def test_command_list_groups_safe_and_destructive(capsys) -> None:
 
 def test_cli_refuses_destructive_command_without_flag(sim, tmp_path, capsys) -> None:
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "clean",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "clean",
+        ]
+    )
     assert rc == 2
     err = capsys.readouterr().err
     assert "'clean'" in err
@@ -166,18 +186,27 @@ def test_cli_refuses_destructive_command_without_flag(sim, tmp_path, capsys) -> 
 
 def test_cli_allows_destructive_command_with_flag(sim, tmp_path, capsys) -> None:
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "--allow-destructive-commands",
-        "clean",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "--allow-destructive-commands",
+            "clean",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "@an:error" in out
@@ -186,18 +215,27 @@ def test_cli_allows_destructive_command_with_flag(sim, tmp_path, capsys) -> None
 def test_cli_json_emits_only_json_on_stdout(sim, tmp_path, capsys) -> None:
     """--json: stdout is the JSON CommandResult; the handshake banner moves to stderr."""
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "--json",
-        "counters",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "--json",
+            "counters",
+        ]
+    )
     assert rc == 0
     captured = capsys.readouterr()
     # stdout must be parseable as JSON with no other text.
@@ -211,18 +249,27 @@ def test_cli_json_emits_only_json_on_stdout(sim, tmp_path, capsys) -> None:
 
 def test_cli_json_info_full_nested_shape(sim, tmp_path, capsys) -> None:
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "3",
-        "--json",
-        "info",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "3",
+            "--json",
+            "info",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     payload = json.loads(out)
@@ -234,18 +281,27 @@ def test_cli_json_info_full_nested_shape(sim, tmp_path, capsys) -> None:
 def test_cli_json_destructive_refusal_stderr(sim, tmp_path, capsys) -> None:
     """A refused destructive command keeps stdout empty under --json."""
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "--json",
-        "clean",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "--json",
+            "clean",
+        ]
+    )
     assert rc == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -256,36 +312,57 @@ def test_cli_json_destructive_refusal_stderr(sim, tmp_path, capsys) -> None:
 def test_cli_without_json_still_uses_stdout(sim, tmp_path, capsys) -> None:
     """Sanity: without --json, the human-readable output stays on stdout."""
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "counters",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "counters",
+        ]
+    )
     assert rc == 0
     captured = capsys.readouterr()
     assert "handshake" in captured.out
     assert "cleaning=21" in captured.out
 
 
-def test_cli_refuses_destructive_raw_payload_without_flag(sim, tmp_path, capsys) -> None:
+def test_cli_refuses_destructive_raw_payload_without_flag(
+    sim, tmp_path, capsys
+) -> None:
     host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
-    rc = main([
-        "--store", str(store_path),
-        "command",
-        "--name", "Sim",
-        "--address", f"{host}:{port}",
-        "--auth-hash", h,
-        "--conn-id", "cli-tests",
-        "--handshake-timeout", "3",
-        "--cmd-timeout", "2",
-        "raw", "@TG:24",
-    ])
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            "raw",
+            "@TG:24",
+        ]
+    )
     assert rc == 2
     err = capsys.readouterr().err
     assert "@TG:24" in err

@@ -11,13 +11,13 @@ from jura_connect.discovery import parse_reply
 
 def _build_reply(
     *,
-    fw: bytes = b"TT237W V06.11" + b" " * 3,        # 16 bytes
-    name: bytes = b"Kaffeebert" + b" " * 22,        # 32 bytes
-    hw_id: bytes = b"S8-EB" + b" " * 11,            # 16 bytes
+    fw: bytes = b"TT237W V06.11" + b" " * 3,  # 16 bytes
+    name: bytes = b"Kaffeebert" + b" " * 22,  # 32 bytes
+    hw_id: bytes = b"S8-EB" + b" " * 11,  # 16 bytes
     article: int = 0x3B1B,
     machine: int = 0x0001,
     serial: int = 0x1234,
-    prod_date_raw: int = 0x4F39,    # 2029-09-25 -- valid bit packing
+    prod_date_raw: int = 0x4F39,  # 2029-09-25 -- valid bit packing
     flags: int = 0b00010001,
     status_tail: bytes = b"\xab\xcd\xef",
 ) -> bytes:
@@ -82,5 +82,5 @@ def test_production_date_parses_or_returns_none() -> None:
 def test_flag_helpers() -> None:
     m = parse_reply(_build_reply(flags=0b10010001), "1.2.3.4")  # bits 0,4,7
     assert m.standby is True
-    assert m.ready is True       # bit 4
-    assert m.busy is False       # bit 0 set -> S=False -> not busy
+    assert m.ready is True  # bit 4
+    assert m.busy is False  # bit 0 set -> S=False -> not busy

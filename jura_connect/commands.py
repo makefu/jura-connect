@@ -48,8 +48,8 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     b"@TG:FF",  # reset (broad)
     b"@TF:02",  # restart machine
     b"@AN:02",  # power off
-    b"@TP:",    # start product (brewing)
-    b"@HW:",    # write (PIN / SSID / password / dongle name)
+    b"@TP:",  # start product (brewing)
+    b"@HW:",  # write (PIN / SSID / password / dongle name)
 )
 
 
@@ -169,9 +169,7 @@ def _ascii_arg(name: str, value: str) -> str:
 
 
 def _format_named_gate(spec: CommandSpec) -> str:
-    danger = spec.danger or (
-        f"{spec.name!r} modifies machine state."
-    )
+    danger = spec.danger or (f"{spec.name!r} modifies machine state.")
     return (
         f"'{spec.name}' is a destructive command — {danger}\n"
         "Re-run with --allow-destructive-commands (CLI) or "
@@ -474,7 +472,9 @@ _SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         name="brew",
         description="[destructive] start brewing a recipe (@TP:<recipe>)",
-        arguments=(Argument("recipe", "product code, e.g. 01 (espresso). Firmware-specific."),),
+        arguments=(
+            Argument("recipe", "product code, e.g. 01 (espresso). Firmware-specific."),
+        ),
         runner=_r_brew,
         destructive=True,
         danger=(

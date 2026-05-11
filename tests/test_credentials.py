@@ -35,11 +35,11 @@ def test_store_lists_and_removes(tmp_path) -> None:
     store = CredentialStore(tmp_path / "creds.json")
     store.put(MachineCredentials("a", "10.0.0.1", "cid", "hashA"))
     store.put(MachineCredentials("b", "10.0.0.2", "cid", "hashB"))
-    names = [c.name for c in store.list()]
+    names = [c.name for c in store.entries()]
     assert names == ["a", "b"]
     assert store.remove("a") is True
     assert store.remove("a") is False
-    assert [c.name for c in store.list()] == ["b"]
+    assert [c.name for c in store.entries()] == ["b"]
 
 
 def test_store_creates_parent_dirs(tmp_path) -> None:

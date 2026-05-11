@@ -31,20 +31,50 @@ def test_list_commands_contains_safe_and_destructive_groups() -> None:
     specs = commands.list_commands()
     names = [s.name for s in specs]
     # Safe operations are present.
-    for expected in ["info", "counters", "percent", "status",
-                     "lock", "unlock", "mem-read", "register-read", "raw"]:
+    for expected in [
+        "info",
+        "counters",
+        "percent",
+        "status",
+        "lock",
+        "unlock",
+        "mem-read",
+        "register-read",
+        "raw",
+    ]:
         assert expected in names
     # Destructive operations are present *and* flagged with a danger string.
-    for expected in ["clean", "decalc", "filter-change", "cappu-clean",
-                     "cappu-rinse", "reset-counters", "restart", "power-off",
-                     "brew", "set-pin", "set-ssid", "set-password", "set-name"]:
+    for expected in [
+        "clean",
+        "decalc",
+        "filter-change",
+        "cappu-clean",
+        "cappu-rinse",
+        "reset-counters",
+        "restart",
+        "power-off",
+        "brew",
+        "set-pin",
+        "set-ssid",
+        "set-password",
+        "set-name",
+    ]:
         assert expected in names, f"{expected!r} missing from registry"
         spec = commands.get_command(expected)
         assert spec.destructive, f"{expected!r} must be flagged destructive"
         assert spec.danger, f"{expected!r} must carry a danger explanation"
     # The read-only group must NOT be marked destructive.
-    for safe in ["info", "counters", "percent", "status", "lock", "unlock",
-                 "mem-read", "register-read", "raw"]:
+    for safe in [
+        "info",
+        "counters",
+        "percent",
+        "status",
+        "lock",
+        "unlock",
+        "mem-read",
+        "register-read",
+        "raw",
+    ]:
         assert not commands.get_command(safe).destructive
 
 
@@ -270,17 +300,14 @@ def test_destructive_command_reaches_wire_with_flag(sim, name, args) -> None:
     refuses with @an:error — that's the proof it reached the wire."""
     c = _paired(sim)
     try:
-        result = run_named(
-            c, name, args, timeout=2.0, allow_destructive=True
-        )
+        result = run_named(c, name, args, timeout=2.0, allow_destructive=True)
     finally:
         c.close()
     # Either we get @an:error (simulator's wire-level refusal) or, for
     # restart/power-off, the connection-closed sentinel.
     assert isinstance(result.value, str)
     assert (
-        result.value.startswith("@an:error")
-        or "connection closed" in result.value
+        result.value.startswith("@an:error") or "connection closed" in result.value
     ), f"unexpected reply for {name!r}: {result.value!r}"
 
 
@@ -299,9 +326,7 @@ def test_raw_payload_destructive_prefix_blocked_without_flag(sim) -> None:
 def test_raw_payload_destructive_prefix_allowed_with_flag(sim) -> None:
     c = _paired(sim)
     try:
-        result = run_named(
-            c, "raw", ["@TG:24"], timeout=2.0, allow_destructive=True
-        )
+        result = run_named(c, "raw", ["@TG:24"], timeout=2.0, allow_destructive=True)
     finally:
         c.close()
     assert isinstance(result.value, str)
@@ -322,9 +347,7 @@ def test_set_pin_validates_numeric(sim) -> None:
     c = _paired(sim)
     try:
         with pytest.raises(CommandError, match="must be numeric"):
-            run_named(
-                c, "set-pin", ["abcd"], timeout=1.0, allow_destructive=True
-            )
+            run_named(c, "set-pin", ["abcd"], timeout=1.0, allow_destructive=True)
     finally:
         c.close()
 

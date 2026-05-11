@@ -326,9 +326,7 @@ class JuraClient:
             try:
                 reply = self.conn.recv_str(timeout=remaining)
             except (TimeoutError, socket.timeout) as exc:
-                raise TimeoutError(
-                    f"no reply to {cmd!r} within {timeout}s"
-                ) from exc
+                raise TimeoutError(f"no reply to {cmd!r} within {timeout}s") from exc
             if reply.startswith(("@TF:", "@TV:")):
                 self.status_history.append(reply)
                 if pattern is None:
@@ -342,9 +340,7 @@ class JuraClient:
                 return reply
 
     # -- raw helpers ---------------------------------------------------
-    def iter_frames(
-        self, *, until: float | None = None
-    ) -> Iterator[str]:
+    def iter_frames(self, *, until: float | None = None) -> Iterator[str]:
         """Yield every incoming frame as a decoded ASCII string.
 
         ``until`` is an optional absolute deadline (``time.monotonic()``).
@@ -364,7 +360,9 @@ class JuraClient:
                 yield self.conn.recv_str()
 
     # -- structured reads ---------------------------------------------
-    def read_maintenance_counter(self, *, timeout: float = 6.0) -> "MaintenanceCounters":
+    def read_maintenance_counter(
+        self, *, timeout: float = 6.0
+    ) -> "MaintenanceCounters":
         """Read the maintenance counter bank (``@TG:43``)."""
         reply = self.request("@TG:43", match=r"^@tg:43", timeout=timeout)
         return MaintenanceCounters.parse(reply)
@@ -435,9 +433,7 @@ class MaintenanceCounters:
     def parse(cls, reply: str) -> MaintenanceCounters:
         data = _hex_body(reply, "@tg:43")
         if len(data) < 12:
-            raise ValueError(
-                f"@tg:43 payload too short ({len(data)} bytes): {reply!r}"
-            )
+            raise ValueError(f"@tg:43 payload too short ({len(data)} bytes): {reply!r}")
         u = [int.from_bytes(data[i : i + 2], "big") for i in range(0, 12, 2)]
         return cls(
             cleaning=u[0],
@@ -481,9 +477,7 @@ class MaintenancePercent:
     def parse(cls, reply: str) -> MaintenancePercent:
         data = _hex_body(reply, "@tg:C0")
         if len(data) < 3:
-            raise ValueError(
-                f"@tg:C0 payload too short ({len(data)} bytes): {reply!r}"
-            )
+            raise ValueError(f"@tg:C0 payload too short ({len(data)} bytes): {reply!r}")
         return cls(
             cleaning=data[0],
             filter_change=data[1],
@@ -493,8 +487,7 @@ class MaintenancePercent:
 
     def format(self) -> str:
         return (
-            f"cleaning={self.cleaning} filter={self.filter_change} "
-            f"decalc={self.decalc}"
+            f"cleaning={self.cleaning} filter={self.filter_change} decalc={self.decalc}"
         )
 
     def to_dict(self) -> dict[str, object]:

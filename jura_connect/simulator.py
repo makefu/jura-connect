@@ -62,9 +62,9 @@ class SimulatorConfig:
     WRONG_PIN, WRONG_HASH, ABORTED) and edge cases.
     """
 
-    pin: str = ""                       # required PIN; "" disables
-    require_user_accept: bool = False   # set True to simulate the on-machine prompt
-    user_accept_delay: float = 0.0      # how long the simulated user takes to press OK
+    pin: str = ""  # required PIN; "" disables
+    require_user_accept: bool = False  # set True to simulate the on-machine prompt
+    user_accept_delay: float = 0.0  # how long the simulated user takes to press OK
     paired_hashes: dict[str, str] = dataclasses.field(default_factory=dict)
     name: str = "TestMachine"
     machine_type: str = "S8 (simulated)"
@@ -234,9 +234,7 @@ class Simulator:
         b = cmd.encode("ascii")
         for prefix in DESTRUCTIVE_PREFIXES:
             if b.startswith(prefix):
-                log.warning(
-                    "simulator: refusing destructive command %r", cmd
-                )
+                log.warning("simulator: refusing destructive command %r", cmd)
                 return "@an:error"
 
         if cmd == "@HE":
