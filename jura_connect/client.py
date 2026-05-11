@@ -596,14 +596,20 @@ class JuraClient:
                 return reply
             if stored.upper() != value:
                 raise ValueError(
-                    f"setting write for arg={arg}: dongle ACKed "
-                    f"({reply!r}) but the read-back value is "
-                    f"{stored!r}, not {value!r}. Even with the "
-                    f"@TS:01/@TS:00 lock wrapper the write was "
-                    f"silently dropped — this setting may be "
-                    f"read-only on your firmware, the value may be "
-                    f"outside an undocumented range, or the machine "
-                    f"may be in a state that refuses writes."
+                    f"setting write for arg={arg}: dongle replied "
+                    f"{reply!r} and the read-back is still {stored!r} "
+                    f"(we sent {value!r}). On the S8 EB / TT237W "
+                    f"firmware (Kaffeebert), we have not yet found a "
+                    f"wire format the dongle accepts — every "
+                    f"@TM:<arg>,<val><csum> attempt returns @tm:00, "
+                    f"every bank-write @TM:00,FC,<block> attempt "
+                    f"returns @tm:80, and value never changes. The "
+                    f"J.O.E. Android app may use a Bluetooth side "
+                    f"channel for settings writes on this dongle "
+                    f"variant. Until we identify the right path, "
+                    f"settings reads work but writes are effectively "
+                    f"unsupported on TT237W. Issue tracking: "
+                    f"https://github.com/makefu/jura-connect/issues"
                 )
         return reply
 
