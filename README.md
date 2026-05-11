@@ -5,13 +5,8 @@
 A dependency-free Python WiFi interface for Jura coffee machines fitted
 with a **Smart Connect** WiFi dongle. Reverse-engineered from the
 official J.O.E. (Jura Operating Experience) Android app and verified
-end-to-end against a real **S8 EB** running firmware **TT237W V06.11**
-(nicknamed "Kaffeebert" in the test setup).
-
-The code ships as a small Python package plus a Nix flake that runs the
-test-suite as a passthrough build. The test-suite drives the client
-against an in-tree TCP **simulator** that reuses the *same* crypto and
-framing modules — no mocks anywhere.
+end-to-end against a **JURA S8 EB** running firmware **TT237W V06.11**
+("Kaffeebert").
 
 ## Status
 
@@ -19,11 +14,9 @@ framing modules — no mocks anywhere.
 | --- | --- |
 | UDP/51515 broadcast discovery + parser | ✓ ; falls back to TCP-port-sweep on the TT237W firmware which doesn't reply to UDP |
 | Wire framing (`* … \r\n`) and obfuscation cipher | ✓ ; 2 000-input random round-trip + every key value exhaustively tested |
-| `@HP:` handshake (`CORRECT` / `WRONG_PIN` / `WRONG_HASH` / `ABORTED`) | ✓ |
-| Unset-PIN pairing with on-machine confirmation | ✓ ; client surfaces a prompt and waits for the user to press OK |
-| Auth-hash persistence (JSON, 0600) | ✓ |
+| storage of authentication codes | ✓ |
 | Read commands: maintenance counters, maintenance %, machine status / alerts, screen lock/unlock | ✓ |
-| Brewing / writes / maintenance processes | **deliberately not exposed** — destructive |
+| Brewing / writes / maintenance processes | available but require extra attention |
 
 ## Installation
 
