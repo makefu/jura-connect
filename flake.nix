@@ -17,7 +17,7 @@
         # standalone, outside that env, sidesteps the issue.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_connect";
-          version = "0.9.0";
+          version = "0.9.1";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];

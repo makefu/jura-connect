@@ -4,6 +4,21 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-05-11
+
+### Fixed
+- **`setting` read returned a corrupt integer that included the
+  trailing checksum byte.** The dongle's reply for ``@TM:<arg>`` is
+  ``@tm:<arg>,<value_hex><checksum>`` (same ``ByteOperations.d``
+  checksum as the write side); v0.9.0 swallowed the whole tail. The
+  user observed ``setting hardness`` reporting 3581 (=0x0DFD) on a
+  machine actually set to 13 °dH — the body was ``0DFD`` (value
+  ``0D`` + checksum ``FD``). The client now strips the trailing two
+  chars, verifies them against the recomputed checksum, and raises
+  ``ValueError`` on a mismatch so a silently-corrupt value can't
+  slip through. Simulator updated to emit the checksum on read
+  replies; two new regression tests pin both branches.
+
 ## [0.9.0] — 2026-05-11
 
 ### Fixed
