@@ -4,6 +4,78 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-05-11
+
+### Fixed
+- **Status-bit decoding was off by 7 positions per byte.** v0.8.0
+  and earlier extracted alert bits LSB-first within each byte; the
+  J.O.E. Android app's ``Status.a()`` uses MSB-first
+  (``(1 << (7 - i%8)) & bArr[i/8]``). On Kaffeebert's idle frame
+  ``@TF:0004000008000000`` the prior code reported ``no_beans`` +
+  ``cappu_rinse_alert``; the real meaning is ``coffee_ready`` +
+  ``energy_safe``. Every named bit in :data:`_STATUS_BITS` and every
+  per-machine ``AlertDef.bit`` was already correct — only the
+  ``MachineStatus.parse`` byte/bit extraction was wrong.
+
+### Added
+- **``setting`` command — read or write machine settings.** Each
+  profile's ``<MACHINESETTINGS>`` block is parsed into
+  ``MachineProfile.settings`` (``SettingDef`` + ``SettingItem``);
+  reads send ``@TM:<arg>`` and decode the value against the
+  catalogue, writes send ``@TM:<arg>,<val><checksum>`` with the J.O.E.
+  APK's ``ByteOperations.d`` checksum. EF1091 (S8 EB) exposes seven
+  settings: hardness, auto_off, units, language,
+  display_brightness_setting, milk_rinsing, frother_instructions.
+- **Profile-driven input validation.**
+  ``SettingDef.normalise_value`` enforces step-slider range/step
+  (``hardness 99`` → ``99 is outside [1, 30]``), switch/combobox
+  membership (``language klingon`` → ``klingon is not a recognised
+  value. Allowed: german=01, english=02, …``), and accepts either an
+  ITEM name or its raw hex. Writes are dispatched through a
+  *dynamic* destructive gate — ``setting hardness`` (read) is
+  unrestricted, ``setting hardness 18`` (write) needs
+  ``--allow-destructive-commands``.
+- **Conditional-destructive command spec.** ``CommandSpec`` gained
+  ``dynamic_danger: Callable[[args], str | None]`` so one named
+  command can wrap a safe read and a gated write without duplicating
+  the entry. ``Argument`` gained ``optional: bool`` so the
+  ``setting <name> [<value>]`` signature renders correctly in
+  ``--list`` output.
+- **``_settings_checksum`` helper** exposed from
+  ``jura_connect.client`` (Python port of ``ByteOperations.d``) for
+  test-suite and downstream tool use.
+- **New public types** ``SettingDef``, ``SettingItem``.
+
+### Changed
+- ``power-off`` (``@AN:02``) danger string rewritten: the J.O.E.
+  Android app does NOT use this command over WiFi (zero references
+  in the decompiled APK), and live testing on TT237W shows the
+  dongle silently ignores it. The command stays in the registry for
+  completeness and historical UART/Bluetooth compatibility, but the
+  CLI now tells users up front that the firmware likely won't act on
+  it.
+- Simulator's ``DEFAULT_STATUS_PAYLOAD`` changed from the live
+  Kaffeebert frame (``0004000008000000``) to a synthetic frame
+  (``0020000020000000``) that activates one ``info`` (no_beans) and
+  one ``process`` (cleaning_alert) bit, so the test-suite keeps
+  exercising all three severity branches under MSB-first decoding.
+  A new regression test pins ``KAFFEEBERT_IDLE_STATUS_PAYLOAD``
+  (the real frame) decoding to coffee_ready + energy_safe so the
+  v0.9.0 fix can't regress silently.
+- Simulator handles ``@TM:<arg>`` (settings read) and
+  ``@TM:<arg>,<val><checksum>`` (settings write with checksum
+  verification) against a configurable per-profile defaults table.
+
+### Documentation
+- New `docs/PROTOCOL.md` §5.7 documents the settings wire format,
+  checksum algorithm, and the EF1091 settings catalogue.
+- `docs/PROTOCOL.md` §5.4 updated to spell out the MSB-first bit
+  indexing trap.
+- README clarifies that "Kaffeebert" is the WiFi dongle's display
+  name (read via UDP discovery, set via the existing gated
+  ``set-name`` command / ``@HW:82``). There is no separate per-
+  machine display-name field exposed over WiFi.
+
 ## [0.8.0] — 2026-05-11
 
 ### Added
