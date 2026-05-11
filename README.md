@@ -63,10 +63,30 @@ The auth-hash is written to `$XDG_DATA_HOME/jura-connect/credentials.json`
 with `0600` permissions. Override the location with the global
 `--store /path/to.json` flag.
 
-### Use a paired machine
+### Run commands against a paired machine
+
+The CLI exposes a `command` subcommand that takes a *named* read
+command, not a raw hex code. Discover the catalog with:
 
 ```sh
-$ jura-wifi connect --name Kaffeebert --read-info
+$ jura-wifi command --list
+available commands:
+  info                  full read-only snapshot (status + counters + percent)
+  counters              maintenance counters (@TG:43)
+  percent               maintenance percent indicators (@TG:C0)
+  status                parsed status / active alerts (@HU? -> @TF:)
+  lock                  lock the front-panel display (@TS:01)
+  unlock                unlock the front-panel display (@TS:00)
+  mem-read <addr>       read a memory/setting slot (@TM:<addr>); firmware-specific
+  register-read <bank>  read a register bank (@TR:<bank>); firmware-specific
+  raw <frame>           send a verbatim '@…' command; use with care
+```
+
+The same catalogue is reachable from Python as
+`jura_wifi.list_commands()`. Run a command by name:
+
+```sh
+$ jura-wifi command --name Kaffeebert info
 handshake -> CORRECT  (@hp4)
 == machine info ==
   conn-id        : jura-connect-7f31a8c2
@@ -76,24 +96,33 @@ handshake -> CORRECT  (@hp4)
   active alerts  : no_beans
   maintenance    : cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
   maintenance %  : cleaning=80 filter=255 decalc=30
-```
 
-### Issue ad-hoc read commands
+$ jura-wifi command --name Kaffeebert counters
+handshake -> CORRECT  (@hp4)
+cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
 
-```sh
-$ jura-wifi connect --name Kaffeebert --read '@TG:43' --read '@TG:C0' --watch 5
---> @TG:43
-<-- '@tg:4300150001000801580E21005B'
---> @TG:C0
-<-- '@tg:C050FF1E'
+$ jura-wifi command --name Kaffeebert status --watch 5
+handshake -> CORRECT  (@hp4)
+bits=0004000008000000  alerts=no_beans
 watching status for 5.0s ...
 <-- '@TF:0004000008000000'
 <-- '@TF:0004000008000000'
 ```
 
+For one-off advanced use, `raw` echoes any wire command verbatim — use
+sparingly, the destructive commands documented in
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) §5.5 are deliberately not in the
+named registry:
+
+```sh
+$ jura-wifi command --name Kaffeebert raw '@TG:43'
+handshake -> CORRECT  (@hp4)
+@tg:4300150001000801580E21005B
+```
+
 `--watch SECONDS` streams unsolicited `@TF:` (status) and `@TV:`
-(progress) frames; the read parsers and the maintenance helpers all
-just call into the same `JuraClient.request()` / `iter_frames()`.
+(progress) frames; the parsers and the maintenance helpers all just
+call into the same `JuraClient.request()` / `iter_frames()`.
 
 ### List / remove stored credentials
 
@@ -109,7 +138,10 @@ removed 'Kaffeebert' from .../credentials.json
 ## Library API
 
 ```python
-from jura_wifi import JuraClient, CredentialStore, MachineCredentials, discover
+from jura_wifi import (
+    JuraClient, CredentialStore, MachineCredentials,
+    discover, run_named, list_commands,
+)
 
 # Discovery
 for m in discover(timeout=4.0):
@@ -132,13 +164,20 @@ store.put(MachineCredentials(
 ))
 client.close()
 
-# Reconnect later from disk
+# Reconnect later from disk and run named commands
 creds = store.get("Kaffeebert")
 with JuraClient(creds.address, conn_id=creds.conn_id,
                 auth_hash=creds.auth_hash) as c:
+    # Either the high-level helpers …
     info = c.read_machine_info()
     print(info.maintenance_counters)   # MaintenanceCounters(cleaning=21, ...)
     print(info.status.active_alerts)   # ('no_beans',)
+
+    # … or the named-command registry — same API the CLI uses:
+    for spec in list_commands():
+        print(spec.usage(), "—", spec.description)
+    result = run_named(c, "counters")
+    print(result.format())             # cleaning=21 filter=1 decalc=8 …
 ```
 
 ## Tests
@@ -164,7 +203,17 @@ The test-suite covers:
 * every read command and the simulator's destructive-command guardrail
   (`test_reads.py`),
 * the JSON credential round-trip plus a full pair→persist→reconnect
-  workflow (`test_credentials.py`).
+  workflow (`test_credentials.py`),
+* every entry of the named-command registry round-tripped through the
+  simulator, plus error paths (`test_commands.py`),
+* CLI smoke tests for `command --list`, `command info` against the
+  simulator, and credential-store interactions (`test_cli.py`).
+
+## Versioning
+
+This project follows [Semantic Versioning](https://semver.org/). See
+[`CHANGELOG.md`](CHANGELOG.md) for the release history; the current
+version is also exposed as `jura_wifi.__version__` and `jura-wifi --version`.
 
 ## Protocol reference
 

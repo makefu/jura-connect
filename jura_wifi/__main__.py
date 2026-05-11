@@ -5,8 +5,14 @@ Subcommands::
     discover         broadcast for machines on the LAN (TCP fallback)
     probe <ip>       send a unicast UDP scan probe to a known IP
     pair <ip>        run the unset-PIN pairing flow and persist the hash
-    connect <ip>     re-attach with a stored hash, run read commands
+    command <name>   run a named read command against a paired machine
     creds            inspect or remove stored credentials
+
+Named commands (use ``command --list`` to see them, or
+``jura_wifi.commands.list_commands()`` from Python) are defined in
+:mod:`jura_wifi.commands`. Destructive process commands are
+intentionally absent — for those use ``command raw '@…'`` with
+explicit intent.
 
 The pairing hash is written to ``$XDG_DATA_HOME/jura-connect/credentials.json``
 (see :mod:`jura_wifi.credentials`). Pass ``--store`` to override.
@@ -19,13 +25,14 @@ import json
 import sys
 import time
 
+from . import __version__
 from .client import (
     DEFAULT_CONN_ID,
     DEFAULT_PAIR_TIMEOUT,
     HandshakeError,
     JuraClient,
-    MachineInfo,
 )
+from .commands import CommandError, list_commands, run_named
 from .credentials import CredentialStore, MachineCredentials, default_path
 from .discovery import JURA_PORT, discover, probe, scan_tcp
 
@@ -36,6 +43,17 @@ def _resolve_machine(args: argparse.Namespace) -> MachineCredentials | None:
         return None
     store = CredentialStore(getattr(args, "store", None))
     return store.get(args.name)
+
+
+def _split_host_port(addr: str, *, default_port: int = JURA_PORT) -> tuple[str, int]:
+    """Split ``host[:port]`` into ``(host, port)``; only used by the CLI."""
+    if ":" in addr:
+        host, _, port = addr.rpartition(":")
+        try:
+            return host, int(port)
+        except ValueError as exc:
+            raise SystemExit(f"bad address: {addr!r} (expected host or host:port)") from exc
+    return addr, default_port
 
 
 # --------------------------------------------------------------------- #
@@ -61,7 +79,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
             print("no hosts accepted TCP either", file=sys.stderr)
             return 1
         for ip in hits:
-            print(f"tcp/{JURA_PORT} open -> {ip}  (try: jura_wifi pair {ip})")
+            print(f"tcp/{JURA_PORT} open -> {ip}  (try: jura-wifi pair {ip})")
         return 0
     print("no machines responded", file=sys.stderr)
     return 1
@@ -120,49 +138,68 @@ def cmd_pair(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------- #
-# connect (run reads against an already-paired machine)
+# command (run named read commands against an already-paired machine)
 # --------------------------------------------------------------------- #
 
 
-def cmd_connect(args: argparse.Namespace) -> int:
+def _print_command_list() -> None:
+    specs = list_commands()
+    width = max(len(s.usage()) for s in specs)
+    print("available commands:")
+    for s in specs:
+        print(f"  {s.usage().ljust(width)}  {s.description}")
+
+
+def cmd_command(args: argparse.Namespace) -> int:
+    if args.list:
+        _print_command_list()
+        return 0
+    if not args.command:
+        print(
+            "command name required (use --list to see all)",
+            file=sys.stderr,
+        )
+        return 2
+
     creds = _resolve_machine(args)
     address = args.address or (creds.address if creds else None)
     conn_id = args.conn_id or (creds.conn_id if creds else DEFAULT_CONN_ID)
     auth_hash = args.auth_hash or (creds.auth_hash if creds else "")
     if not address:
-        print("no address: pass <address> or set up --name first", file=sys.stderr)
+        print("no address: pass --address or --name", file=sys.stderr)
         return 2
     if not auth_hash:
         print(
-            "no auth-hash: run `jura_wifi pair` first or pass --auth-hash",
+            "no auth-hash: run 'jura-wifi pair' first or pass --auth-hash",
             file=sys.stderr,
         )
         return 2
 
-    client = JuraClient(address, conn_id=conn_id, auth_hash=auth_hash)
+    host, port = _split_host_port(address)
+    client = JuraClient(host, port=port, conn_id=conn_id, auth_hash=auth_hash)
     try:
-        result = client.connect(timeout=args.handshake_timeout)
+        handshake = client.connect(timeout=args.handshake_timeout)
     except HandshakeError as exc:
         print(f"connect failed: {exc}", file=sys.stderr)
         client.close()
         return 2
-    print(f"handshake -> {result.state}  ({result.code})")
-    if result.state != "CORRECT":
+    print(f"handshake -> {handshake.state}  ({handshake.code})")
+    if handshake.state != "CORRECT":
         client.close()
         return 2
 
     try:
-        if args.read_info:
-            info = client.read_machine_info(timeout=args.cmd_timeout)
-            _print_info(info)
-        for raw in args.read or []:
-            print(f"--> {raw}")
-            try:
-                reply = client.request(raw, timeout=args.cmd_timeout)
-            except TimeoutError as exc:
-                print(f"  timeout: {exc}", file=sys.stderr)
-                continue
-            print(f"<-- {reply!r}")
+        try:
+            result = run_named(
+                client, args.command, args.args, timeout=args.cmd_timeout
+            )
+        except CommandError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except TimeoutError as exc:
+            print(f"timeout: {exc}", file=sys.stderr)
+            return 2
+        print(result.format())
         if args.watch:
             print(f"watching status for {args.watch:.1f}s ...")
             until = time.monotonic() + args.watch
@@ -171,28 +208,6 @@ def cmd_connect(args: argparse.Namespace) -> int:
     finally:
         client.close()
     return 0
-
-
-def _print_info(info: MachineInfo) -> None:
-    print("== machine info ==")
-    print(f"  conn-id        : {info.conn_id}")
-    print(f"  handshake state: {info.handshake_state}")
-    print(f"  auth-hash      : {info.auth_hash[:16]}...")
-    s = info.status
-    alerts = ", ".join(s.active_alerts) or "(none)"
-    print(f"  status bits    : {s.raw.hex().upper()}")
-    print(f"  active alerts  : {alerts}")
-    mc = info.maintenance_counters
-    print(
-        f"  maintenance    : cleaning={mc.cleaning} filter={mc.filter_change} "
-        f"decalc={mc.decalc} cappu_rinse={mc.cappu_rinse} "
-        f"coffee_rinse={mc.coffee_rinse} cappu_clean={mc.cappu_clean}"
-    )
-    mp = info.maintenance_percent
-    print(
-        f"  maintenance %  : cleaning={mp.cleaning} filter={mp.filter_change} "
-        f"decalc={mp.decalc}"
-    )
 
 
 # --------------------------------------------------------------------- #
@@ -230,7 +245,12 @@ def cmd_creds(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="jura_wifi")
+    p = argparse.ArgumentParser(prog="jura-wifi")
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     p.add_argument(
         "--store",
         default=str(default_path()),
@@ -277,31 +297,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pa.set_defaults(func=cmd_pair)
 
-    c = sub.add_parser(
-        "connect", help="re-attach using a stored hash; run read commands"
+    cm = sub.add_parser(
+        "command",
+        help="run a named read command (info, counters, status, ...)",
     )
-    c.add_argument("address", nargs="?")
-    c.add_argument(
+    cm.add_argument("command", nargs="?", help="command name; --list shows the catalog")
+    cm.add_argument("args", nargs="*", help="positional arguments for the command")
+    cm.add_argument(
+        "--list", action="store_true",
+        help="list available commands with their arguments and exit",
+    )
+    cm.add_argument(
         "--name",
         help="nickname to look up in the credential store",
     )
-    c.add_argument("--conn-id")
-    c.add_argument("--auth-hash")
-    c.add_argument("--handshake-timeout", type=float, default=15.0)
-    c.add_argument(
-        "--read-info", action="store_true",
-        help="fetch status, maintenance counters and maintenance percent",
+    cm.add_argument(
+        "--address", "-a",
+        help="machine IP (overrides --name lookup)",
     )
-    c.add_argument(
-        "--read", action="append",
-        help="extra read command to send (repeat). e.g. --read '@TG:43'",
-    )
-    c.add_argument("--cmd-timeout", type=float, default=6.0)
-    c.add_argument(
+    cm.add_argument("--conn-id")
+    cm.add_argument("--auth-hash")
+    cm.add_argument("--handshake-timeout", type=float, default=15.0)
+    cm.add_argument("--cmd-timeout", type=float, default=6.0)
+    cm.add_argument(
         "--watch", type=float, default=0.0,
-        help="after reads, listen for N seconds of unsolicited frames",
+        help="after the command, listen N seconds for unsolicited frames",
     )
-    c.set_defaults(func=cmd_connect)
+    cm.set_defaults(func=cmd_command)
 
     cr = sub.add_parser("creds", help="inspect or delete stored credentials")
     cr.add_argument("--json", action="store_true")

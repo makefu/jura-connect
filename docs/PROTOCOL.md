@@ -380,9 +380,10 @@ machine.
 | `jura_wifi/protocol.py`      | frame writer/reader on top of `crypto` |
 | `jura_wifi/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
 | `jura_wifi/client.py`        | `JuraClient` + structured read results + handshake state machine |
+| `jura_wifi/commands.py`      | named-command registry (`info` / `counters` / `mem-read` / …) used by CLI and library |
 | `jura_wifi/credentials.py`   | XDG-located JSON persistence (atomic write, 0600) |
 | `jura_wifi/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
-| `jura_wifi/__main__.py`      | CLI (`discover` / `probe` / `pair` / `connect` / `creds`) |
+| `jura_wifi/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds`) |
 | `tests/`                     | pytest suite — driven through the simulator end-to-end |
 | `flake.nix`                  | dev shell + package + checks (passthrough pytest) |
 
