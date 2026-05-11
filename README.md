@@ -363,15 +363,26 @@ workflow's `environment.name`.
 ### Manual fallback (no CI)
 
 If GitHub Actions is unavailable, the same artefacts can be built
-and uploaded by hand:
+and uploaded by hand. Use `python -m build` (the pypa standard) plus
+twine — works on any Python 3.11+:
 
 ```sh
-nix shell nixpkgs#python313 nixpkgs#python313Packages.build \
-  nixpkgs#twine \
-  --command bash -c '
+python -m pip install --upgrade build twine
+python -m build --sdist --wheel --outdir dist/
+twine check dist/*
+twine upload dist/*    # prompts for credentials
+```
+
+Or as a one-shot `nix-shell` if you'd rather not touch the system
+Python:
+
+```sh
+nix-shell -p 'python313.withPackages(ps: [ ps.build ])' \
+          -p python313Packages.twine \
+          --run '
     python -m build --sdist --wheel --outdir dist/
     twine check dist/*
-    twine upload dist/*    # prompts for credentials
+    twine upload dist/*
   '
 ```
 

@@ -37,14 +37,26 @@ jobs:
       - name: nix build (ruff + ty + pytest)
         run: nix build --print-build-logs .#default
 
-      # Build the distribution artefacts outside the Nix store so we
-      # can upload them directly with pypa/gh-action-pypi-publish.
-      # withPackages keeps `build` on the same Python's sys.path —
-      # two separate `nix shell` derivations would not compose.
+      # Build the distribution artefacts with the pypa-recommended
+      # `python -m build` pattern. Stepping outside Nix here is
+      # deliberate: the GH Actions runner doesn't ship NIX_PATH, and
+      # the build step is a pure Python operation that doesn't need
+      # the flake's pinned interpreter. QA was already gated above.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Build sdist + wheel
         run: |
-          nix-shell -p 'python313.withPackages(ps: [ ps.build ])' \
-            --run 'python -m build --sdist --wheel --outdir dist/'
+          python -m pip install --upgrade build
+          python -m build --sdist --wheel --outdir dist/
+
+      - name: Show distribution metadata
+        run: |
+          ls -l dist/
+          python -m pip install --upgrade twine
+          twine check dist/*
 
       - name: Upload artefacts
         uses: actions/upload-artifact@v4
