@@ -25,6 +25,15 @@ When code reality differs from the doc, fix the doc — don't paper
 over the code. Numbers there are observed, not guessed; if a
 behaviour surprises you, suspect a firmware difference first.
 
+Concrete example of "firmware difference first": the S8 EB / EF1091
+reports 20 PMode slots via `@TM:50` but answers `@tm:C2` for every
+`@TM:42,<n>`. That looked like a parser bug until we checked the
+machine's XML and saw EF1091 has no `<PROGRAMMODE>` section at all.
+`jura_connect.profile.MachineProfile` loads the right XML per
+machine; pass `--machine-type EF1091` (or store it in the credential)
+so brew counters, alert names, and pmode behaviour line up with the
+physical machine instead of the EF536 baseline.
+
 ## 2. Destructive commands can physically damage the machine
 
 These prefixes change the machine's state — start cleaning cycles
@@ -167,7 +176,7 @@ trusted-publishing.
 
 ## 9. When in doubt
 
-* The simulator + 319 tests catch most regressions in seconds; lean
+* The simulator + 340 tests catch most regressions in seconds; lean
   on them.
 * `gh search code "<thing> repo:Jutta-Proto/protocol-bt-cpp"`
   finds the Bluetooth-flavour equivalent of most protocol questions.

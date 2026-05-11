@@ -54,6 +54,12 @@ class MachineCredentials:
     conn_id: str
     auth_hash: str
     paired_at: str | None = None
+    # EF code of the machine variant (e.g. "EF1091" for the S8 EB).
+    # When None, callers fall through to a generic profile. Populated
+    # at pair-time via auto-detect or the explicit --machine-type flag,
+    # and updatable after the fact via the ``set-machine-type``
+    # subcommand.
+    machine_type: str | None = None
 
     def to_dict(self) -> dict[str, str | None]:
         return {
@@ -61,6 +67,7 @@ class MachineCredentials:
             "conn_id": self.conn_id,
             "auth_hash": self.auth_hash,
             "paired_at": self.paired_at,
+            "machine_type": self.machine_type,
         }
 
 
@@ -92,32 +99,44 @@ class CredentialStore:
             raise ValueError(f"{self.path}: 'machines' is not an object")
         return machines
 
-    def get(self, name: str) -> MachineCredentials | None:
-        entries = self._read()
-        entry = entries.get(name)
-        if entry is None:
-            return None
+    def _entry_to_creds(
+        self, name: str, entry: dict[str, str | None]
+    ) -> MachineCredentials:
         return MachineCredentials(
             name=name,
             address=str(entry.get("address", "")),
             conn_id=str(entry.get("conn_id", "")),
             auth_hash=str(entry.get("auth_hash", "")),
             paired_at=entry.get("paired_at"),
+            machine_type=entry.get("machine_type"),
         )
 
+    def get(self, name: str) -> MachineCredentials | None:
+        entries = self._read()
+        entry = entries.get(name)
+        if entry is None:
+            return None
+        return self._entry_to_creds(name, entry)
+
     def entries(self) -> list[MachineCredentials]:
-        out: list[MachineCredentials] = []
-        for name, entry in sorted(self._read().items()):
-            out.append(
-                MachineCredentials(
-                    name=name,
-                    address=str(entry.get("address", "")),
-                    conn_id=str(entry.get("conn_id", "")),
-                    auth_hash=str(entry.get("auth_hash", "")),
-                    paired_at=entry.get("paired_at"),
-                )
-            )
-        return out
+        return [
+            self._entry_to_creds(name, entry)
+            for name, entry in sorted(self._read().items())
+        ]
+
+    def set_machine_type(self, name: str, machine_type: str | None) -> bool:
+        """Update the stored machine_type for one paired machine.
+
+        Returns ``True`` on success, ``False`` if no such entry. Used
+        by the ``set-machine-type`` CLI subcommand to retro-fit a
+        profile onto an existing pairing without re-pairing.
+        """
+        entries = self._read()
+        if name not in entries:
+            return False
+        entries[name]["machine_type"] = machine_type
+        self._write(entries)
+        return True
 
     # -- write ---------------------------------------------------------
     def put(self, creds: MachineCredentials) -> None:

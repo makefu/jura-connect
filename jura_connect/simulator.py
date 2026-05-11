@@ -75,7 +75,8 @@ def _default_product_counters() -> list[int]:
     slots[0x2C] = 1  # unnamed slot
     slots[0x2E] = 210  # flat white
     slots[0x30] = 20  # espresso doppio
-    slots[0x31] = 1  # unnamed slot
+    slots[0x31] = 1  # 2 espressi (EF1091 code)
+    slots[0x36] = 10  # 2 coffee (EF1091 code)
     return slots
 
 
@@ -112,6 +113,14 @@ class SimulatorConfig:
     product_counters: list[int] = dataclasses.field(
         default_factory=_default_product_counters
     )
+    # @TM:50 reply bytes (per-kind slot counts; summed = total slots).
+    # Default matches Kaffeebert: 5 kinds × 4 slots = 20 reported.
+    pmode_slot_bytes: bytes = bytes.fromhex("0404040404")
+    # @TM:42,<slot> → product code at that slot. None entries (or
+    # missing slots) cause the simulator to answer "@tm:C2" mirroring
+    # the real EF1091 firmware that reports slots but doesn't expose
+    # them over WiFi.
+    pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
 
 
 class Simulator:
@@ -291,6 +300,22 @@ class Simulator:
         if cmd == "@TS:00":
             self.config.screen_locked = False
             return "@ts"
+        if cmd == "@TM:50":
+            # Per-kind slot counts. Append a fake checksum byte so the
+            # client's parser sees a well-formed reply (the checksum
+            # algorithm is opaque; the client doesn't currently verify).
+            body = self.config.pmode_slot_bytes.hex().upper()
+            return f"@tm:50,{body}7A"
+        if cmd.startswith("@TM:42,"):
+            try:
+                slot = int(cmd[len("@TM:42,") :], 16)
+            except ValueError:
+                return "@tm:C2"
+            product = self.config.pmode_slots.get(slot)
+            if product is None:
+                return "@tm:C2"
+            # Real reply format: @tm:42,<slot>,<product_code>...<checksum>
+            return f"@tm:42,{slot:02X},{product:02X}"
         if cmd.startswith("@TM:"):
             arg = cmd[4:]
             # Read-only memory read -- echo address as a synthetic "@tm:<hi>"

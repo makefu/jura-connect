@@ -340,6 +340,66 @@ def test_cli_without_json_still_uses_stdout(sim, tmp_path, capsys) -> None:
     assert "cleaning=21" in captured.out
 
 
+def test_machine_types_lists_friendly_names(capsys) -> None:
+    rc = main(["machine-types"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "S8 (EB)" in out
+    assert "EF1091" in out
+
+
+def test_machine_types_filter(capsys) -> None:
+    rc = main(["machine-types", "--filter", "S8 (EB)"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "EF1091" in out
+    assert "EF1151" in out
+
+
+def test_machine_types_json_output(capsys) -> None:
+    rc = main(["machine-types", "--filter", "S8 (EB)", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    codes = {row["ef_code"] for row in payload}
+    assert {"EF1091", "EF1151"} <= codes
+
+
+def test_set_machine_type_updates_existing_pairing(sim, tmp_path, capsys) -> None:
+    host, port, store_path, _h = _setup_paired_simulator(sim, tmp_path)
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "set-machine-type",
+            "--name",
+            "Sim",
+            "EF1091",
+        ]
+    )
+    assert rc == 0
+    assert "EF1091" in capsys.readouterr().out
+    from jura_connect.credentials import CredentialStore
+
+    creds = CredentialStore(store_path).get("Sim")
+    assert creds is not None
+    assert creds.machine_type == "EF1091"
+
+
+def test_set_machine_type_rejects_unknown_code(tmp_path, capsys) -> None:
+    rc = main(
+        [
+            "--store",
+            str(tmp_path / "x.json"),
+            "set-machine-type",
+            "--name",
+            "Whatever",
+            "EF_NOPE",
+        ]
+    )
+    assert rc == 2
+    assert "unknown machine type" in capsys.readouterr().err
+
+
 def test_cli_refuses_destructive_raw_payload_without_flag(
     sim, tmp_path, capsys
 ) -> None:

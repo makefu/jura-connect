@@ -35,6 +35,14 @@ from .client import (
 from .commands import CommandError, DestructiveCommandError, list_commands, run_named
 from .credentials import CredentialStore, MachineCredentials, default_path
 from .discovery import JURA_PORT, discover, probe, scan_tcp
+from .profile import (
+    MachineProfile,
+    known_machine_names,
+    list_profile_codes,
+    load_profile,
+    lookup_by_article_number,
+    search_by_friendly_name,
+)
 
 
 def _resolve_machine(args: argparse.Namespace) -> MachineCredentials | None:
@@ -101,6 +109,31 @@ def cmd_probe(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------- #
 
 
+def _resolve_machine_type(explicit: str | None, address: str) -> tuple[str | None, str]:
+    """Pick the EF code for a freshly paired machine.
+
+    Returns ``(code, source)`` where ``source`` describes how the code
+    was chosen ("explicit", "discovery", "unknown"). The explicit flag
+    wins; otherwise we attempt a UDP probe of the address and look the
+    article number up in JOE_MACHINES.TXT. TT237W firmware doesn't
+    reply to unicast UDP, so on the S8 EB ``--machine-type`` is the
+    practical path.
+    """
+    if explicit:
+        return explicit, "explicit"
+    host, _, _ = address.partition(":")
+    try:
+        m = probe(host, timeout=2.0)
+    except Exception:  # noqa: BLE001
+        m = None
+    if m is None:
+        return None, "unknown"
+    entry = lookup_by_article_number(m.article_number)
+    if entry is None:
+        return None, "unknown"
+    return entry.ef_code, "discovery"
+
+
 def cmd_pair(args: argparse.Namespace) -> int:
     store = CredentialStore(args.store)
     conn_id = args.conn_id or JuraClient.random_conn_id()
@@ -127,11 +160,31 @@ def cmd_pair(args: argparse.Namespace) -> int:
         )
         client.close()
         return 0
+    machine_type, source = _resolve_machine_type(args.machine_type, args.address)
+    if machine_type:
+        try:
+            load_profile(machine_type)
+        except KeyError:
+            print(
+                f"warning: machine type {machine_type!r} not in the bundled "
+                "registry; storing it anyway. Use `jura-connect machine-types` "
+                "to see known codes.",
+                file=sys.stderr,
+            )
+        print(f"machine type   : {machine_type}  ({source})")
+    else:
+        print(
+            "machine type   : (unknown — TT237W firmware doesn't answer UDP "
+            "discovery; set it with `jura-connect set-machine-type --name "
+            f"{args.name} <EF_code>` after pairing)",
+            file=sys.stderr,
+        )
     creds = MachineCredentials(
         name=args.name,
         address=args.address,
         conn_id=conn_id,
         auth_hash=result.new_hash,
+        machine_type=machine_type,
     )
     store.put(creds)
     print(f"saved credentials for {args.name!r} -> {store.path}")
@@ -195,7 +248,24 @@ def cmd_command(args: argparse.Namespace) -> int:
         return 2
 
     host, port = _split_host_port(address)
-    client = JuraClient(host, port=port, conn_id=conn_id, auth_hash=auth_hash)
+    machine_type = args.machine_type or (creds.machine_type if creds else None)
+    profile: MachineProfile | None = None
+    if machine_type:
+        try:
+            profile = load_profile(machine_type)
+        except KeyError:
+            print(
+                f"warning: machine type {machine_type!r} not in registry; "
+                "falling back to the EF536 baseline.",
+                file=sys.stderr,
+            )
+    client = JuraClient(
+        host,
+        port=port,
+        conn_id=conn_id,
+        auth_hash=auth_hash,
+        profile=profile,
+    )
     try:
         handshake = client.connect(timeout=args.handshake_timeout)
     except HandshakeError as exc:
@@ -264,10 +334,103 @@ def cmd_creds(args: argparse.Namespace) -> int:
         return 0
     print(f"# {store.path}")
     for r in rows:
+        mtype = r.machine_type or "(unset)"
         print(
             f"{r.name:20s}  {r.address:15s}  conn-id={r.conn_id}  "
-            f"hash={r.auth_hash[:16]}...  paired_at={r.paired_at}"
+            f"hash={r.auth_hash[:16]}...  type={mtype}  paired_at={r.paired_at}"
         )
+    return 0
+
+
+# --------------------------------------------------------------------- #
+# set-machine-type
+# --------------------------------------------------------------------- #
+
+
+def cmd_set_machine_type(args: argparse.Namespace) -> int:
+    store = CredentialStore(args.store)
+    try:
+        load_profile(args.machine_type)
+    except KeyError:
+        print(
+            f"unknown machine type {args.machine_type!r}. Use "
+            "`jura-connect machine-types` to see known codes.",
+            file=sys.stderr,
+        )
+        return 2
+    if not store.set_machine_type(args.name, args.machine_type):
+        print(
+            f"{args.name!r} not found in {store.path}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"set {args.name!r} machine type to {args.machine_type} -> {store.path}")
+    return 0
+
+
+# --------------------------------------------------------------------- #
+# machine-types — list known EF codes / friendly names
+# --------------------------------------------------------------------- #
+
+
+def cmd_machine_types(args: argparse.Namespace) -> int:
+    if args.filter:
+        rows = search_by_friendly_name(args.filter)
+        if not rows:
+            print(
+                f"no machines match {args.filter!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "article_number": r.article_number,
+                            "friendly_name": r.friendly_name,
+                            "ef_code": r.ef_code,
+                            "type_id": r.type_id,
+                        }
+                        for r in rows
+                    ],
+                    indent=2,
+                )
+            )
+            return 0
+        print(f"# matches for {args.filter!r}:")
+        for r in rows:
+            print(f"  {r.article_number:>6d}  {r.friendly_name:30s}  {r.ef_code}")
+        return 0
+
+    names = known_machine_names()
+    bundled = set(list_profile_codes())
+    if args.json:
+        print(
+            json.dumps(
+                [
+                    {
+                        "friendly_name": fn,
+                        "ef_code": ef,
+                        "bundled_profile": ef in bundled,
+                    }
+                    for fn, ef in names
+                ],
+                indent=2,
+            )
+        )
+        return 0
+    print(
+        f"# {len(names)} known machines ({len(bundled)} with bundled XML "
+        "profiles). Use --filter to narrow."
+    )
+    for friendly, ef in names:
+        marker = " " if ef in bundled else "?"
+        print(f"  {marker}  {friendly:30s}  {ef}")
+    print(
+        "\n? = no bundled XML profile (status / product names will fall back "
+        "to the EF536 baseline)."
+    )
     return 0
 
 
@@ -334,6 +497,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PAIR_TIMEOUT,
         help="max time to wait for user to press OK on the machine",
     )
+    pa.add_argument(
+        "--machine-type",
+        help=(
+            "EF code of the machine variant (e.g. 'EF1091' for the S8 EB). "
+            "Without this flag the pair flow attempts UDP discovery to "
+            "auto-detect, which only works on older firmwares — set it "
+            "explicitly on TT237W. See `jura-connect machine-types`."
+        ),
+    )
     pa.set_defaults(func=cmd_pair)
 
     cm = sub.add_parser(
@@ -358,6 +530,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cm.add_argument("--conn-id")
     cm.add_argument("--auth-hash")
+    cm.add_argument(
+        "--machine-type",
+        help=(
+            "EF code overriding the stored credential's machine_type "
+            "(see `jura-connect machine-types`)"
+        ),
+    )
     cm.add_argument("--handshake-timeout", type=float, default=15.0)
     cm.add_argument("--cmd-timeout", type=float, default=6.0)
     cm.add_argument(
@@ -393,6 +572,28 @@ def build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--json", action="store_true")
     cr.add_argument("--delete", metavar="NAME", help="remove the entry for NAME")
     cr.set_defaults(func=cmd_creds)
+
+    smt = sub.add_parser(
+        "set-machine-type",
+        help="retro-fit a machine_type onto an existing paired machine",
+    )
+    smt.add_argument("--name", required=True, help="nickname in the credential store")
+    smt.add_argument(
+        "machine_type",
+        help="EF code, e.g. EF1091 (S8 EB). See `machine-types`.",
+    )
+    smt.set_defaults(func=cmd_set_machine_type)
+
+    mt = sub.add_parser(
+        "machine-types",
+        help="list known Jura machines and their EF codes",
+    )
+    mt.add_argument(
+        "--filter",
+        help="case-insensitive substring filter on the friendly name (e.g. 'S8')",
+    )
+    mt.add_argument("--json", action="store_true")
+    mt.set_defaults(func=cmd_machine_types)
 
     return p
 

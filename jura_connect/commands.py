@@ -217,6 +217,10 @@ def _r_brews(_spec, client, _args, timeout):
     return client.read_product_counters(timeout_per_page=timeout)
 
 
+def _r_pmode(_spec, client, _args, timeout):
+    return client.read_pmode_slots(timeout=timeout)
+
+
 def _r_lock(_spec, client, _args, _timeout):
     return client.lock_screen()
 
@@ -354,6 +358,12 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="per-product brew counters (@TR:32 paginated; 16 pages)",
         arguments=(),
         runner=_r_brews,
+    ),
+    CommandSpec(
+        name="pmode",
+        description="programmable-mode slots (@TM:50 + @TM:42); empty on the S8 EB",
+        arguments=(),
+        runner=_r_pmode,
     ),
     CommandSpec(
         name="lock",

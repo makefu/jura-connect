@@ -18,6 +18,14 @@ jura-connect = "jura_connect.__main__:main"
 [tool.setuptools.packages.find]
 include = ["jura_connect*"]
 
+[tool.setuptools.package-data]
+# The MachineProfile registry loads these on demand to make
+# alert names and product codes profile-aware. The bundle is the
+# verbatim set of XMLs the J.O.E. APK ships, plus the article-number
+# -> EF code map.
+jura_connect = ["data/JOE_MACHINES.TXT", "data/xml/*/*.xml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+

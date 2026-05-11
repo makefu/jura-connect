@@ -1,0 +1,1035 @@
+<?xml version="1.2" encoding="UTF-8" standalone="yes" ?>
+<JOE Version="2" Group="EF_MASTER" dated="14.05.2025" xmlns="http://www.top-tronic.com" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.top-tronic.com/ joe_control.xsd">
+    <!-- Only Products defined in the PRODUCTS list are displayed in the App / Statistics / Exported CSV File. If a Product is not defined, it will also not show up in the statistics! -->
+    <PRODUCTS>
+        <!--todo when creating a new xml: 
+		-check products,
+		-change parameter PosIdle/PosRondel/PosCSV,
+		-check parameter ProductSettings,
+		-check parameter Active,
+		-check parameter preselection,
+		-check doubles for strokes,
+		-check preselection of doubles
+		-check defaults
+	-->
+        <!-- TOTALCOUNTER is only used for statistics. Needed to display the total counter in the list (as we only display Products from XML File in the list) -->
+        <TOTALCOUNTER Code="00" Name="Total Products" Text="29" PosCSV="1"/>
+        <!-- PRODUCT
+        Definitions:
+        Code: Product code used when producing the Product
+        Name: Used for identifying in the XML File (not really used in the Apps)
+        Text: Name displayed in the App (translated) - needs to be a Integer
+        P_Kind: One of: C (coffee), M (milk), CM (Coffee + Milk), P (Powder) or T (Tea / Water). Used for Blocking Products of special kind
+        DoubleProduct: If this Product is a Double Product - normally false for defined Products.
+        PictureIdle: Default Picture used on Idle Screen for given Product
+        PictureProgress: Image used for Progress during Intake. Smalles "PictureProgressFrom" up to highest found "PictureProgressTo" are added for available names
+        PieChart: Same as P_Kind but only used for Statistics to show in pie chart
+        PosIdle: Position on Idle. Smaller means it will appear first.
+        PosRondel: Position in Rondel when adding product
+        PosCSV: Position in Statistics / Exported CSV
+        ProductSettings: If Product Settings are available
+        Active: If Product is active or not - if it is not active, the Product should not be shown in the App. (i.E. if needed for Statistics if i remember right)
+        -->
+        <PRODUCT Code="02" Name="Espresso" Text="9" P_Kind="C" DoubleProduct="false" PictureIdle="espresso_1.png" PictureProgress="espresso_1_" PieChart="C" PosIdle="2" PosRondel="2" PosCSV="3" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="12" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="04">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+			<!--GRINDER_FREENESS Text="388" Argument="F17" Default="40">
+                <ITEM Name="0" Value="10" Text="383"/>
+                <ITEM Name="1" Value="20" Text="383"/>
+                <ITEM Name="2" Value="30" Text="384"/>
+                <ITEM Name="3" Value="40" Text="385"/>
+                <ITEM Name="4" Value="50" Text="386"/>
+                <ITEM Name="5" Value="60" Text="387"/>
+                <ITEM Name="6" Value="70" Text="387"/>
+            </GRINDER_FREENESS-->
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08" ProgressAdjust="39">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="45" Min="15" Max="80" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10" />
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="03" Name="Coffee" Text="10" P_Kind="C" DoubleProduct="false" PictureIdle="kaffee_1.png" PictureProgress="kaffee_1_" PieChart="C" PosIdle="3" PosRondel="3" PosCSV="4" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="13" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05" ProgressAdjust="39">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="100" Min="25" Max="240" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Text="31" Value="01"/>
+                <ITEM Name="High" Text="32" Value="02"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="04" Name="Cappuccino" Text="11" P_Kind="CM" DoubleProduct="false" PictureIdle="cappuccino_1.png" PictureProgress="cappuccino_1_" PieChart="M" PosIdle="5" PosRondel="5" PosCSV="5" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="14" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08" ProgressAdjust="31">
+                <ITEM Name="1" Value="01" Text="54"/>
+                <ITEM Name="2" Value="02" Text="55"/>
+                <ITEM Name="3" Value="03" Text="56"/>
+                <ITEM Name="4" Value="04" Text="57"/>
+                <ITEM Name="5" Value="05" Text="57"/>
+                <ITEM Name="6" Value="06" Text="57"/>
+                <ITEM Name="7" Value="07" Text="57"/>
+                <ITEM Name="8" Value="08" Text="57"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="60" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="07" PictureProgressTo="19"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="14" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="06"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="05" Name="Milkcoffee" Text="12" P_Kind="CM" DoubleProduct="false" PictureIdle="milchkaffee_1.png" PictureProgress="milchkaffee_1_" PieChart="M" PosIdle="7" PosRondel="6" PosCSV="6" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="15" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05" ProgressAdjust="31">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="90" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="00" PictureProgressTo="08"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="3" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="02"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="7" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="09" PictureProgressTo="10"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="06" Name="Espresso Macchiato" Text="53" P_Kind="CM" DoubleProduct="false" PictureIdle="espresso_macchiato_1.png" PictureProgress="espresso_macchiato_1_" PieChart="M" PosIdle="5" PosRondel="5" PosCSV="7" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="16" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="05">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="25" Min="15" Max="80" Step="5" ProgressAdjust="37" PictureProgressFrom="03" PictureProgressTo="10"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="3" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="06"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="07" Name="Latte Macchiato" Text="13" P_Kind="CM" DoubleProduct="false" PictureIdle="latte_macchiato_long_1.png" PictureProgress="latte_macchiato_long_1_" PieChart="M" PosIdle="6" PosRondel="6" PosCSV="8" ProductSettings="true" Active="true">
+                        <!-- Used for Prefilling Idle Screen (not compatible with the 4-Worlds concept, i.e. there may not be any WORLD defined in the MACHINEMANIFEST) -->
+            <IDLE_SCREEN>
+                <!-- Every JOE_PRODUCT will be "converted" to a Product on Idle Screen with activated Preselection (combinations) -->
+                <!-- Example: The Cappuccino will appear 3 times on the Idle Screen -->
+                <!-- 1x without any activated preselects -->
+                <!-- 1x with XL activated -->
+                <JOE_PRODUCT double="false" powder="false" coldbrew="false" XL="false"/>
+                <JOE_PRODUCT double="false" powder="false" coldbrew="false" XL="true"/>
+            </IDLE_SCREEN>
+			<PRESELECTION coldbrew="true" XL="true" double="17" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08" ProgressAdjust="31">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="45" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="20" PictureProgressTo="30"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="22" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="11" PictureProgressTo="19"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="4" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_BREAK Text="101" Argument="F11" Value="20" Min="0" Max="60" Step="1" ProgressAdjust="33" TextUnit="282"/>
+        </PRODUCT>
+        <PRODUCT Code="08" Name="Milk Foam" Text="52" P_Kind="M" DoubleProduct="false" PictureIdle="milchschaum_long_1.png" PictureProgress="milchschaum_long_1_" PieChart="M" PosIdle="15" PosRondel="16" PosCSV="9" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="18" powder="false"/>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="10" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="20"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="0" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="0A" Name="Milk Portion" Text="14" P_Kind="M" DoubleProduct="false" PictureIdle="milchportion_long_1.png" PictureProgress="milchportion_long_1_" PieChart="M" PosIdle="11" PosRondel="11" PosCSV="10" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="1A" powder="false"/>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="0" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="02"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="20" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="03" PictureProgressTo="20"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="0C" Name="Pot" Text="15" P_Kind="C" DoubleProduct="false" PictureIdle="kaffeekanne.png" PictureProgress="kaffeekanne_" PieChart="C" PosIdle="11" PosRondel="12" PosCSV="11" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="false" XL="false" double="00" powder="false"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05" ProgressAdjust="39">
+                <ITEM Name="1" Value="01" Text="54"/>
+                <ITEM Name="2" Value="02" Text="55"/>
+                <ITEM Name="3" Value="03" Text="56"/>
+                <ITEM Name="4" Value="04" Text="57"/>
+                <ITEM Name="5" Value="05" Text="57"/>
+                <ITEM Name="6" Value="06" Text="57"/>
+                <ITEM Name="7" Value="07" Text="57"/>
+                <ITEM Name="8" Value="08" Text="57"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="70" Min="25" Max="240" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <BYPASS Text="103" Argument="F10" Value="50" Min="0" Max="240" Step="5" ProgressAdjust="41"/>
+            <STROKE Text="102" Argument="F8" Value="3" Min="1" Max="5" Step="1"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="0D" Name="Hotwater Portion" Text="16" P_Kind="T" DoubleProduct="false" PictureIdle="heisswasser_long.png" PictureProgress="heisswasser_long_" PieChart="T" PosIdle="9" PosRondel="9" PosCSV="12" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="false" XL="false" double="00" powder="false"/>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="220" Min="25" Max="300" Step="5" ProgressAdjust="41" PictureProgressFrom="00" PictureProgressTo="20"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="28" Name="Americano" Text="77" P_Kind="C" DoubleProduct="false" PictureIdle="cafe_barista_1.png" PictureProgress="cafe_barista_1_" PieChart="C" PosIdle="11" PosRondel="3" PosCSV="13" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="38" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <!-- Grind consistency 0-6 def:2-->
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="70" Min="25" Max="240" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <BYPASS Text="103" Argument="F10" Value="50" Min="0" Max="240" Step="5" ProgressAdjust="41"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="29" Name="Lungo" Text="408" P_Kind="C" DoubleProduct="false" PictureIdle="lungo_barista_1.png" PictureProgress="lungo_barista_1_" PieChart="C" PosIdle="3" PosRondel="4" PosCSV="14" ProductSettings="true" Active="true">
+             <IDLE_SCREEN>
+                <!-- Every JOE_PRODUCT will be "converted" to a Product on Idle Screen with activated Preselection (combinations) -->
+                <!-- Example: The Cappuccino will appear 3 times on the Idle Screen -->
+                <!-- 1x without any activated preselects -->
+                <!-- 1x with XL activated -->
+                <JOE_PRODUCT double="false" powder="false" coldbrew="false" XL="false"/>
+                <JOE_PRODUCT double="false" powder="false" coldbrew="false" XL="true"/>
+            </IDLE_SCREEN>
+			<PRESELECTION coldbrew="true" XL="true" double="39" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <!-- Grind consistency 0-6 def:2-->
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="120" Min="25" Max="240" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <BYPASS Text="103" Argument="F10" Value="100" Min="0" Max="240" Step="5" ProgressAdjust="41"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="2B" Name="Cortado" Text="356" P_Kind="CM" DoubleProduct="false" PictureIdle="cortado_1.png" PictureProgress="cortado_1_" PieChart="M" PosIdle="5" PosRondel="9" PosCSV="15" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="3B" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="04">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <!-- Grind consistency 0-6 def:4-->
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="25" Min="15" Max="80" Step="5" ProgressAdjust="37" PictureProgressFrom="00" PictureProgressTo="06"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="1" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="07" PictureProgressTo="10"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="2" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="2D" Name="Hotwater Portion(Green tea)" Text="283" P_Kind="T" DoubleProduct="false" PictureIdle="heisswasser_long_green.png" PictureProgress="heisswasser_long_black_" PieChart="T" PosIdle="10" PosRondel="10" PosCSV="16" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="false" XL="false" double="00" powder="false"/>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="220" Min="25" Max="300" Step="5" ProgressAdjust="41" PictureProgressFrom="00" PictureProgressTo="20"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <PRODUCT Code="2E" Name="Flat White" Text="24" P_Kind="CM" DoubleProduct="false" PictureIdle="flat_white_1.png" PictureProgress="flat_white_1_" PieChart="M" PosIdle="4" PosRondel="4" PosCSV="17" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="true" XL="false" double="3E" powder="true"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="02">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05" ProgressAdjust="31">
+                <ITEM Name="1" Value="01" Text="54"/>
+                <ITEM Name="2" Value="02" Text="55"/>
+                <ITEM Name="3" Value="03" Text="56"/>
+                <ITEM Name="4" Value="04" Text="57"/>
+                <ITEM Name="5" Value="05" Text="57"/>
+                <ITEM Name="6" Value="06" Text="57"/>
+                <ITEM Name="7" Value="07" Text="57"/>
+                <ITEM Name="8" Value="08" Text="57"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="60" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="00" PictureProgressTo="05"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="2" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="06" PictureProgressTo="08"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="14" Min="0" Max="120" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="09" PictureProgressTo="15"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="30" Name="Espresso doppio" Text="150" P_Kind="C" DoubleProduct="false" PictureIdle="espresso_doppio_1.png" PictureProgress="kaffee_1_" PieChart="C" PosIdle="14" PosRondel="6" PosCSV="18" ProductSettings="true" Active="true">
+            <PRESELECTION coldbrew="false" XL="false" double="31" powder="false"/>
+            <GRINDER_FREENESS Text="388" Argument="F17" Default="04">
+                <ITEM Name="0" Value="01" Text="383"/>
+                <ITEM Name="1" Value="02" Text="383"/>
+                <ITEM Name="2" Value="03" Text="384"/>
+                <ITEM Name="3" Value="04" Text="385"/>
+                <ITEM Name="4" Value="05" Text="386"/>
+                <ITEM Name="5" Value="06" Text="387"/>
+                <ITEM Name="6" Value="07" Text="387"/>
+            </GRINDER_FREENESS>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <!-- Grind consistency 0-6 def:4-->
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="90" Min="30" Max="160" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+        <!--XL products-->
+		<PRODUCT Code="37" Name="XL Latte Macchiato" Text="13" P_Kind="CM" DoubleProduct="false" PictureIdle="XL_latte_macchiato_long_1.png" PictureProgress="XL_latte_macchiato_long_1_" PieChart="M" PosIdle="17" PosRondel="17" PosCSV="18" ProductSettings="false">
+            <PRESELECTION double="00" powder="false" coldbrew="true"/>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="08">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="80" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="20" PictureProgressTo="30"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02" >
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="18" Min="0" Max="45" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="11" PictureProgressTo="19"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="8" Min="0" Max="45" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="2" Min="1" Max="3" Step="1"/>
+            <MILK_BREAK Text="101" Argument="F11" Value="20" Min="0" Max="60" Step="1" TextUnit="282"/>
+        </PRODUCT>
+        <PRODUCT Code="32" Name="XL Lungo" Text="74" P_Kind="C" DoubleProduct="false" PictureIdle="lungo_barista_1.png" PictureProgress="lungo_barista_1_" PieChart="C" PosIdle="118" PosRondel="18" PosCSV="19" ProductSettings="false">
+            <PRESELECTION double="39" powder="false" coldbrew="true"/>
+            <COFFEE_STRENGTH Text="93" Argument="F3" Default="05">
+                <ITEM Name="1" Value="01" Text="272"/>
+                <ITEM Name="2" Value="02" Text="272"/>
+                <ITEM Name="3" Value="03" Text="54"/>
+                <ITEM Name="4" Value="04" Text="54"/>
+                <ITEM Name="5" Value="05" Text="55"/>
+                <ITEM Name="6" Value="06" Text="55"/>
+                <ITEM Name="7" Value="07" Text="56"/>
+                <ITEM Name="8" Value="08" Text="56"/>
+                <ITEM Name="9" Value="09" Text="57"/>
+                <ITEM Name="10" Value="0A" Text="57"/>
+            </COFFEE_STRENGTH>
+            <GRINDER_RATIO Text="241" Argument="F2" Default="02">
+                <ITEM Name="100_0" Value="00" Text="79"/>
+                <ITEM Name="75_25" Value="01" Text="80"/>
+                <ITEM Name="50_50" Value="02" Text="81"/>
+                <ITEM Name="25_75" Value="03" Text="82"/>
+                <ITEM Name="0_100" Value="04" Text="83"/>
+            </GRINDER_RATIO>
+            <WATER_AMOUNT Text="94" Argument="F4" Value="180" Min="25" Max="240" Step="5" ProgressAdjust="3C" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <BYPASS Text="103" Argument="F10" Value="120" Min="0" Max="240" Step="5" ProgressAdjust="41"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Low" Value="00" Text="30"/>
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+        </PRODUCT>
+		<!--double products-->
+        <PRODUCT Code="12" Name="2 Espressi" Text="18" P_Kind="C" DoubleProduct="true" PictureIdle="espresso_2.png" PictureProgress="espresso_1_" PieChart="C" PosIdle="14" PosRondel="14" PosCSV="19" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="13" Name="2 Coffee" Text="19" P_Kind="C" DoubleProduct="true" PictureIdle="kaffee_2.png" PictureProgress="kaffee_1_" PieChart="C" PosIdle="15" PosRondel="15" PosCSV="20" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="14" Name="2 Cappuccini" Text="20" P_Kind="CM" DoubleProduct="true" PictureIdle="cappuccino_2.png" PictureProgress="cappuccino_1_" PieChart="M" PosIdle="17" PosRondel="21" PosCSV="21" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <WATER_AMOUNT Text="94" Argument="F4" Value="60" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="07" PictureProgressTo="19"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="12" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="06"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="5" Min="1" Max="10" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="15" Name="2 Milkcoffee" Text="21" P_Kind="CM" DoubleProduct="true" PictureIdle="milchkaffee_2.png" PictureProgress="milchkaffee_1_" PieChart="M" PosIdle="19" PosRondel="19" PosCSV="22" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <WATER_AMOUNT Text="94" Argument="F4" Value="100" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="00" PictureProgressTo="08"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="01">
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="0" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="01"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="5" Min="1" Max="10" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="10" Min="0" Max="120" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="02" PictureProgressTo="10"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="5" Min="1" Max="10" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="16" Name="2 Espresso Macchiati" Text="86" P_Kind="CM" DoubleProduct="true" PictureIdle="espresso_macchiato_1.png" PictureProgress="espresso_macchiato_1_" PieChart="M" PosCSV="23" ProductSettings="true" Active="false">
+            <!--1 strokes-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="17" Name="2 Latte Macchiati" Text="22" P_Kind="CM" DoubleProduct="true" PictureIdle="latte_macchiato_long_2.png" PictureProgress="latte_macchiato_long_1_" PieChart="M" PosIdle="18" PosRondel="18" PosCSV="24" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <WATER_AMOUNT Text="94" Argument="F4" Value="45" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="20" PictureProgressTo="30"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="18" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="11" PictureProgressTo="19"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="5" Min="1" Max="10" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="4" Min="0" Max="120" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="10"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="5" Min="1" Max="10" Step="1"/>
+            <MILK_BREAK Text="101" Argument="F11" Value="20" Min="0" Max="60" Step="1" ProgressAdjust="33" TextUnit="282"/>
+        </PRODUCT>
+        <PRODUCT Code="18" Name="2 Milk Foam" Text="87" P_Kind="M" DoubleProduct="true" PictureIdle="milchschaum_long_1.png" PictureProgress="milchschaum_long_1_" PieChart="M" PosCSV="25" ProductSettings="true" Active="false">
+            <!--1 strokes-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="1A" Name="2 Portion Milk" Text="23" P_Kind="M" DoubleProduct="true" PictureIdle="milchportion_long_2.png" PictureProgress="milchportion_long_1_" PieChart="M" PosIdle="20" PosRondel="20" PosCSV="26" ProductSettings="true" Active="false">
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="10" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="00" PictureProgressTo="05"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="5" Min="1" Max="10" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="20" Min="1" Max="120" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="06" PictureProgressTo="20"/>
+            <MILK_TEMP Text="99" Argument="F14_2" Value="5" Min="1" Max="10" Step="1"/>
+        </PRODUCT>
+        <PRODUCT Code="38" Name="2 Americano" Text="340" P_Kind="C" DoubleProduct="true" PictureIdle="cafe_barista_2.png" PictureProgress="cafe_barista_1_" PieChart="C" PosCSV="27" ProductSettings="true" Active="false">
+            <!--1 or 2 strokes-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="39" Name="2 Lungo" Text="426" P_Kind="C" DoubleProduct="true" PictureIdle="lungo_barista_2.png" PictureProgress="lungo_barista_1_" PieChart="C" PosCSV="28" ProductSettings="true" Active="false">
+            <!--1 or 2 strokes-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="3B" Name="2 Cortado" Text="356" P_Kind="CM" DoubleProduct="true" PictureIdle="cortado_1.png" PictureProgress="cortado_1_" PieChart="M" PosCSV="29" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <PRESELECTION coldbrew="false" strongcoldbrew="false" lightbrew="false" sweetfoam="false" double="00" powder="false"/>
+        </PRODUCT>
+        <PRODUCT Code="3E" Name="2 Flat White" Text="25" P_Kind="CM" DoubleProduct="true" PictureIdle="flat_white_2.png" PictureProgress="flat_white_1_" PieChart="M" PosIdle="16" PosRondel="16" PosCSV="30" ProductSettings="true" Active="false">
+            <!--1 stroke-->
+            <WATER_AMOUNT Text="94" Argument="F4" Value="60" Min="25" Max="240" Step="5" ProgressAdjust="37" PictureProgressFrom="00" PictureProgressTo="05"/>
+            <TEMPERATURE Argument="F7" Text="95" Default="02">
+                <ITEM Name="Normal" Value="01" Text="31"/>
+                <ITEM Name="High" Value="02" Text="32"/>
+            </TEMPERATURE>
+            <MILK_FOAM_AMOUNT Text="96" Argument="F6" Value="2" Min="0" Max="120" Step="1" ProgressAdjust="34" TextUnit="282" PictureProgressFrom="06" PictureProgressTo="10"/>
+            <MILK_FOAM_TEMP Text="100" Argument="F14_1" Value="5" Min="1" Max="10" Step="1"/>
+            <MILK_AMOUNT Text="98" Argument="F5" Value="14" Min="0" Max="120" Step="1" ProgressAdjust="32" TextUnit="282" PictureProgressFrom="11" PictureProgressTo="15" />
+            <MILK_TEMP Text="99" Argument="F14_2" Value="5" Min="1" Max="10" Step="1"/>
+        </PRODUCT>
+        <!-- always last entry-->
+        <PRODUCT Code="0F" Name="Powderproduct" Text="317" P_Kind="P" PieChart="P" PosCSV="99" Active="false" DoubleProduct="false" PictureIdle="no_image.png" PictureProgress="" PosIdle="0" PosRondel="0" ProductSettings="false"/>
+    </PRODUCTS>
+    <!-- 
+    Used to define the allowed Combinations of Preselects.
+    more than two combinations can be defined per row.
+    Here i.E. we could write:
+    <COMBINATION powder="true" sweetfoam="false" double="true"/> -> for products that support powder, sweet foam and double, all 3 preselections may be active at the same time
+    <COMBINATION powder="true" sweetfoam="false" lightbrew="false"/>
+     -->
+    <MULTIPLE_PRESELECTS>
+        <COMBINATION coldbrew="true" XL="true"/>
+    </MULTIPLE_PRESELECTS>
+    <!--
+    
+    -->
+    <STATISTIC>
+        <!-- Remote Screen Command to lock the Coffee Machine. Not used in Apps (-> TS:01 is hardcoded) -->
+        <BANK Command="@TS:01" Name="Remote Screen"/>
+        <PRODUCTCOUNTER>
+            <!-- Command defines which Counters are read by the Apps -->
+            <BANK Command="@TR:32" Name="Product counter for Statistic"/>
+            <BANK Command="@TR:33" Name="Overflow Product Counter"/>
+            <BANK Command="@TR:34" Name="Barista Counter"/>
+            <!-- Not available in JOE -->
+            <BANK Command="@TR:35" Name="Overflow Barista Counter"/>
+            <!-- Not available in JOE -->
+            <BANK Command="@TR:52" Name="Special Counter"/>
+            <!-- Not available in JOE -->
+            <BANK Command="@TR:53" Name="Overflow Special Counter"/>
+            <!-- Not available in JOE -->
+        
+        
+        </PRODUCTCOUNTER>
+        <DAILYCOUNTER Reset="@TF:05">
+            <!-- Not available in JOE -->
+            <BANK Command="@TR:42" Name="Daily Product counter"/>
+            <BANK Command="@TR:43" Name="Daily Product counter overvlow" />
+            <BANK Command="@TR:44" Name="Barista Counter Dayli"/>
+            <BANK Command="@TR:45" Name="Overflow Barista counter Dayli"/>
+        </DAILYCOUNTER>
+        <!--
+        Command of Bank element define what is read
+        Single TextItems define what is displayed in the App. (if there is more we receive from CM, we only show what's defined in the XML)
+        -->
+        <MAINTENANCEPAGE>
+            <BANK Command="@TG:43" Name="Maintenance Counter">
+                <TEXTITEM Type="Cleaning" Text="33"/>
+                <TEXTITEM Type="FilterChange" Text="34"/>
+                <TEXTITEM Type="Decalc" Text="35"/>
+                <TEXTITEM Type="CoffeeRinse" Text="36"/>
+                <TEXTITEM Type="CappuRinse" Text="40"/>
+                <TEXTITEM Type="CappuClean" Text="41"/>
+            </BANK>
+            <BANK Command="@TG:C0" Name="Maintenance Percent">
+                <TEXTITEM Type="Cleaning" Text="37"/>
+                <TEXTITEM Type="FilterChange" Text="39"/>
+                <TEXTITEM Type="Decalc" Text="38"/>
+            </BANK>
+        </MAINTENANCEPAGE>
+        <!-- Same as Remote Screen Command but for unlocking the Coffee Machine. Not used in Apps (-> TS:00 hardcoded) -->
+        <BANK Command="@TS:00" Name="Release Keys"/>
+    </STATISTIC>
+    <!-- 
+    Alerts displayed in the app. Only if defined here and reported by the Coffee Machine, the Alert is displayed. 
+    
+    Definitions:
+    Bit: The Bit representing corresponding Alert
+    Name: Used for identifying the Alert in the XML File
+    Title: Translation Key for Title of Alert (Int only)
+    Message: Transaltion Key for Message of Alert (Int only)
+    Picture: The icon displayed on the Alert
+    Type: one of block, info, ip
+        block = blocks all products
+        info, ip = products are only blocked if specified in Blocked (see below)
+    Blocked: P-Kind of blocked products: C, M, T, CM, TM, P
+        CM block products of Coffe, Milk and Coffe + Milk
+    CancelButton: if set, needs to be 72
+    Disabled: only used on watch. Disables only certain Products and not all Products of a Kind. May be removed (using Blocked with Product Kind)
+    ProcessButton: translation key for the Process Button displayed on the Alert. Needs to be one of 70, 206, 207, 208 (can be extended)
+    Process: the Process to start when ProcessButton is pressed.
+    ShopButton: translation key for shop button. fixed to 71 if available. Not used anymore as we do not show Shop Info on Buttons
+    ShopURL: The URL to the shop with given parts? (not used anymore)
+
+    Coloring in the App:
+    Alerts with type == block are displayed in RED
+    Alerts which have a blocked are displayed in YELLOW
+    Alerts which have a process are displayed in BLUE
+    All other Alerts are displayed in Grey/White
+
+    -->
+    <ALERTS>
+        <ALERT Bit="0" Name="insert tray" Title="42" Message="47" Picture="restwasserschale_zurueck.png" Type="block"/>
+        <ALERT Bit="1" Name="fill water" Title="43" Message="48" Picture="wasser_fuellen_filter.png" Type="block"/>
+        <ALERT Bit="2" Name="empty grounds" Title="44" Message="49" Picture="kaffeesatzbehaelter_leeren.png" Type="block"/>
+        <ALERT Bit="3" Name="empty tray" Title="45" Message="50" Picture="restwasserschale_leeren.png" Type="block"/>
+        <ALERT Bit="4" Name="insert coffee bin" Title="46" Message="51" Picture="kaffeesatzbehaelter_fehlt.png" Type="block"/>
+        <ALERT Bit="5" Name="outlet missing" Title="200" Message="201" Picture="frontabdeckung_schliessen.png" Type="block"/>
+        <ALERT Bit="6" Name="rear cover missing" Title="202" Message="203" Picture="abdeckung_rueck_schliessen.png" Type="block"/>
+        <ALERT Bit="7" Name="milk alert" Title="104" Message="105" Picture="milch_leer.png"/>
+        <!--ALERT Bit="8" Name="fill system" Title="116" Message="117" Picture="rotary_druecken.png" Type="block"/-->
+        <ALERT Bit="8" Name="fill system" Title="118" Message="117" Picture="press_next.png" Type="block"/>
+        <ALERT Bit="9" Name="system filling" Title="112" Message="113" Picture="system_filling.png"/>
+        <ALERT Bit="10" Name="no beans" Title="88" Message="89" Picture="bohnen_einfuellen.png" Blocked="C" Type="info"/>
+        <ALERT Bit="11" Name="welcome" Title="171" Message="172"/>
+        <ALERT Bit="12" Name="heating up" Title="108" Message="109" Picture="geraet_heizt_auf.png"/>
+        <ALERT Bit="13" Name="coffee ready" Title="110" Message="111"/>
+        <ALERT Bit="14" Name="no milk (milk sensor)" Title="104" Message="105" Picture="milch_leer.png" Blocked="M" Type="info"/>
+        <ALERT Bit="15" Name="error milk (milk sensor)" Title="173" Message="174" Picture="alarm_signal.png" Blocked="M" Type="info"/>
+        <ALERT Bit="16" Name="no signal (milk sensor)" Title="175" Message="176" Picture="alarm_signal.png" Blocked="M" Type="info"/>
+        <ALERT Bit="17" Name="please wait" Title="177" Message="178" Picture="wait_icon.png" Type="block"/>
+        <ALERT Bit="18" Name="coffee rinsing" Title="179" Message="180" Picture="kaffee_spuelung.png"/>
+        <ALERT Bit="19" Name="ventilation closed" Title="181" Message="182" Picture="ventiports.png"/>
+        <ALERT Bit="20" Name="close powder cover" Title="183" Message="184" Picture="gemahlenerkaffee_schliessen.png" Type="block"/>
+        <ALERT Bit="21" Name="fill powder" Title="185" Message="186" Picture="gemahlenerkaffee_hinzufuegen.png" Type="block"/>
+        <ALERT Bit="22" Name="system emptying" Title="187" Message="188" Picture="system_empty.png"/>
+        <ALERT Bit="23" Name="not enough powder" Title="189" Message="190" Picture="gemahlenerkaffee_nicht_genug.png" Type="info"/>
+        <ALERT Bit="24" Name="remove water tank" Title="191" Message="192" Picture="wassertank_entfernen.png"/>
+        <ALERT Bit="25" Name="press rinse" Title="193" Message="194" Picture="pflege_druecken.png"/>
+        <ALERT Bit="26" Name="goodbye" Title="195" Message="196"/>
+        <ALERT Bit="27" Name="periphery alert" Title="122" Message="123" Picture="alarm_signal.png" Blocked="M" Type="info"/>
+        <ALERT Bit="28" Name="powder product" Title="317" Message="198" Picture="gemahlenerkaffee_hinzufuegen.png" Type="info"/>
+        <ALERT Bit="29" Name="program-mode status" Title="106" Message="107" Type="block"/>
+        <ALERT Bit="30" Name="error status" Title="124" Message="125" Picture="alarm_signal.png" Type="block"/>
+        <ALERT Bit="31" Name="enjoy product" Title="114" Message="115"/>
+        <ALERT Bit="32" Name="filter alert" Title="92" Message="210" Picture="filter_wechseln.png" Type="ip" ProcessButton="70" Process="FilterChange" ShopButton="71" ShopURL="www.jura.com/joe-filtersmart" CancelButton="72"/>
+        <ALERT Bit="33" Name="decalc alert" Title="126" Message="213" Picture="entkalkung.png" Type="ip" ProcessButton="207" Process="Decalc" ShopButton="71" ShopURL="www.jura.com/joe-descale" CancelButton="72"/>
+        <ALERT Bit="34" Name="cleaning alert" Title="128" Message="211" Picture="geraet_reinigen.png" Type="ip" ProcessButton="206" Process="Cleaning" ShopButton="71" ShopURL="www.jura.com/joe-cleaning" CancelButton="72"/>
+        <ALERT Bit="35" Name="cappu rinse alert" Title="130" Message="212" Picture="milchsystem_spuelung.png" Type="ip" ProcessButton="208" Process="CappuRinse" CancelButton="72"/>
+        <ALERT Bit="36" Name="energy safe" Title="132" Message="133"/>
+        <ALERT Bit="37" Name="active RF filter" Title="273" Message="274"/>
+        <ALERT Bit="38" Name="RemoteScreen" Title="275" Message="276"/>
+        <ALERT Bit="39" Name="LockedKeys" Title="277" Message="278"/>
+        <ALERT Bit="40" Name="close tab" Title="199" Message="138" Picture="hahn_schliessen.png" Type="block"/>
+        <ALERT Bit="41" Name="cappu clean alert" Title="134" Message="214" Picture="milchsystem_reinigung_alarm.png" Type="ip" ProcessButton="206" Process="CappuClean" ShopButton="71" ShopURL="www.jura.com/joe-milkclean" CancelButton="72"/>
+        <ALERT Bit="42" Name="Info - cappu clean alert" Title="134" Message="214" Type="info"/>
+        <ALERT Bit="43" Name="Info - coffee clean alert" Title="128" Message="211" Type="info"/>
+        <ALERT Bit="44" Name="Info - decalc alert" Title="126" Message="213" Type="info"/>
+        <ALERT Bit="45" Name="Info - filter used up alert" Title="92" Message="210" Type="info"/>
+        <ALERT Bit="46" Name="steam ready" Title="279" Message="280"/>
+        <ALERT Bit="47" Name="SwitchOff Delay active" Title="177" Message="209" Picture="alarm_signal.png" Type="block"/>
+        <ALERT Bit="48" Name="close front cover" Title="320" Message="321" Picture="alarm_signal.png" Type="block"/>
+        <ALERT Bit="49" Name="left bean alert" Title="89" Message="318" Picture="bohnen_einfuellen.png" Type="info"/>
+        <ALERT Bit="50" Name="right bean alert" Title="89" Message="319" Picture="bohnen_einfuellen.png" Type="info"/>
+        <ALERT Bit="53" Name="empty grounds RTC" Title="44" Message="49" Picture="kaffeesatzbehaelter_leeren.png" Type="info"/>
+        <ALERT Bit="54" Name="ML/OZ status" Title="0" Message="0"/>
+        <ALERT Bit="55" Name="Open Tap" Title="140" Message="0" Picture="hahn_oeffnen.png"/>
+    </ALERTS>
+    <QUALITY_ASSISTANT>
+        <!-- replace water pending -->
+        <QUALITY Value="80" Name="Change_Water" Title="411" Description="409" Picture="quality_fill_watertank.png" Text="410" Priority="0"/>
+        <!-- Maintenance pending -->
+        <QUALITY Value="20" Name="Maintenance" Title="418" Description="419" Picture="quality_maintenance.png" Text="420" Priority="1"/>
+        <!-- Empty tray pending -->
+        <QUALITY Value="40" Name="Empty_Tray" Title="421" Description="423" Picture="quality_empty_tray.png" Priority="2"/>
+    </QUALITY_ASSISTANT>
+    <PROGRESS_STATE_INTAKE>
+        <ENJOYSCREEN Value="3E" Name="Enjoy" Title="114" Message="115"/>
+        <STATE Value="01" Name="Insert Tray" Title="42" Message="47" Picture="restwasserschale_zurueck.png"/>
+        <STATE Value="02" Name="Fill watertank" Title="43" Message="48" Picture="wasser_fuellen_filter.png"/>
+        <STATE Value="03" Name="Empty grounds" Title="44" Message="49" Picture="kaffeesatzbehaelter_leeren.png"/>
+        <STATE Value="04" Name="Empty tray" Title="45" Message="50" Picture="restwasserschale_leeren.png"/>
+        <STATE Value="08" Name="Insert grounds box" Title="44" Message="49" Picture="kaffeesatzbehaelter_zurueck.png"/>
+        <STATE Value="09" Name="Close nozzle cover" Title="200" Message="201" Picture="frontabdeckung_schliessen.png"/>
+        <STATE Value="0A" Name="Close bean cover" Title="243" Picture="bohnenbehaelter_schliessen.png"/>
+        <STATE Value="0B" Name="Cappurinse finished" Title="270" Picture="bereit.png"/>
+        <STATE Value="0C" Name="Close tap" Title="138" Picture="hahn_schliessen.png"/>
+        <STATE Value="0D" Name="Open tap" Title="140" Picture="hahn_oeffnen.png"/>
+        <STATE Value="0E" Name ="Alert" Title="337"/>
+        <STATE Value="0F" Name="Close powder cover" Title="184" Picture="gemahlenerkaffee_schliessen.png"/>
+        <STATE Value="10" Name="Add powder coffee" Title="137" Picture="gemahlenerkaffee_hinzufuegen.png"/>
+        <STATE Value="11" Name="Filling process" Title="112" Message="113" Picture="system_filling.png"/>
+        <STATE Value="12" Name="System emptying" Title="120" Message="121" Picture="system_empty.png"/>
+        <STATE Value="13" Name="Add beans" Title="136" Picture="bohnen_einfuellen.png"/>
+        <STATE Value="14" Name="Not enough powder" Title="189" Message="139" Picture="gemahlenerkaffee_nicht_genug.png"/>
+        <STATE Value="15" Name="Waiting" Title="177" Picture="wait_icon.png"/>
+        <STATE Value="16" Name="Remove watertank" Title="142" Picture="wassertank_entfernen.png"/>
+        <STATE Value="19" Name="Smart Alert Multistroke" Title="242"/>
+        <STATE Value="20" Name="Startup" Title="242"/>
+        <STATE Value="21" Name="Heating Up" Title="108" Message="109" Progress="true" Picture="geraet_heizt_auf.png"/>
+        <STATE Value="22" Name="Press Button" Title="118"/>
+        <STATE Value="23" Name="Rinse process" Title="143" Picture="auslauf_spuelen.png"/>
+        <STATE Value="24" Name="Coffee Ready" Title="110" Message="111"/>
+        <STATE Value="25" Name="Shut down" Title="177"/>
+        <STATE Value="26" Name="Press Rinse" Title="193" Picture="pflege_druecken.png" AcceptCommand="@TG:10"/>
+        <STATE Value="2D" Name="No milk" Title="104" Picture="milch_leer.png" />
+        <STATE Value="2E" Name="Error milk" Title="173" Picture="milch_leer.png"/>
+        <STATE Value="2F" Name="No signal milk" Title="244" Picture="milch_leer.png"/>
+        <STATE Value="4A" Name="Cappu Clean request" Title="135"/>
+        <STATE Value="50" Name="Decalcify Start" Title="337" Message="242" Picture="entkalkung.png"/>
+        <STATE Value="51" Name="Decalcify materials" Title="337" Message="242" Picture="entkalkung.png"/>
+        <STATE Value="52" Name="Decalcify empty tray" Title="45" Message="50" Picture="restwasserschale_leeren.png"/>
+        <STATE Value="53" Name="Decalcify add fluid" Title="226" Picture="mittel_in_tank.png"/>
+        <STATE Value="54" Name="Decalcify Process" Title="224" Message="290" Picture="entkalkung.png"/>
+        <STATE Value="55" Name="Rinse watertank" Title="337" Message="242" Picture="wasser_fuellen_filter.png"/>
+        <STATE Value="56" Name="Descale finished" Title="269" Picture="bereit.png"/>
+        <STATE Value="5A" Name="Connect the milk tube" Title="337" Message="242" Picture="mittel_fuellen.png"/>
+        <STATE Value="5C" Name="RF-ID Filter used up" Title="337" Message="242"/>
+        <STATE Value="5D" Name="RF-ID Filter locked" Title="337" Message="242"/>
+        <STATE Value="60" Name="Filter Rinse start" Title="337" Message="242" Picture="filter_wechseln.png"/>
+        <STATE Value="61" Name="Filter Rinse materials" Title="337" Message="242" Picture="filter_wechseln.png"/>
+        <STATE Value="62" Name="Filter Rinse change" Title="337" Message="232" Picture="filter_wechseln.png"/>
+        <STATE Value="63" Name="Filter Rinse process" Title="232" Picture="filter_wechseln.png"/>
+        <STATE Value="65" Name="Filter Rinse finished" Title="267" Picture="bereit.png"/>
+        <STATE Value="66" Name="Remove Filter" Title="227" Picture="filter_entfernen.png" />
+        <STATE Value="67" Name="Filter Rinse insert" Title="233" Picture="filter_einsetzen.png"/>
+        <STATE Value="70" Name="Cleaning Start" Title="337" Message="242" Picture="geraet_reinigen.png"/>
+        <STATE Value="71" Name="Cleaning materials" Title="337" Message="242" Picture="geraet_reinigen.png"/>
+        <STATE Value="72" Name="Cleaning empty tray" Title="45" Message="50" Picture="restwasserschale_leeren.png"/>
+        <STATE Value="73" Name="Cleaning press button" Title="337" Picture="geraet_reinigen.png"/>
+        <STATE Value="74" Name="Cleaning Process" Title="289" Picture="geraet_reinigen.png"/>
+        <STATE Value="75" Name="Cleaning add tablet" Title="236" Message="236" Picture="tablette_einwerfen.png"/>
+        <STATE Value="76" Name="Cleaning Process finished" Title="221" Message="268" Picture="bereit.png"/>
+        <STATE Value="90" Name="Cappu Clean Start" Title="337" Message="242" Picture="milchsystem_reinigung_alarm.png"/>
+        <STATE Value="91" Name="Cappu Clean materials" Title="337" Message="242" Picture="milchsystem_reinigung_alarm.png"/>
+        <STATE Value="92" Name="Cappu Clean add cleaner" Title="239" Picture="mittel_fuellen.png"/>
+        <STATE Value="93" Name="Cappu Clean process" Title="291" Picture="milchsystem_reinigung_alarm.png"/>
+        <STATE Value="94" Name="Cappu Clean add water" Title="240" Picture="mittel_fuellen.png"/>
+        <STATE Value="95" Name="Cappu Clean finish" Title="238" Message="271" Picture="bereit.png"/>
+        <STATE Value="9A" Name="Cappu Rinse process" Title="292" Picture="milchsystem_spuelung.png"/>
+        <STATE Value="A1" Name="Set Hotwater Nozzle" Title="337" Message="242"/>
+        <STATE Value="A2" Name="Set Milk Nozzle" Title="337" Message="242"/>
+        <STATE Value="A3" Name="Set Nozzle to Milk Position" Title="337" Message="242"/>
+        <STATE Value="A4" Name="Set Nozzle to Foam Position" Title="337" Message="242"/>
+        <STATE Value="C7" Name="Longpress Saved" Title="106" Message="107" Picture="bereit.png"/>
+        <STATE Value="C9" Name="Enough Milk/Water/Coffee"/>
+        <STATE Value="E1" Name ="Warning"/>
+        <STATE Value="E2" Name ="Action"/>
+        <STATE Value="E3" Name ="Info"/>
+        <STATE Value="E4" Name ="Filter error"/>
+        <STATE Value="E5" Name ="Filter thanks"/>
+        <STATE Value="E6" Name ="Too Hot"/>
+        <STATE Value="EF" Name="WIFI Confirmation" Title="337" Message="242"/>
+        <STATE Value="FE" Name ="Aroma Select" Title="379" Message="380"/>
+        <STATE Value="FF" Name="P_Mode" Title="106" Message="107"/>
+    </PROGRESS_STATE_INTAKE>
+    <PROCESSES>
+        <PROCESS Type="FilterChange" ExecuteCommand="@TG:26" Title="232" Progress="false" PDF_Text="217" PDFURL="www.jura.com/manual-giga6" Video_Text="218" VideoURL="www.jura.com/yt-giga6filter" Picture="filter_wechseln.png"/>
+        <PROCESS Type="Cleaning" ExecuteCommand="@TG:24" Title="221" Progress="true" PDF_Text="217" PDFURL="www.jura.com/manual-giga6" Video_Text="218" VideoURL="www.jura.com/yt-giga6cleaning" Picture="geraet_reinigen.png"/>
+        <PROCESS Type="Decalc" ExecuteCommand="@TG:25" Title="224" Progress="true" PDF_Text="217" PDFURL="www.jura.com/manual-giga6" Video_Text="218" VideoURL="www.jura.com/yt-giga6descale" Picture="entkalkung.png"/>
+        <PROCESS Type="CappuRinse" ExecuteCommand="@TG:23" Title="237" Progress="true" PDF_Text="217" PDFURL="www.jura.com/manual-giga6" Picture="milchsystem_spuelung.png"/>
+        <PROCESS Type="CappuClean" ExecuteCommand="@TG:21" Title="238" Progress="true" PDF_Text="217" PDFURL="www.jura.com/manual-giga6" Video_Text="218" VideoURL="www.jura.com/yt-giga6milkclean" Picture="milchsystem_reinigung_alarm.png"/>
+    </PROCESSES>
+    <MACHINESETTINGS Productprogramming="true">
+        <BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>
+        <SLIDER Name="Hardness" SliderType="StepSlider" Pos="1" P_Argument="02" Text="2" Default="16" Min="1" Max="30" Step="1" TextUnit="5" Mask="FF"/>
+        <SWITCH Name="Units" Pos="2" P_Argument="08" Text="4" Default="0">
+            <ITEM Name="ML" Text="6" Value="00"/>
+            <ITEM Name="OZ" Text="7" Value="01"/>
+        </SWITCH>
+        <COMBOBOX Name="Language" Pos="3" P_Argument="09" Read="TM:09" Text="3" Default="02">
+            <!--check available languages-->
+            <ITEM Name="German" Text="245" Value="01"/>
+            <ITEM Name="English" Text="246" Value="02"/>
+            <ITEM Name="French" Text="247" Value="03"/>
+            <ITEM Name="Italian" Text="248" Value="04"/>
+            <ITEM Name="Dutch" Text="249" Value="05"/>
+            <ITEM Name="Spanish" Text="250" Value="06"/>
+            <ITEM Name="Portuguese" Text="251" Value="07"/>
+            <ITEM Name="Russian" Text="252" Value="08"/>
+            <ITEM Name="Swedish" Text="253" Value="09"/>
+            <ITEM Name="Polish" Text="254" Value="0A"/>
+            <ITEM Name="Esti" Text="288" Value="0B"/>
+        </COMBOBOX>
+        <SLIDER Name="AutoOFF" SliderType="ItemSlider" Pos="4" P_Argument="13" Text="1" Default="1E">
+            <ITEM Name="15min" Text="256" Value="0F"/>
+            <ITEM Name="30min" Text="257" Value="1E"/>
+            <ITEM Name="1h" Text="258" Value="213C"/>
+            <ITEM Name="2h" Text="259" Value="2178"/>
+            <ITEM Name="3h" Text="260" Value="21B4"/>
+            <ITEM Name="4h" Text="261" Value="21F0"/>
+            <ITEM Name="5h" Text="262" Value="22012C"/>
+            <ITEM Name="6h" Text="263" Value="220168"/>
+            <ITEM Name="7h" Text="264" Value="2201A4"/>
+            <ITEM Name="8h" Text="265" Value="2201E0"/>
+            <ITEM Name="9h" Text="266" Value="22021C"/>
+        </SLIDER>
+        <COMBOBOX Name="DisplayBrightnessSetting" Pos="6" Text="308" P_Argument="0A" Read="TM:0A" Default="04">
+            <ITEM Name="10" Text="294" Value="01"/>
+            <ITEM Name="20" Text="295" Value="02"/>
+            <ITEM Name="30" Text="296" Value="03"/>
+            <ITEM Name="40" Text="297" Value="04"/>
+            <ITEM Name="50" Text="298" Value="05"/>
+            <ITEM Name="60" Text="299" Value="06"/>
+            <ITEM Name="70" Text="300" Value="07"/>
+            <ITEM Name="80" Text="301" Value="08"/>
+            <ITEM Name="90" Text="302" Value="09"/>
+            <ITEM Name="100" Text="303" Value="0A"/>
+        </COMBOBOX>
+        <SWITCH Name="TimeFormat" Pos="4" P_Argument="1F" Text="311" Default="00">
+            <ITEM Name="24_Hour" Text="309" Value="00" />
+            <ITEM Name="AM_PM" Text="310" Value="01"/>
+        </SWITCH>
+        <SWITCH Name="ESM" Pos="5" P_Argument="07" Text="285" Default="00">
+            <ITEM Name="active" Text="286" Value="00"/>
+            <ITEM Name="inactive" Text="287" Value="01"/>
+        </SWITCH>
+        <COMBOBOX Name="Quality Assistant" Pos="7" P_Argument="7E" Read="TM:7E" Text="412" Default="01">
+            <ITEM Name="Active" Text="413" Value="01"/>
+            <ITEM Name="Inactive" Text="414" Value="00"/>
+        </COMBOBOX>
+    </MACHINESETTINGS>
+    <MAINTENANCEINSTRUCTIONS>
+        <BUTTON Name="FilterChange" Pos="1" Text="58" MessageText="215" Title="216" Type="FilterChange" ProcessButton="376" Process="FilterChange" Video_Text="218" VideoURL="www.jura.com/joe-main" Shop_Text="219" ShopURL="www.jura.com/joe-filtersmart" Progress="true"/>
+        <BUTTON Name="Cleaning" Pos="2" Text="59" MessageText="220" Title="221" Type="Cleaning" ProcessButton="366" Process="Cleaning" Video_Text="218" VideoURL="www.jura.com/joe-main" Shop_Text="219" ShopURL="www.jura.com/joe-cleaning" Progress="true"/>
+        <BUTTON Name="CappuClean" Pos="3" Text="61" MessageText="214" Title="238" Type="CappuClean" ProcessButton="61" Process="CappuClean" Video_Text="218" VideoURL="www.jura.com/joe-main" Shop_Text="219" ShopURL="www.jura.com/joe-milkclean" Progress="false"/>
+        <BUTTON Name="Decalc" Pos="4" Text="63" MessageText="223" Title="222" Type="Decalc" ProcessButton="371" Process="Decalc" Video_Text="218" VideoURL="www.jura.com/joe-main" Shop_Text="219" ShopURL="www.jura.com/joe-descale" Progress="true"/>
+        <BUTTON Name="CappuRinse" Pos="5" Text="60" MessageText="212" Title="237" Type="CappuRinse" ProcessButton="60" Process="CappuRinse" Video_Text="218" VideoURL="" Shop_Text="219" ShopURL="" Progress="true"/>
+    </MAINTENANCEINSTRUCTIONS>
+    <PREDICTIVEMAINTENANCE>
+        <PREDICTIVEBUTTON Name="FilterChange" Text="358" MessageText="359" Title="360" Picture="filter_wechseln.png" Shop_Text="219" ShopURL="www.jura.com/joe-filtersmart" ProcessButton="376" Process="FilterChange" Video_Text="218" VideoURL="" Threshold="80" DismissCheckbox="362" CancelButton="72"/>
+        <PREDICTIVEBUTTON Name="Cleaning" Text="363" MessageText="364" Title="365" Picture="geraet_reinigen.png" Shop_Text="219" ShopURL="www.jura.com/joe-cleaning" ProcessButton="366" Process="Cleaning" Video_Text="218" VideoURL="" Threshold="80" DismissCheckbox="367" CancelButton="72"/>
+        <PREDICTIVEBUTTON Name="Decalc" Text="368" MessageText="369" Title="370" Picture="entkalkung.png" Shop_Text="219" ShopURL="www.jura.com/joe-descale" ProcessButton="371" Process="Decalc" Video_Text="218" VideoURL="" Threshold="80" DismissCheckbox="372" CancelButton="72"/>
+    </PREDICTIVEMAINTENANCE>
+    <MAINTENANCELIFETIME>
+        <!-- Lifetime counted in days -->
+        <LIFETIME Name="FilterChange" Text="373" MessageText="374" Title="375" Picture="filter_wechseln.png" Shop_Text="219" ShopURL="www.jura.com/joe-filtersmart" ProcessButton="376" Process="FilterChange" Video_Text="218" VideoURL="" Lifetime="90" DismissCheckbox="377" CancelButton="72"/>
+    </MAINTENANCELIFETIME>
+    <MANUALS>
+        <!--todo: change manual link-->
+        <LINK Name="manual.coffeeMachineManual" URL="www.jura.com/manualXY"/>
+    </MANUALS>
+    <WIFIONBOARDING SkipLeavePmodeStep="false" FirstConnectText="389" WiFi2Support="true"/>
+    <MACHINEMANIFEST>
+        <CAPABILITIES IntakeF18="true"/>
+    </MACHINEMANIFEST>
+</JOE>

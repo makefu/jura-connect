@@ -232,7 +232,9 @@ app uses 40 s as its server-side timeout
 | `@TS:00`         | `@ts`             | str | unlock the display |
 | `@TM:<addr>`     | `@tm:<addr>...`   | str | memory / setting read (firmware-specific) |
 | `@TR:<bank>`     | `@tr:<bank>...`   | str | bank-register read |
-| `@TR:32,<page>`  | `@tr:32,<page>,<8 bytes hex>` | `ProductCounters` (composite) | paginated brew counters — see §5.6 |
+| `@TR:32,<page>`  | `@tr:32,<page>,<8 bytes hex>` | `ProductCounters` (composite) | paginated brew counters — see §5.5 |
+| `@TM:50`         | `@tm:50,<num_slots><checksum>` | `int`        | programmable-recipe slot count — see §5.6 |
+| `@TM:42,<slot>`  | `@tm:42,<slot>,<product_code>...` | `PModeSlot` | per-slot product code; `@tm:C2` = not supported on this machine — see §5.6 |
 
 ### 5.2 Unsolicited frames (received)
 
@@ -307,10 +309,13 @@ product code:
   the slot index, with `0xFFFF` reserved for "this code is not
   configured on this machine".
 
-The product-code → human-name mapping in
-`jura_connect.client.PRODUCT_NAMES` is derived from the per-machine
-XMLs under `apk/assets/documents/xml/` and is stable across the
-TT237W family (S8, ENA8, Z8, …). Unknown codes survive into
+The product-code → human-name mapping comes from a `MachineProfile`
+loaded by EF code (see §6 below). `jura_connect.client.PRODUCT_NAMES`
+is the union map over the TT237W family (S8, ENA8, Z8, …) and is the
+fallback when no profile is available. Profile-specific names take
+precedence (`from_slots(slots, profile=…)`), so the S8 EB's `0x2B`
+brews as `cortado` while the same code on the EF536 baseline is left
+under `by_code`. Unknown codes always survive into
 `ProductCounters.by_code` so a future firmware variant still surfaces
 the raw count rather than dropping it on the floor.
 
@@ -326,7 +331,42 @@ Live first page from Kaffeebert (idle, after a few thousand brews):
 The second u16 (`FFFF`) is slot 1 = `ristretto` — not configured on
 this S8 EB.
 
-### 5.6 **Destructive** commands — gated behind `--allow-destructive-commands`
+### 5.6 Programmable-recipe slots (`@TM:50` + `@TM:42,<slot>`)
+
+The dongle's "PMode" interface exposes a small table of user-editable
+recipe slots. Reading it is a two-step exchange:
+
+```
+client → @TM:50
+dongle → @tm:50,<hex bytes ending in a checksum>
+```
+
+The body has one byte per recipe **kind** (the number of which is
+machine-specific — the J.O.E. APK's PModeRequester does not encode it,
+it asks the machine), followed by a single checksum byte equal to the
+sum of those kind-bytes. The Python client sums the body modulo 256
+and rejects the reply when the checksum doesn't match. The total
+number of slots is `sum(per_kind_counts)`.
+
+```
+client → @TM:42,<slot_dec>
+dongle → @tm:42,<slot_dec>,<product_code_hex>...   (slot is configured)
+dongle → @tm:C2                                    (slot not exposed on this machine)
+```
+
+The S8 EB / EF1091 reports 20 slots via `@TM:50` (`@tm:50,0404040404` +
+checksum `7A`) but answers every `@TM:42,<n>` with `@tm:C2`. That is
+the "machine reports a PMode table but doesn't make any of it
+addressable" branch — the EF1091 XML omits the `<PROGRAMMODE>` section
+entirely. `ProgramModeSlots.supported_by_machine` flips to `False` in
+that case, and the CLI prints ``not supported by machine``.
+
+The real machine also resets the TCP connection on some slot indices
+mid-table; the client catches `(ConnectionError, OSError)` and marks
+the remaining slots as unsupported rather than blowing up the whole
+``pmode`` command.
+
+### 5.7 **Destructive** commands — gated behind `--allow-destructive-commands`
 
 These were observed in the EF536 machine XML or the APK and are
 exposed as named registry commands but gated behind
@@ -357,9 +397,60 @@ intent — running `@TG:24` will start a real cleaning cycle.
 
 ---
 
-## 6. Credential persistence
+## 6. Machine variants (`MachineProfile`)
 
-### 6.1 File location
+The 88 machine XML files extracted from the J.O.E. APK
+(`assets/documents/xml/<EF_code>/<version>.xml`) are vendored under
+`jura_connect/data/xml/` and loaded on demand by
+`jura_connect.profile.load_profile(code)`. They provide:
+
+* the **alert bitmap** — bit index → name → severity
+  (`block`/`info`/`ip` in the XML, mapped to `error`/`info`/`process`
+  in Python);
+* the **product code → name** map for the brew-counter table;
+* (where present) the `<PROGRAMMODE>` section, currently exposed only
+  as the kind-count vector consumed by `@TM:50`.
+
+### 6.1 EF code lookup
+
+`jura_connect/data/JOE_MACHINES.TXT` (vendored verbatim from the APK)
+is a `;`-separated table of
+``<article_number>;<friendly_name>;<EF_code>;<type>`` rows. Example
+rows around the S8 EB:
+
+```
+15480;S8 (EB);EF1091;tt237w
+15533;S8 (EB);EF1151;tt237w
+```
+
+The CLI's pair flow reads the article number from a UDP discovery
+reply (offset 68..70, BE u16) and looks the EF code up in this table.
+On firmwares that don't answer unicast UDP (notably TT237W) the
+lookup fails — pass `--machine-type EF1091` explicitly, or retro-fit
+later with ``jura-connect set-machine-type --name … EF1091``.
+
+`jura_connect.profile.iter_profiles()` parses every bundled XML once
+and caches the result via `lru_cache`. Loading a single profile is
+roughly an `ElementTree.parse` + a couple of `findall(".//{*}TAG")`
+sweeps — wildcard namespace traversal is used because each XML
+declares the same `xmlns="http://www.top-tronic.com"` default
+namespace.
+
+### 6.2 EF536 fallback
+
+Credentials without a `machine_type` field fall through to the
+synthetic ``EF536`` baseline (the only profile the codebase hard-coded
+before v0.8.0). The fallback covers the alert names and the
+common product codes for the S8 / ENA8 / Z8 lineage; it doesn't know
+about the S8 EB's `cortado` (`0x2B`) and friends. That's why
+EF1091-paired machines should explicitly carry `machine_type = EF1091`
+in their credential.
+
+---
+
+## 7. Credential persistence
+
+### 7.1 File location
 
 Default: `$XDG_DATA_HOME/jura-connect/credentials.json`
 (fall-back `~/.local/share/jura-connect/credentials.json`).
@@ -367,7 +458,7 @@ Default: `$XDG_DATA_HOME/jura-connect/credentials.json`
 Override with the global CLI flag `--store /path/to.json` or the
 `CredentialStore(path=...)` constructor argument.
 
-### 6.2 On-disk format
+### 7.2 On-disk format
 
 ```json
 {
@@ -377,18 +468,23 @@ Override with the global CLI flag `--store /path/to.json` or the
       "address": "192.168.1.42",
       "conn_id": "jura-connect-7f31a8c2",
       "auth_hash": "13908FE4D3EB986B2465ACDB50398D4C1622836A5A1632257FF065C13156C052",
+      "machine_type": "EF1091",
       "paired_at": "2026-05-11T08:42:00Z"
     }
   }
 }
 ```
 
+`machine_type` is optional — omitted entries silently fall through to
+the EF536 baseline. `CredentialStore.set_machine_type(name, code)`
+retro-fits the field onto an existing entry without forcing a re-pair.
+
 Writes go through a `mkstemp(dir=…)` + `os.replace` rename, so
 mid-write power loss leaves the previous file intact. The file is
 `chmod 0600`'d on write since the hash grants full control over the
 machine.
 
-### 6.3 End-to-end workflow
+### 7.3 End-to-end workflow
 
 ```text
 ┌──────────┐  jura-connect discover           ┌────────────────┐
@@ -431,18 +527,20 @@ machine.
 
 ---
 
-## 7. Code map
+## 8. Code map
 
 | Module                       | Responsibility |
 | ---------------------------- | -------------- |
 | `jura_connect/crypto.py`        | per-nibble permutation, escape handling |
 | `jura_connect/protocol.py`      | frame writer/reader on top of `crypto` |
 | `jura_connect/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
-| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine |
-| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `mem-read` / …) used by CLI and library |
-| `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600) |
+| `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 88 bundled XMLs + `JOE_MACHINES.TXT` |
+| `jura_connect/data/`            | vendored XMLs + `JOE_MACHINES.TXT`; shipped as `package-data` so installed wheels load profiles via `importlib.resources` |
+| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers |
+| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / …) used by CLI and library |
+| `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600); `machine_type` field |
 | `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
-| `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds`) |
+| `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds` / `machine-types` / `set-machine-type`) |
 | `tests/`                     | pytest suite — driven through the simulator end-to-end |
 | `flake.nix`                  | dev shell + package + checks (passthrough pytest) |
 
@@ -452,11 +550,8 @@ breaks both halves of the test-suite simultaneously.
 
 ---
 
-## 8. Known unknowns / next steps
+## 9. Known unknowns / next steps
 
-* `@TM:50` (PMode num-slots) and `@TM:42,<slot>` (slot product read)
-  are documented in the APK; not yet wrapped because they're highly
-  per-machine and depend on parsing the device's XML map.
 * `@HU?` returned `@hu:800` in some probes but `@TF:<hex>` in others —
   the dongle may have multiple response code paths for the same input
   depending on internal state. Currently the client just waits for the
@@ -464,3 +559,8 @@ breaks both halves of the test-suite simultaneously.
 * Locked-screen behaviour: `@TS:01` followed by `@TS:00` works
   cleanly, but issuing `@TS:01` and then disconnecting leaves the
   display locked until power cycle.
+* `@TM:42` returning data on a machine that *does* expose programmable
+  slots has not been observed live — the S8 EB / EF1091 reports a
+  slot count via `@TM:50` but answers `@tm:C2` for every index. A
+  TT237W variant with a populated `<PROGRAMMODE>` XML section is
+  needed to validate the configured-slot decode path.

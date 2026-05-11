@@ -16,6 +16,7 @@ end-to-end against a **JURA S8 EB** running firmware **TT237W V06.11**
 | Wire framing (`* … \r\n`) and obfuscation cipher | ✓ ; 2 000-input random round-trip + every key value exhaustively tested |
 | storage of authentication codes | ✓ |
 | Read commands: maintenance counters, maintenance %, machine status / alerts, screen lock/unlock | ✓ |
+| Per-machine profiles — 88 bundled XMLs from the J.O.E. APK; alert names + product codes are looked up per `EF_code` so a Cortado on an S8 EB names itself, not `0x2B=2` | ✓ |
 | Brewing / writes / maintenance processes | available but require extra attention |
 
 ## Installation
@@ -51,12 +52,43 @@ connecting to 192.168.1.42:51515 as conn-id 'jura-connect-7f31a8c2'
 look at the coffee machine -- a 'Connect' prompt should appear.
   -> Coffee machine should be showing a 'Connect' prompt — press OK on the machine to accept this device (waiting up to 60s).
 handshake -> CORRECT  (@hp4:13908FE4...C13156C052)
+machine type   : EF1091  (discovery)
 saved credentials for 'Kaffeebert' -> /home/you/.local/share/jura-connect/credentials.json
 ```
 
 The auth-hash is written to `$XDG_DATA_HOME/jura-connect/credentials.json`
 with `0600` permissions. Override the location with the global
 `--store /path/to.json` flag.
+
+### Machine variants (per-machine profiles)
+
+Different Jura models speak the same wire protocol but disagree about
+which **product codes** mean what and which **alert bits** map to which
+display strings. The 88 machine XMLs from the J.O.E. APK are bundled
+with this package and looked up by EF code; pairing tries to detect the
+code automatically from UDP discovery, but on firmwares that don't
+answer unicast UDP (notably TT237W) you'll want to pass it explicitly.
+
+```sh
+# Find your machine in the catalogue
+$ jura-connect machine-types --filter "S8 (EB)"
+# matches for 'S8 (EB)':
+   15480  S8 (EB)                         EF1091
+   15482  S8 (EB)                         EF1151
+
+# Pair with an explicit machine type
+$ jura-connect pair 192.168.1.42 --name Kaffeebert --machine-type EF1091
+
+# Or retro-fit a machine type onto an already-paired credential
+$ jura-connect set-machine-type --name Kaffeebert EF1091
+set 'Kaffeebert' machine type to EF1091 -> /home/you/.local/share/jura-connect/credentials.json
+
+# Override the stored profile for one invocation
+$ jura-connect command --name Kaffeebert --machine-type EF1091 brews
+```
+
+Credentials without a `machine_type` field fall through to the EF536
+baseline, so older paired machines keep working without migration.
 
 ### Run commands against a paired machine
 
@@ -72,6 +104,7 @@ available commands:
     percent                  maintenance percent indicators (@TG:C0)
     status                   parsed status / active alerts (@HU? -> @TF:)
     brews                    per-product brew counters (@TR:32 paginated; 16 pages)
+    pmode                    programmable-recipe slots (@TM:50 + @TM:42,<slot>); per-machine
     lock                     lock the front-panel display (@TS:01)
     unlock                   unlock the front-panel display (@TS:00)
     mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
@@ -132,8 +165,16 @@ total brews : 3229
   lungo               : 3
   espresso_doppio     : 20
   flat_white          : 210
-  (unnamed slots): 0x2B=2, 0x2C=1
+  cortado             : 2
+  sweet_latte         : 1
+  2_espressi          : 1
+  2_coffee            : 10
 ```
+
+The product names above are lifted from the S8 EB's own XML
+(`EF1091`). Without a profile the same machine would surface
+`0x2B=2`, `0x2C=1`, `0x31=1`, `0x36=10` as anonymous slots — the EF536
+baseline doesn't know what those codes brew.
 
 Status output now distinguishes blocking **errors** (machine is
 stuck, user must act) from **info** flags (low-supply reminders such
@@ -141,6 +182,18 @@ as `no_beans` — informational, not an error) and **process** flags
 (periodic maintenance prompts such as `cappu_rinse_alert`). The
 unsplit ``active_alerts`` is still on the dataclass for backwards
 compatibility.
+
+The `pmode` command reads the programmable-recipe slot table via
+`@TM:50` + `@TM:42,<slot>`. On the S8 EB / EF1091 every slot returns
+`@tm:C2` ("not supported by machine"), and `pmode` surfaces that as
+``not supported by machine`` instead of crashing — useful as a
+discriminator between firmware variants:
+
+```sh
+$ jura-connect command --name Kaffeebert pmode
+handshake -> CORRECT  (@hp4)
+pmode: 20 slot(s) reported by @TM:50, but every slot returned C2 (= 'not supported by machine'). This firmware does not expose pmode entries over WiFi.
+```
 
 For one-off advanced use, `raw` echoes any wire command verbatim:
 
@@ -295,8 +348,8 @@ Concretely the gate is:
 1. `ruff check jura_connect/ tests/` — lint.
 2. `ruff format --check jura_connect/ tests/` — formatting drift.
 3. `ty check jura_connect/` — Astral's type checker on the library.
-4. `pytest tests/ -q` — the 319-case test suite against the in-tree
-   simulator.
+4. `pytest tests/ -q` — the 340-case test suite against the in-tree
+   simulator, including 88-XML profile-registry coverage.
 
 If you want to run any one of them ad-hoc without the whole build,
 enter the dev shell (`nix develop`) which has all four tools on
@@ -317,8 +370,12 @@ The test-suite covers:
   workflow (`test_credentials.py`),
 * every entry of the named-command registry round-tripped through the
   simulator, plus error paths (`test_commands.py`),
+* the 88-XML profile registry — every bundled machine parses cleanly,
+  EF1091 surfaces its S8 EB-specific product codes, alert severities
+  follow the XML's `ALERT.Type` attribute (`test_profile.py`),
 * CLI smoke tests for `command --list`, `command info` against the
-  simulator, and credential-store interactions (`test_cli.py`).
+  simulator, the `machine-types` / `set-machine-type` subcommands,
+  and credential-store interactions (`test_cli.py`).
 
 ## Versioning
 

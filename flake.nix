@@ -9,36 +9,27 @@
       let
         pkgs = import nixpkgs { inherit system; };
         python = pkgs.python313;
-        # The package's check phase runs everything CI runs: ruff
-        # lint + format, ty type-check, and the pytest suite. Putting
-        # them on the package (rather than in separate `checks.*`
-        # derivations) means a plain `nix build .#default` exercises
-        # the full QA gate.
+        # The package's check phase runs ruff (lint + format) and the
+        # pytest suite. ty lives in a separate `checks.ty` derivation
+        # (below) because buildPythonPackage populates PYTHONPATH with
+        # site-packages dirs that mask the source tree, breaking
+        # relative-import resolution inside the package — running ty
+        # standalone, outside that env, sidesteps the issue.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_connect";
           version = "0.7.0";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];
-          # ruff and ty work on the source tree and run before the
-          # build (preBuild), so they're build-time tools. pytest
-          # exercises the installed package and stays under
-          # nativeCheckInputs / pytestCheckHook.
-          nativeBuildInputs = [ pkgs.ruff pkgs.ty ];
+          nativeBuildInputs = [ pkgs.ruff ];
           nativeCheckInputs = [ python.pkgs.pytestCheckHook ];
           enabledTestPaths = [ "tests" ];
           pytestFlags = [ "-q" ];
-          # Lint + type-check the source before it is built. Running
-          # at preBuild keeps ty looking only at the source tree (not
-          # the post-install site-packages copy, which would create a
-          # second copy of the package and confuse module resolution).
           preBuild = ''
             echo "==> ruff check"
             ruff check jura_connect/ tests/
             echo "==> ruff format --check"
             ruff format --check jura_connect/ tests/
-            echo "==> ty check jura_connect/"
-            ty check jura_connect/
           '';
           doCheck = true;
           meta = {
@@ -46,14 +37,29 @@
             mainProgram = "jura-connect";
           };
         };
+        # ty (Astral's type checker) on the library. Runs outside the
+        # buildPythonPackage env so its PYTHONPATH manipulation doesn't
+        # mask the source tree.
+        tyCheck = pkgs.runCommand "jura-connect-ty"
+          {
+            nativeBuildInputs = [ pkgs.ty ];
+            src = ./.;
+          } ''
+            cp -R "$src" workdir
+            chmod -R u+w workdir
+            cd workdir
+            ty check jura_connect/
+            touch $out
+          '';
       in {
         packages.default = package;
         packages.jura-connect = package;
         apps.default = flake-utils.lib.mkApp { drv = package; };
-        # `nix flake check` builds the package, which itself runs
-        # ruff + ty + pytest in its preCheck/checkPhase. One QA gate,
-        # one derivation.
+        # `nix flake check` builds the package (ruff + pytest) AND the
+        # standalone ty derivation. Together they exercise the full
+        # QA gate that CI runs.
         checks.default = package;
+        checks.ty = tyCheck;
         devShells.default = pkgs.mkShell {
           packages = [
             (python.withPackages (ps: [ ps.pytest ]))

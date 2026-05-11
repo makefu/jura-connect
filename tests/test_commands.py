@@ -282,6 +282,74 @@ def test_brews_format_includes_named_products(sim) -> None:
     assert "espresso_doppio" in text
 
 
+def test_brews_uses_profile_to_name_machine_specific_products(sim) -> None:
+    """With an EF1091 profile loaded, codes 0x2B/0x2C/0x31/0x36 are
+    named (cortado, sweet_latte, 2_espressi, 2_coffee) rather than
+    falling through to the EF536 baseline where they're unknown."""
+    from jura_connect.client import JuraClient
+    from jura_connect.profile import load_profile
+
+    host, port = sim.address
+    c = JuraClient(
+        host,
+        port=port,
+        conn_id="profile-tests",
+        auth_hash="",
+        profile=load_profile("EF1091"),
+    )
+    r = c.pair(timeout=2.0)
+    assert r.state == "CORRECT"
+    try:
+        result = run_named(c, "brews", timeout=3.0)
+    finally:
+        c.close()
+    pc = result.value
+    assert pc.by_name["cortado"] == 2  # 0x2B
+    assert pc.by_name["sweet_latte"] == 1  # 0x2C
+    assert pc.by_name["2_espressi"] == 1  # 0x31 — EF536 has this at 0x12
+    assert pc.by_name["2_coffee"] == 10  # 0x36 — EF536 has this at 0x13
+    # Without the profile these would all show up in by_code only.
+    assert "cortado" in result.format()
+    assert "0x2B" not in result.format()
+
+
+def test_pmode_empty_when_machine_returns_c2(sim) -> None:
+    """The default simulator config mirrors Kaffeebert: @TM:50 reports
+    20 slots but @TM:42 returns C2 for everything. The format output
+    must explain that, not pretend the slots are configured."""
+    c = _paired(sim)
+    try:
+        result = run_named(c, "pmode", timeout=2.0)
+    finally:
+        c.close()
+    pm = result.value
+    assert pm.num_slots == 20
+    assert pm.slots == ()
+    assert "not supported by machine" in pm.format()
+    # JSON-serialisable.
+    import json as _json
+
+    _json.loads(_json.dumps(result.to_dict()))
+
+
+def test_pmode_with_configured_slots(sim_factory) -> None:
+    """When the simulator exposes slot product codes, the parser
+    populates ProgramModeSlots.slots accordingly."""
+    sim = sim_factory(pmode_slots={0: 0x02, 1: 0x03, 5: 0x28})
+    c = _paired(sim)
+    try:
+        result = run_named(c, "pmode", timeout=2.0)
+    finally:
+        c.close()
+    pm = result.value
+    assert pm.num_slots == 20
+    assert len(pm.slots) == 3
+    by_index = {s.index: s.product_code for s in pm.slots}
+    assert by_index == {0: 0x02, 1: 0x03, 5: 0x28}
+    # Every other slot is unsupported.
+    assert set(pm.unsupported) == set(range(20)) - {0, 1, 5}
+
+
 def test_status_categorisation_no_beans_is_info_not_error(sim) -> None:
     """The user explicitly flagged this: no_beans on Kaffeebert means
     'bin running low', not 'machine is stuck'. It must NOT appear under

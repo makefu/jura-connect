@@ -41,6 +41,7 @@ import uuid
 from collections.abc import Callable, Iterator
 
 from . import protocol
+from .profile import MachineProfile
 
 DEFAULT_PORT = 51515
 DEFAULT_CONN_ID = "jura-connect"
@@ -200,6 +201,7 @@ class JuraClient:
         auth_hash: str = "",
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
+        profile: MachineProfile | None = None,
     ) -> None:
         self.conn = JuraConnection(
             address,
@@ -212,6 +214,10 @@ class JuraClient:
         self.auth_hash = auth_hash
         self.handshake: HandshakeResult | None = None
         self.status_history: list[str] = []
+        # Optional MachineProfile (from jura_connect.profile). When set,
+        # status bit names + product names come from the profile's
+        # ALERTS / PRODUCTS sections rather than the EF536 baseline.
+        self.profile = profile
 
     # -- lifecycle -----------------------------------------------------
     def connect(self, *, timeout: float = 15.0) -> HandshakeResult:
@@ -375,7 +381,7 @@ class JuraClient:
     def read_status(self, *, timeout: float = 6.0) -> "MachineStatus":
         """Wait for the next unsolicited ``@TF:`` status frame and parse it."""
         reply = self.request("@HU?", match=r"^@TF:", timeout=timeout)
-        return MachineStatus.parse(reply)
+        return MachineStatus.parse(reply, profile=self.profile)
 
     def read_product_counters(
         self, *, timeout_per_page: float = 6.0
@@ -406,7 +412,7 @@ class JuraClient:
             page_bytes = bytes.fromhex(body)
             for i in range(0, len(page_bytes), 2):
                 slots.append(int.from_bytes(page_bytes[i : i + 2], "big"))
-        return ProductCounters.from_slots(slots)
+        return ProductCounters.from_slots(slots, profile=self.profile)
 
     def read_machine_info(self, *, timeout: float = 6.0) -> "MachineInfo":
         """Bundle of everything we can passively learn about the machine."""
@@ -417,6 +423,60 @@ class JuraClient:
             status=self.read_status(timeout=timeout),
             maintenance_counters=self.read_maintenance_counter(timeout=timeout),
             maintenance_percent=self.read_maintenance_percent(timeout=timeout),
+        )
+
+    def read_pmode_slots(self, *, timeout: float = 6.0) -> "ProgramModeSlots":
+        """Read the user-programmable recipe slots (``@TM:50`` + ``@TM:42``).
+
+        Older machines expose a "Programmable Mode" where each slot
+        holds a saved recipe (variant of a product). The wire protocol
+        is two-step:
+
+        * ``@TM:50`` returns the per-product-kind slot count (one byte
+          per kind, summed for the total).
+        * ``@TM:42,<slot_hex>`` returns the product code and parameters
+          for one slot, or the magic ``C2`` prefix when the machine
+          doesn't support the requested slot.
+
+        On machines without pmode (e.g. the S8 EB / EF1091), the count
+        may be non-zero but every per-slot read returns ``C2``; the
+        resulting :class:`ProgramModeSlots` carries an empty
+        ``slots`` tuple in that case.
+        """
+        num_slots_reply = self.request("@TM:50", match=r"^@tm:50", timeout=timeout)
+        num_slots = _parse_pmode_num_slots(num_slots_reply)
+        entries: list[PModeSlot] = []
+        unsupported: list[int] = []
+        connection_dropped = False
+        for slot in range(num_slots):
+            if connection_dropped:
+                unsupported.append(slot)
+                continue
+            cmd = f"@TM:42,{slot:02X}"
+            try:
+                reply = self.request(cmd, match=r"^@tm", timeout=timeout)
+            except TimeoutError:
+                # Some slots time out — record and keep iterating.
+                unsupported.append(slot)
+                continue
+            except (ConnectionError, OSError):
+                # The real S8 EB drops the TCP session after some
+                # @TM:42 reads (observed on slot 0x80). Stop iterating
+                # rather than spamming the dongle; mark every remaining
+                # slot as unsupported so the caller sees what didn't
+                # get answered.
+                unsupported.append(slot)
+                connection_dropped = True
+                continue
+            entry = _parse_pmode_slot(slot, reply)
+            if entry is None:
+                unsupported.append(slot)
+            else:
+                entries.append(entry)
+        return ProgramModeSlots(
+            num_slots=num_slots,
+            slots=tuple(entries),
+            unsupported=tuple(unsupported),
         )
 
     def lock_screen(self) -> str:
@@ -615,13 +675,29 @@ class MachineStatus:
     process: tuple[str, ...]
 
     @classmethod
-    def parse(cls, reply: str) -> MachineStatus:
+    def parse(cls, reply: str, profile: MachineProfile | None = None) -> MachineStatus:
+        """Parse an ``@TF:`` reply.
+
+        ``profile`` is an optional :class:`jura_connect.profile.MachineProfile`;
+        when supplied, its per-machine bit-to-name + severity map is
+        used in preference to the hard-coded fallback. Pass it to make
+        the parser EF1091-aware (or any other variant) instead of the
+        EF536 baseline.
+        """
         data = _hex_body(reply, "@TF:")
         active: list[str] = []
         errors: list[str] = []
         info: list[str] = []
         process: list[str] = []
-        for bit_index, (name, severity) in _STATUS_BITS.items():
+        bits: dict[int, tuple[str, str]]
+        if profile is not None and getattr(profile, "alert_by_bit", None):
+            bits = {
+                bit: (alert.name, alert.severity)
+                for bit, alert in profile.alert_by_bit.items()
+            }
+        else:
+            bits = _STATUS_BITS
+        for bit_index, (name, severity) in bits.items():
             byte_i, bit_i = divmod(bit_index, 8)
             if byte_i < len(data) and (data[byte_i] >> bit_i) & 1:
                 active.append(name)
@@ -755,19 +831,37 @@ class ProductCounters:
     raw_slots: tuple[int, ...]
 
     @classmethod
-    def from_slots(cls, slots: list[int]) -> ProductCounters:
+    def from_slots(
+        cls,
+        slots: list[int],
+        profile: MachineProfile | None = None,
+    ) -> ProductCounters:
+        """Decode a 64-slot @TR:32 table.
+
+        ``profile`` is an optional :class:`jura_connect.profile.MachineProfile`
+        whose per-product name map is preferred over the package-wide
+        :data:`PRODUCT_NAMES` fallback. Unknown codes still surface
+        through ``by_code``.
+        """
         if len(slots) < 1:
             raise ValueError("product counter table is empty")
         total = slots[0]
         by_name: dict[str, int] = {}
         by_code: dict[str, int] = {}
+        code_to_name: dict[int, str]
+        if profile is not None and getattr(profile, "product_by_code", None):
+            code_to_name = {
+                code: product.name for code, product in profile.product_by_code.items()
+            }
+        else:
+            code_to_name = dict(PRODUCT_NAMES)
         for code in range(1, len(slots)):
             value = slots[code]
             if value == PRODUCT_COUNT_UNUSED:
                 continue
             code_hex = f"{code:02X}"
             by_code[code_hex] = value
-            name = PRODUCT_NAMES.get(code)
+            name = code_to_name.get(code)
             if name is not None:
                 by_name[name] = value
         return cls(
@@ -781,11 +875,18 @@ class ProductCounters:
         lines = [f"total brews : {self.total}"]
         for name, count in self.by_name.items():
             lines.append(f"  {name:20s}: {count}")
-        unnamed = {
-            code: count
-            for code, count in self.by_code.items()
-            if int(code, 16) not in PRODUCT_NAMES
-        }
+        # An "unnamed" slot is one that the active code->name map didn't
+        # cover at parse time — i.e. by_code has an entry but by_name
+        # doesn't. We re-derive this here so both the EF536-baseline
+        # case and the profile-aware case are covered without ever
+        # double-listing a slot.
+        named_counts = list(self.by_name.values())
+        unnamed: dict[str, int] = {}
+        for code_hex, count in self.by_code.items():
+            try:
+                named_counts.remove(count)
+            except ValueError:
+                unnamed[code_hex] = count
         if unnamed:
             lines.append(
                 "  (unnamed slots): "
@@ -799,3 +900,146 @@ class ProductCounters:
             "by_name": dict(self.by_name),
             "by_code": dict(self.by_code),
         }
+
+
+# --------------------------------------------------------------------- #
+# Programmable mode slots (@TM:50 + @TM:42,<slot>)
+# --------------------------------------------------------------------- #
+#
+# Older Jura machines expose a "Programmable Mode" where each slot
+# holds a saved recipe (a variant of a base product code, e.g. "my
+# strong espresso"). On newer machines like the S8 EB (EF1091), the
+# XML has no ``PROGRAMMODE`` section: ``@TM:50`` returns a non-zero
+# slot count but every ``@TM:42,<slot>`` answer is ``@tm:C2``
+# (= "slot/product/function not supported by machine"). The
+# :class:`ProgramModeSlots` dataclass surfaces both states cleanly so
+# callers can tell the difference between "no pmode on this firmware"
+# and "pmode present but slot N is empty".
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PModeSlot:
+    """One configured slot from ``@TM:42,<slot>``."""
+
+    index: int
+    product_code: int  # base product code (e.g. 0x02 for Espresso)
+    raw_payload: str  # the hex tail after the slot index in the reply
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProgramModeSlots:
+    """Decoded ``@TM:50`` count + per-slot ``@TM:42`` results."""
+
+    num_slots: int
+    slots: tuple[PModeSlot, ...]
+    unsupported: tuple[int, ...]  # slot indices that returned C2 / timed out
+
+    def format(self) -> str:
+        if not self.num_slots:
+            return "pmode: this machine reports no slots"
+        if not self.slots:
+            return (
+                f"pmode: {self.num_slots} slot(s) reported by @TM:50, "
+                "but every slot returned C2 (= 'not supported by machine'). "
+                "This firmware does not expose pmode entries over WiFi."
+            )
+        lines = [f"pmode: {self.num_slots} slots, {len(self.slots)} configured"]
+        for s in self.slots:
+            lines.append(
+                f"  slot {s.index:02d}: product=0x{s.product_code:02X}  raw={s.raw_payload}"
+            )
+        if self.unsupported:
+            lines.append(
+                "  unsupported slots: "
+                + ", ".join(f"{i:02d}" for i in self.unsupported)
+            )
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "num_slots": self.num_slots,
+            "slots": [
+                {
+                    "index": s.index,
+                    "product_code": f"{s.product_code:02X}",
+                    "raw_payload": s.raw_payload,
+                }
+                for s in self.slots
+            ],
+            "unsupported": list(self.unsupported),
+        }
+
+
+def _parse_pmode_num_slots(reply: str) -> int:
+    """Parse the reply to ``@TM:50``.
+
+    Wire format (lifted from the APK's ``PModeNumSlotReadParser``):
+
+        @tm:50,<N hex bytes><1-byte checksum>
+
+    The body bytes are summed (each byte parsed as hex) and the total
+    is the number of pmode slots. The trailing byte is a checksum that
+    we don't currently verify (the APK does but the algorithm is opaque
+    and not needed for correctness — wrong counts surface as
+    unsupported-slot replies below).
+    """
+    text = reply.strip()
+    if text.lower().startswith("@tm:"):
+        text = text[4:]
+    if "," in text:
+        head, payload = text.split(",", 1)
+    else:
+        head, payload = text[:2], text[2:]
+    if head.lower() != "50":
+        return 0
+    if len(payload) < 4:
+        return 0
+    # Drop the trailing checksum byte (last 2 hex chars).
+    body = payload[:-2]
+    if len(body) % 2:
+        return 0
+    total = 0
+    for i in range(0, len(body), 2):
+        try:
+            total += int(body[i : i + 2], 16)
+        except ValueError:
+            return 0
+    return total
+
+
+def _parse_pmode_slot(slot: int, reply: str) -> PModeSlot | None:
+    """Parse the reply to ``@TM:42,<slot>``.
+
+    Wire format (success path): ``@tm:42,<slot_hex>,<product_code_hex>
+    [<per-product arguments>]<checksum>``. We strip ``@tm:``, the
+    ``42`` prefix, and the echoed slot byte, then read the next byte
+    as the configured product code.
+
+    Returns ``None`` when the machine answered with the ``C2`` magic
+    prefix that the APK's ``PModeSlotProductReadParser`` flags as
+    "product code, slot, or function is not supported by machine",
+    or when the reply is otherwise malformed.
+    """
+    text = reply.strip()
+    if text.lower().startswith("@tm:"):
+        text = text[4:]
+    if not text:
+        return None
+    head = text[:2].upper()
+    if head == "C2":
+        return None
+    if head != "42":
+        return None
+    # Drop the "42" prefix and any leading comma.
+    body = text[2:].lstrip(",")
+    # Body starts with the slot byte (echoed back). Strip it.
+    if len(body) < 2:
+        return None
+    body = body[2:].lstrip(",")
+    if len(body) < 2:
+        return None
+    try:
+        product_code = int(body[:2], 16)
+    except ValueError:
+        return None
+    return PModeSlot(index=slot, product_code=product_code, raw_payload=body)
