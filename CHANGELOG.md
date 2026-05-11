@@ -4,6 +4,28 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-05-11
+
+### Added
+- Destructive command names are now part of the registry and reachable
+  by name: `clean`, `decalc`, `filter-change`, `cappu-clean`,
+  `cappu-rinse`, `reset-counters`, `restart`, `power-off`,
+  `brew <recipe>`, `set-pin <pin>`, `set-ssid <ssid>`,
+  `set-password <pwd>`, `set-name <name>`.
+- Each destructive command carries a human-readable `danger`
+  explanation that the new `jura_wifi.DestructiveCommandError`
+  surfaces verbatim, so users see *what* the command does on the
+  machine and *how to recover* if it bites.
+- New CLI flag `--allow-destructive-commands` and matching
+  `run_named(..., allow_destructive=True)` library parameter. Without
+  the flag the command is refused *before* it touches the wire and
+  the user gets a message explaining the danger and how to override.
+- `raw` now inspects its payload against `DESTRUCTIVE_PREFIXES` and
+  is subject to the same gate, so the escape hatch can't be used as
+  an accidental bypass.
+- `command --list` separates the catalogue into read-only and
+  destructive groups.
+
 ## [0.2.0] — 2026-05-11
 
 ### Added

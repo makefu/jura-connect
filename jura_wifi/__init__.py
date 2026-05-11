@@ -19,7 +19,7 @@ APK. Layered as:
 * :mod:`jura_wifi.credentials` -- JSON file storage of pairing secrets.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .client import (
     HandshakeError,

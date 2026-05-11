@@ -12,7 +12,7 @@
         # Build the library itself with a stock setuptools backend.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_wifi";
-          version = "0.2.0";
+          version = "0.3.0";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];

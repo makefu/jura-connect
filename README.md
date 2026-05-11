@@ -71,15 +71,31 @@ command, not a raw hex code. Discover the catalog with:
 ```sh
 $ jura-wifi command --list
 available commands:
-  info                  full read-only snapshot (status + counters + percent)
-  counters              maintenance counters (@TG:43)
-  percent               maintenance percent indicators (@TG:C0)
-  status                parsed status / active alerts (@HU? -> @TF:)
-  lock                  lock the front-panel display (@TS:01)
-  unlock                unlock the front-panel display (@TS:00)
-  mem-read <addr>       read a memory/setting slot (@TM:<addr>); firmware-specific
-  register-read <bank>  read a register bank (@TR:<bank>); firmware-specific
-  raw <frame>           send a verbatim '@…' command; use with care
+  read-only:
+    info                     full read-only snapshot (status + counters + percent)
+    counters                 maintenance counters (@TG:43)
+    percent                  maintenance percent indicators (@TG:C0)
+    status                   parsed status / active alerts (@HU? -> @TF:)
+    lock                     lock the front-panel display (@TS:01)
+    unlock                   unlock the front-panel display (@TS:00)
+    mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
+    register-read <bank>     read a register bank (@TR:<bank>); firmware-specific
+    raw <frame>              send a verbatim '@…' command; payload checked against the destructive set
+
+  destructive (require --allow-destructive-commands; see 'jura-wifi command --help'):
+    clean                    [destructive] start coffee-system cleaning cycle (@TG:24)
+    decalc                   [destructive] start descaling cycle (@TG:25)
+    filter-change            [destructive] run water-filter change procedure (@TG:26)
+    cappu-clean              [destructive] start cappuccino-system cleaning (@TG:21)
+    cappu-rinse              [destructive] rinse the milk system (@TG:23)
+    reset-counters           [destructive] zero every maintenance counter (@TG:7E)
+    restart                  [destructive] reboot the WiFi dongle (@TF:02)
+    power-off                [destructive] put the machine into standby (@AN:02)
+    brew <recipe>            [destructive] start brewing a recipe (@TP:<recipe>)
+    set-pin <pin>            [destructive] write a new front-panel PIN (@HW:01,<pin>)
+    set-ssid <ssid>          [destructive] write a new WiFi SSID for the dongle (@HW:80,<ssid>)
+    set-password <password>  [destructive] write a new WiFi password (@HW:81,<pwd>)
+    set-name <name>          [destructive] rename the dongle (@HW:82,<name>)
 ```
 
 The same catalogue is reachable from Python as
@@ -109,10 +125,7 @@ watching status for 5.0s ...
 <-- '@TF:0004000008000000'
 ```
 
-For one-off advanced use, `raw` echoes any wire command verbatim — use
-sparingly, the destructive commands documented in
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md) §5.5 are deliberately not in the
-named registry:
+For one-off advanced use, `raw` echoes any wire command verbatim:
 
 ```sh
 $ jura-wifi command --name Kaffeebert raw '@TG:43'
@@ -123,6 +136,42 @@ handshake -> CORRECT  (@hp4)
 `--watch SECONDS` streams unsolicited `@TF:` (status) and `@TV:`
 (progress) frames; the parsers and the maintenance helpers all just
 call into the same `JuraClient.request()` / `iter_frames()`.
+
+### Destructive commands (gated)
+
+Commands that change the machine's physical state — start cleaning
+cycles, brew product, reset counters, write WiFi credentials or the
+machine PIN — live in the same registry but are refused by default
+*before* anything is sent. The error you get spells out the risk:
+
+```sh
+$ jura-wifi command --name Kaffeebert clean
+handshake -> CORRECT  (@hp4)
+refused: 'clean' is a destructive command — starts a real cleaning
+cycle (~5 min) that consumes a cleaning tablet and locks the machine
+until the cycle finishes. There is no remote 'abort'.
+Re-run with --allow-destructive-commands (CLI) or
+allow_destructive=True (library) if you really mean it.
+```
+
+Pass `--allow-destructive-commands` once you've read what the command
+does and have any required supplies / containers / cups in place:
+
+```sh
+$ jura-wifi command --name Kaffeebert --allow-destructive-commands clean
+```
+
+The list of gated wire prefixes (`@TG:21/23/24/25/26/7E/FF`, `@TF:02`,
+`@AN:02`, `@TP:`, `@HW:`) is exported as
+`jura_wifi.DESTRUCTIVE_PREFIXES`. The `raw` escape hatch inspects its
+argument against the same list, so `command raw '@TG:24'` is gated
+too — the bypass cannot be used by accident.
+
+Wrong values for `set-pin` / `set-ssid` / `set-password` can leave you
+locked out of the machine or unable to reach the dongle over WiFi;
+the only recovery is a **factory reset on the machine itself**.
+`reset-counters` is **irreversible** — there is no way to learn back
+when the machine was last serviced once it's been zeroed.
 
 ### List / remove stored credentials
 
