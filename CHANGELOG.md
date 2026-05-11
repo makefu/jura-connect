@@ -4,6 +4,30 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-05-11
+
+### Added
+- GitHub Actions workflow ([.github/workflows/ci.yml](.github/workflows/ci.yml))
+  running `nix build .#default` on every push and PR. README gains a
+  CI badge that turns green only when ruff, ty, *and* pytest pass.
+- The package's build derivation now runs ruff (lint + format check)
+  and ty (type check) in `preBuild`, alongside the existing pytest
+  in checkPhase. `nix build .#default` is the single QA gate.
+
+### Changed
+- **Breaking (small):** `CredentialStore.list()` was renamed to
+  `CredentialStore.entries()` so the method no longer shadows the
+  builtin (which prevented ty from analysing its return annotation).
+  CLI internals and tests follow; downstream users with explicit
+  ``store.list()`` calls need to rename.
+
+### Fixed
+- ty type errors in `discovery._broadcast_addresses` /
+  `_local_ipv4_networks` — the stdlib stubs leave
+  `getaddrinfo(...)[4][0]` as `str | int`; narrowed via an
+  `isinstance(ip, str)` guard rather than a `# type: ignore`.
+- Whole codebase reformatted to ruff 0.15 defaults.
+
 ## [0.5.0] — 2026-05-11
 
 ### Added
