@@ -409,6 +409,10 @@ handshake.
 
 Without the Jutta-Proto work the project would not have started in first place.
 
+## Usage of LLMs
+
+This project has been 100% written by the Claude Code Model "Opus 4.7" starting 2026-05-11
+
 ## License
 
-MIT.
+MIT
