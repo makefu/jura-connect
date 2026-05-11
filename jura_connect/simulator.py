@@ -353,6 +353,52 @@ class Simulator:
                 arg = arg.upper()
                 if len(rest) < 2:
                     return "@an:error"
+                # Bank-write: @TM:00,FC,<arg1><val1>...<argN><valN><csum>.
+                # Recognised by arg="00" and rest starting with "FC,".
+                # Each <valN> is variable-length; we infer the width from
+                # the currently-stored value for the same arg.
+                if arg == "00" and rest.upper().startswith("FC,"):
+                    block_with_csum = rest[len("FC,") :]
+                    if len(block_with_csum) < 2:
+                        return "@an:error"
+                    block = block_with_csum[:-2].upper()
+                    csum_recv = block_with_csum[-2:].upper()
+                    expected = _settings_checksum(f"00,FC,{block}")
+                    if csum_recv != expected:
+                        log.warning(
+                            "simulator: bad bank checksum for %s (got %s, expected %s)",
+                            cmd,
+                            csum_recv,
+                            expected,
+                        )
+                        return "@an:error"
+                    # Walk (arg, value) pairs. Most settings are 1
+                    # byte (2 hex chars); auto-off (P_Argument=13)
+                    # uses a self-describing leading-byte encoding:
+                    #   0x0F      → 1-byte literal (e.g. "0F" = 15min)
+                    #   0x21,<u8> → 2-byte (e.g. "211E" = 30min)
+                    #   0x22,<u16>→ 3-byte (e.g. "220168" = 6h)
+                    parsed: dict[str, str] = {}
+                    i = 0
+                    while i < len(block):
+                        if i + 2 > len(block):
+                            return "@an:error"
+                        bank_arg = block[i : i + 2].upper()
+                        i += 2
+                        if bank_arg == "13":
+                            if i + 2 > len(block):
+                                return "@an:error"
+                            lead = block[i : i + 2].upper()
+                            width = {"0F": 2, "21": 4, "22": 6}.get(lead, 2)
+                        else:
+                            width = 2
+                        if i + width > len(block):
+                            return "@an:error"
+                        parsed[bank_arg] = block[i : i + width].upper()
+                        i += width
+                    for bank_arg, new_value in parsed.items():
+                        self.config.settings[bank_arg] = new_value
+                    return "@tm:00"
                 value_hex = rest[:-2].upper()
                 csum_recv = rest[-2:].upper()
                 payload_for_csum = f"{arg},{value_hex}"

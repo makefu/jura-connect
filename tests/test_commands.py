@@ -747,6 +747,78 @@ def test_setting_write_wraps_in_lock_unlock(sim) -> None:
     assert "0x0C" in str(read.value)
 
 
+def test_setting_write_bank_arg_uses_bulk_format(sim) -> None:
+    """Regression for v0.9.3: bank args (hardness/units/language/
+    auto_off on EF1091) need the bulk ``@TM:00,FC,<block><csum>``
+    form; the individual ``@TM:<arg>,<val>`` write was ACKed by the
+    dongle as ``@tm:00`` but the machine ignored the value. End-to-
+    end test: changing auto_off must (a) leave the other bank
+    settings unchanged, (b) succeed verify-after-write."""
+    sim.config.settings["02"] = "0D"  # hardness 13
+    sim.config.settings["08"] = "00"  # units mL
+    sim.config.settings["09"] = "02"  # language English
+    sim.config.settings["13"] = "220168"  # auto_off 6h (3 bytes)
+    c = _paired_with_profile(sim)
+    try:
+        # 30min via item name. Goes through bank write because arg 13
+        # is in EF1091's <BANK CommandArgument="02080913">.
+        result = run_named(
+            c,
+            "setting",
+            ["auto_off", "30min"],
+            timeout=3.0,
+            allow_destructive=True,
+        )
+        assert "0x211E" in str(result.value)
+    finally:
+        c.close()
+    # auto_off updated, others intact.
+    assert sim.config.settings["13"] == "211E"
+    assert sim.config.settings["02"] == "0D"
+    assert sim.config.settings["08"] == "00"
+    assert sim.config.settings["09"] == "02"
+
+
+def test_setting_write_bank_handles_value_width_change(sim) -> None:
+    """auto_off values are variable-length (0F=15min 1B; 211E=30min
+    2B; 220168=6h 3B). The bulk-write block must carry the new
+    value's actual width, and the dongle parses by leading byte."""
+    sim.config.settings["13"] = "0F"  # 15min (1 byte)
+    c = _paired_with_profile(sim)
+    try:
+        # Jump 15min → 6h (1B → 3B value).
+        run_named(
+            c,
+            "setting",
+            ["auto_off", "6h"],
+            timeout=3.0,
+            allow_destructive=True,
+        )
+    finally:
+        c.close()
+    assert sim.config.settings["13"] == "220168"
+
+
+def test_setting_write_individual_arg_keeps_individual_format(sim) -> None:
+    """Non-bank args (brightness 0A, milk_rinsing 04, frother 62)
+    still use the individual ``@TM:<arg>,<val>`` write form. The
+    dongle ACKs with ``@tm:<arg>`` not ``@tm:00``, and the simulator
+    stores the new value directly."""
+    sim.config.settings["0A"] = "01"  # 10% brightness
+    c = _paired_with_profile(sim)
+    try:
+        run_named(
+            c,
+            "setting",
+            ["brightness", "50"],  # ITEM Name="50" Value="05"
+            timeout=3.0,
+            allow_destructive=True,
+        )
+    finally:
+        c.close()
+    assert sim.config.settings["0A"] == "05"
+
+
 def test_setting_read_detects_bad_checksum_from_wire(sim) -> None:
     """If the dongle ever returns a body whose trailing two chars don't
     match ByteOperations.d, read_setting raises ValueError so the

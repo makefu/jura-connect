@@ -392,30 +392,79 @@ client → @TM:<P_Argument>
 dongle → @tm:<P_Argument>,<value_hex>
 ```
 
-Writing is the same address with a value and a trailing checksum
-byte, **wrapped in @TS:01 / @TS:00**:
+Writing has TWO wire forms depending on whether the setting is part
+of a ``<BANK>``. Each machine XML may declare one bank inside
+``<MACHINESETTINGS>``:
 
-```
-client → @TS:01                              (lock keypad)
-dongle → @ts
-client → @TM:<P_Argument>,<value_hex><csum>  (the write)
-dongle → @tm:<P_Argument>                    (success — echo of the address)
-dongle → @an:error                           (rejected — checksum or value bad)
-client → @TS:00                              (release keypad)
-dongle → @ts
+```xml
+<BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913" />
 ```
 
-The wrapping is non-optional on TT237W firmware: omit it and the
-dongle still ACKs the bare ``@TM:`` write with ``@tm:<arg>``
-(looking like success) but the machine silently ignores the new
-value until the next power cycle. The J.O.E. APK enforces this by
-dispatching every ``CommandPriority.PMODE`` command — which is the
-default for ``WifiCommandWritePMode`` — through a
-``PriorityChannel`` branch that prepends ``@TS:01`` and appends
-``@TS:00``. The Python port now mirrors that wrap in
-:meth:`jura_connect.client.JuraClient.write_setting`; releases
-0.9.0 - 0.9.1 omitted it, which is why settings appeared to write
-successfully but never took effect.
+On EF1091 the bank covers hardness (02), units (08), language (09)
+and auto_off (13). Brightness (0A), milk_rinsing (04) and frother
+(62) are **not** in the bank.
+
+### Bank settings — bulk write @TM:00,FC
+
+```
+client → @TS:01                                      (lock keypad)
+dongle ← @ts
+client → @TM:00,FC,<arg1><val1>...<argN><valN><csum> (bulk write)
+dongle ← @tm:00                                      (success)
+dongle ← @an:error                                   (rejected)
+client → @TS:00                                      (release keypad)
+dongle ← @ts
+```
+
+The bulk payload is the concatenation of (arg, value) pairs in the
+order given by ``CommandArgument``. Values are **variable-length**;
+for AutoOFF specifically, the leading byte encodes the field
+width:
+
+| Lead byte | Total width | Example                |
+| --------- | ----------- | ---------------------- |
+| ``0F``    | 1 byte      | ``0F``           = 15min |
+| ``21``    | 2 bytes     | ``211E``         = 30min |
+| ``22``    | 3 bytes     | ``220168``       = 6h    |
+
+The dongle parses each value's width by inspecting its leading
+byte. The Python client constructs the payload by reading the
+current values for any bank arg the user isn't changing and
+substituting only the targeted arg.
+
+Writing a bank arg via the **individual** ``@TM:<arg>,<val><csum>``
+form is silently dropped by TT237W firmware — the dongle ACKs with
+``@tm:00`` (the bank reply signature) but the machine ignores the
+write. v0.9.0-v0.9.2 sent only individual writes which is why
+settings appeared to write successfully but never took effect.
+
+### Non-bank settings — individual write @TM:<arg>,<val>
+
+```
+client → @TS:01
+dongle ← @ts
+client → @TM:<P_Argument>,<value_hex><csum>          (individual write)
+dongle ← @tm:<P_Argument>                            (success)
+dongle ← @an:error                                   (rejected)
+client → @TS:00
+dongle ← @ts
+```
+
+Used for args that are NOT listed in any ``<BANK CommandArgument>``.
+On EF1091: brightness (0A), milk_rinsing (04), frother (62). The
+J.O.E. APK's language-download flow also uses this individual form
+(it writes args 24, 25, 09 with z2=true / CommandPriority.COMMAND,
+bypassing the PMODE lock wrap entirely).
+
+### The @TS:01/@TS:00 lock wrap
+
+Both write forms run inside a ``@TS:01`` … ``@TS:00`` pair. The
+J.O.E. APK's PriorityChannel dispatch
+(``apk_unpacked/smali_classes2/k8/c.smali:367``) does this
+automatically for any command sent with
+``CommandPriority.PMODE`` — which is the default for
+``WifiCommandWritePMode``. Skipping the wrap leaves the keypad
+"live" and writes are silently rejected.
 
 The checksum is two upper-case hex chars computed by the J.O.E. APK's
 ``ByteOperations.d``: sum the codepoint of every char in
