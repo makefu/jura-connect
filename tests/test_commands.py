@@ -717,6 +717,36 @@ def test_setting_read_strips_trailing_checksum(sim) -> None:
     assert "3581" not in text
 
 
+def test_setting_write_wraps_in_lock_unlock(sim) -> None:
+    """Regression for v0.9.2: settings writes silently dropped on the
+    real machine because we sent @TM:<arg>,<val><csum> bare; the J.O.E.
+    APK wraps every PMODE-priority command in @TS:01...@TS:00. Without
+    the wrapper Kaffeebert ACKs the write but the value doesn't change.
+
+    The simulator tracks `screen_locked` based on @TS:01 / @TS:00, so
+    we observe the wrap by toggling that flag and checking it returns
+    to False after the write."""
+    sim.config.settings["02"] = "08"
+    c = _paired_with_profile(sim)
+    try:
+        # Pre-condition: screen not locked.
+        assert sim.config.screen_locked is False
+        result = run_named(
+            c, "setting", ["hardness", "12"], timeout=3.0, allow_destructive=True
+        )
+        # Post-condition: lock got released. If the unlock were missed,
+        # screen_locked would still be True here and the machine would
+        # be stuck in remote-service mode.
+        assert sim.config.screen_locked is False
+        assert "0x0C" in str(result.value)  # 12 dec → 0x0C
+        # Confirm the write actually went through (verify path).
+        read = run_named(c, "setting", ["hardness"], timeout=2.0)
+    finally:
+        c.close()
+    assert " 12 " in str(read.value)
+    assert "0x0C" in str(read.value)
+
+
 def test_setting_read_detects_bad_checksum_from_wire(sim) -> None:
     """If the dongle ever returns a body whose trailing two chars don't
     match ByteOperations.d, read_setting raises ValueError so the

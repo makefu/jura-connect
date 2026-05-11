@@ -392,13 +392,30 @@ client → @TM:<P_Argument>
 dongle → @tm:<P_Argument>,<value_hex>
 ```
 
-Writing is the same address with a value and a trailing checksum byte:
+Writing is the same address with a value and a trailing checksum
+byte, **wrapped in @TS:01 / @TS:00**:
 
 ```
-client → @TM:<P_Argument>,<value_hex><checksum>
-dongle → @tm:<P_Argument>           (success — echo of the address)
-dongle → @an:error                  (rejected — checksum or value bad)
+client → @TS:01                              (lock keypad)
+dongle → @ts
+client → @TM:<P_Argument>,<value_hex><csum>  (the write)
+dongle → @tm:<P_Argument>                    (success — echo of the address)
+dongle → @an:error                           (rejected — checksum or value bad)
+client → @TS:00                              (release keypad)
+dongle → @ts
 ```
+
+The wrapping is non-optional on TT237W firmware: omit it and the
+dongle still ACKs the bare ``@TM:`` write with ``@tm:<arg>``
+(looking like success) but the machine silently ignores the new
+value until the next power cycle. The J.O.E. APK enforces this by
+dispatching every ``CommandPriority.PMODE`` command — which is the
+default for ``WifiCommandWritePMode`` — through a
+``PriorityChannel`` branch that prepends ``@TS:01`` and appends
+``@TS:00``. The Python port now mirrors that wrap in
+:meth:`jura_connect.client.JuraClient.write_setting`; releases
+0.9.0 - 0.9.1 omitted it, which is why settings appeared to write
+successfully but never took effect.
 
 The checksum is two upper-case hex chars computed by the J.O.E. APK's
 ``ByteOperations.d``: sum the codepoint of every char in

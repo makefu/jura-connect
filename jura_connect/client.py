@@ -528,25 +528,84 @@ class JuraClient:
         value_hex: str,
         *,
         timeout: float = 3.0,
+        verify: bool = True,
     ) -> str:
         """Write one setting via ``@TM:<arg>,<value><checksum>``.
 
-        The dongle confirms via an ``@tm:<arg>`` echo or ``@an:error``
-        on rejection. The checksum follows the J.O.E. APK's
-        ``ByteOperations.d``: sum every ASCII byte of ``"<arg>,<value>"``,
-        cast ``-1 - sum`` to a signed byte, format as two upper-case
-        hex chars and append.
+        Wire flow on the real dongle (verified against TT237W /
+        Kaffeebert and matching the J.O.E. APK's PriorityChannel
+        dispatch for ``CommandPriority.PMODE``):
+
+            client → @TS:01                  (lock keypad)
+            client ← @ts
+            client → @TM:<arg>,<val><csum>   (actual write)
+            client ← @tm:<arg>  / @an:error
+            client → @TS:00                  (release keypad)
+            client ← @ts
+
+        Skipping the lock/unlock wrapper is the bug v0.9.0 - v0.9.1
+        shipped: the dongle ACKs the bare ``@TM:`` write with
+        ``@tm:<arg>`` so the call looks successful, but the machine
+        silently ignores the new value until a future power cycle.
+        The APK ALWAYS wraps PMODE-priority commands; we now do the
+        same.
+
+        The checksum follows the J.O.E. APK's ``ByteOperations.d``:
+        sum every ASCII byte of ``"<arg>,<value>"``, cast
+        ``-1 - sum`` to a signed byte, format as two upper-case hex
+        chars and append.
 
         Caller is responsible for validating ``value_hex`` against the
         machine's :class:`~jura_connect.profile.SettingDef`. This
         method takes raw hex strings; see
         :meth:`jura_connect.profile.SettingDef.normalise_value`.
+
+        When ``verify`` is true (default), reads the setting back
+        AFTER the unlock and raises :class:`ValueError` if the
+        stored value doesn't match — guards against a firmware that
+        accepts the wrapped write but still silently drops it.
+        Disable via ``verify=False`` if the read-back path is broken
+        for a particular setting.
         """
         arg = p_argument.upper()
         value = value_hex.upper()
         checksum = _settings_checksum(f"{arg},{value}")
         cmd = f"@TM:{arg},{value}{checksum}"
-        return self.request(cmd, match=r"^@(tm|an)", timeout=timeout)
+
+        # Wrap in @TS:01 / @TS:00. The unlock runs in `finally` so a
+        # mid-write exception can't leave the keypad locked.
+        self.lock_screen()
+        try:
+            reply = self.request(cmd, match=r"^@(tm|an)", timeout=timeout)
+        finally:
+            try:
+                self.unlock_screen()
+            except Exception:  # noqa: BLE001
+                # Best-effort unlock; failure here mustn't mask the
+                # original write error.
+                pass
+
+        if reply.lower().startswith("@an:error"):
+            return reply
+        if verify:
+            try:
+                stored = self.read_setting(arg, timeout=timeout)
+            except (TimeoutError, ValueError):
+                # Read-back failed; surface the original reply rather
+                # than masking it.
+                return reply
+            if stored.upper() != value:
+                raise ValueError(
+                    f"setting write for arg={arg}: dongle ACKed "
+                    f"({reply!r}) but the read-back value is "
+                    f"{stored!r}, not {value!r}. Even with the "
+                    f"@TS:01/@TS:00 lock wrapper the write was "
+                    f"silently dropped — this setting may be "
+                    f"read-only on your firmware, the value may be "
+                    f"outside an undocumented range, or the machine "
+                    f"may be in a state that refuses writes."
+                )
+        return reply
 
     def lock_screen(self) -> str:
         """Lock the machine's front panel (``@TS:01``)."""
