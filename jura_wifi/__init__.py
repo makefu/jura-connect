@@ -11,6 +11,8 @@ APK. Layered as:
   sweep for firmwares that don't answer UDP.
 * :mod:`jura_wifi.client`     -- ``@HP:`` handshake, unset-PIN pair flow,
   structured read commands.
+* :mod:`jura_wifi.commands`   -- named-command registry; the entry point
+  for "send the *counters* command" without hard-coding ``@TG:43``.
 * :mod:`jura_wifi.simulator`  -- TCP server speaking the same protocol;
   used by the test-suite to exercise the client end-to-end without a
   physical machine.
@@ -18,21 +20,34 @@ APK. Layered as:
 """
 
 from .client import (
-    JuraClient,
-    JuraConnection,
     HandshakeError,
     HandshakeResult,
+    JuraClient,
+    JuraConnection,
     MachineInfo,
     MachineStatus,
     MaintenanceCounters,
     MaintenancePercent,
     PairingTimeout,
 )
+from .commands import (
+    COMMANDS,
+    CommandError,
+    CommandResult,
+    CommandSpec,
+    get_command,
+    list_commands,
+    run_named,
+)
 from .credentials import CredentialStore, MachineCredentials
 from .crypto import decode, encode
 from .discovery import Machine, discover, probe, scan_tcp, tcp_probe
 
 __all__ = [
+    "COMMANDS",
+    "CommandError",
+    "CommandResult",
+    "CommandSpec",
     "CredentialStore",
     "HandshakeError",
     "HandshakeResult",
@@ -48,7 +63,10 @@ __all__ = [
     "decode",
     "discover",
     "encode",
+    "get_command",
+    "list_commands",
     "probe",
+    "run_named",
     "scan_tcp",
     "tcp_probe",
 ]

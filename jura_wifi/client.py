@@ -449,6 +449,13 @@ class MaintenanceCounters:
             raw=data,
         )
 
+    def format(self) -> str:
+        return (
+            f"cleaning={self.cleaning} filter={self.filter_change} "
+            f"decalc={self.decalc} cappu_rinse={self.cappu_rinse} "
+            f"coffee_rinse={self.coffee_rinse} cappu_clean={self.cappu_clean}"
+        )
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MaintenancePercent:
@@ -471,6 +478,12 @@ class MaintenancePercent:
             filter_change=data[1],
             decalc=data[2],
             raw=data,
+        )
+
+    def format(self) -> str:
+        return (
+            f"cleaning={self.cleaning} filter={self.filter_change} "
+            f"decalc={self.decalc}"
         )
 
 
@@ -518,6 +531,10 @@ class MachineStatus:
                 active.append(name)
         return cls(raw=data, active_alerts=tuple(active))
 
+    def format(self) -> str:
+        alerts = ", ".join(self.active_alerts) or "(none)"
+        return f"bits={self.raw.hex().upper()}  alerts={alerts}"
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MachineInfo:
@@ -529,3 +546,17 @@ class MachineInfo:
     status: MachineStatus
     maintenance_counters: MaintenanceCounters
     maintenance_percent: MaintenancePercent
+
+    def format(self) -> str:
+        alerts = ", ".join(self.status.active_alerts) or "(none)"
+        hash_preview = (self.auth_hash[:16] + "...") if self.auth_hash else "(none)"
+        return (
+            "== machine info ==\n"
+            f"  conn-id        : {self.conn_id}\n"
+            f"  handshake state: {self.handshake_state}\n"
+            f"  auth-hash      : {hash_preview}\n"
+            f"  status bits    : {self.status.raw.hex().upper()}\n"
+            f"  active alerts  : {alerts}\n"
+            f"  maintenance    : {self.maintenance_counters.format()}\n"
+            f"  maintenance %  : {self.maintenance_percent.format()}"
+        )
