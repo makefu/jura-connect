@@ -696,3 +696,44 @@ def test_setting_write_checksum_must_match(sim) -> None:
     finally:
         c.close()
     assert "error" in reply.lower()
+
+
+def test_setting_read_strips_trailing_checksum(sim) -> None:
+    """Regression for v0.9.0: hardness=13 (=0x0D) came back as 3581
+    because the parser kept the trailing checksum byte as if it were
+    part of the value. The reply for arg=02 is ``@tm:02,0DFD`` where
+    ``0D`` is the value and ``FD`` is the ByteOperations.d checksum
+    over ``"02,0D"``. The decoded read must surface 13 (not 3581)."""
+    sim.config.settings["02"] = "0D"  # 13 °dH on the wire
+    c = _paired_with_profile(sim)
+    try:
+        result = run_named(c, "setting", ["hardness"], timeout=2.0)
+    finally:
+        c.close()
+    text = str(result.value)
+    assert "hardness" in text.lower()
+    assert " 13 " in text
+    assert "0x0D" in text
+    assert "3581" not in text
+
+
+def test_setting_read_detects_bad_checksum_from_wire(sim) -> None:
+    """If the dongle ever returns a body whose trailing two chars don't
+    match ByteOperations.d, read_setting raises ValueError so the
+    user sees the problem rather than a silently-corrupt value."""
+    # Spoofed reply: 0D is the value but the trailing 00 is a wrong csum.
+    sim.config.settings["02"] = "0D"
+    # Override the simulator's reply path by writing a value that ends
+    # in a known-bad sequence isn't possible — instead drive the client
+    # method directly with a fake reply via monkey-patching `request`.
+    from jura_connect.client import JuraClient
+
+    host, port = sim.address
+    c = JuraClient(host, port=port, conn_id="cmd-tests", auth_hash="")
+    c.pair(timeout=2.0)
+    try:
+        c.request = lambda *a, **kw: "@tm:02,0D00"  # type: ignore[method-assign]
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            c.read_setting("02", timeout=1.0)
+    finally:
+        c.close()

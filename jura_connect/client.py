@@ -485,11 +485,18 @@ class JuraClient:
         ``p_argument`` is the ``P_Argument`` attribute from the XML
         ``<MACHINESETTINGS>`` block (e.g. ``"02"`` for hardness).
 
-        Returns the raw hex payload after the ``@tm:<arg>,`` prefix.
-        For most settings this is a one- or two-byte value; for
-        ItemSlider settings it can be longer (the AutoOFF table's
-        ``"22021C"`` for 9h). Callers that know the SettingDef can
-        compare against the catalogue's ITEM ``Value`` strings.
+        Returns the raw hex value with the trailing two-char checksum
+        stripped. Reply shape on the wire is
+        ``@tm:<arg>,<value><checksum>`` — same checksum algorithm as
+        the write side (``ByteOperations.d`` over ``"<arg>,<value>"``);
+        we verify it before returning. For most settings the value is
+        one byte (2 hex chars); for ItemSlider settings it can be 4
+        or 6 chars (the AutoOFF table's ``"22021C"`` for 9h).
+
+        Raises :class:`ValueError` when the checksum doesn't match —
+        the value would otherwise alias as a too-large integer
+        (hardness=13 came back as 3581 in v0.9.0 because the
+        checksum byte was lumped in).
         """
         arg = p_argument.upper()
         cmd = f"@TM:{arg}"
@@ -497,11 +504,23 @@ class JuraClient:
         # (observed lowercase for "0a" / "0A" alike), so match
         # case-insensitively on the reply.
         reply = self.request(cmd, match=rf"(?i)^@tm:{arg}", timeout=timeout)
-        # Reply shape: "@tm:<arg>,<hex>" or "@tm:<arg><hex>" depending on
-        # firmware; strip the leading prefix + optional comma.
         prefix = f"@tm:{arg.lower()}"
         body = reply[len(prefix) :] if reply.lower().startswith(prefix) else reply
-        return body.lstrip(",").strip()
+        body = body.lstrip(",").strip()
+        if len(body) < 4:
+            # Shorter than 2 (value) + 2 (csum). Some firmwares answer
+            # plain "@tm:<arg>" when the setting is unknown — surface
+            # that as-is rather than synthesising a value.
+            return body
+        value, csum = body[:-2], body[-2:]
+        expected = _settings_checksum(f"{arg},{value}")
+        if csum.upper() != expected:
+            raise ValueError(
+                f"setting read for arg={arg}: checksum mismatch "
+                f"(got {csum!r}, expected {expected!r} over "
+                f"{arg!r},{value!r}); reply was {reply!r}"
+            )
+        return value
 
     def write_setting(
         self,

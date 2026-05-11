@@ -370,7 +370,10 @@ class Simulator:
             arg = arg_full.upper()
             stored = self.config.settings.get(arg)
             if stored is not None:
-                return f"@tm:{arg.lower()},{stored}"
+                # Real dongle appends the same ByteOperations.d checksum
+                # used on the write side; the client verifies it.
+                csum = _settings_checksum(f"{arg},{stored}")
+                return f"@tm:{arg.lower()},{stored}{csum}"
             # Unknown address — echo the high nibble like the real dongle.
             return f"@tm:{arg_full[:2].lower()}"
         if cmd.startswith("@TR:32,"):
