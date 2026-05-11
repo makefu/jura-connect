@@ -272,6 +272,32 @@ known unknowns). This document is the source of truth for the
 implementation and was used to validate every code path against the
 Android APK and against Kaffeebert.
 
+## Acknowledgements
+
+The Bluetooth and UART flavours of the Jura control protocol were
+reverse-engineered first by the **[Jutta-Proto](https://github.com/Jutta-Proto)**
+project — most notably:
+
+* [`Jutta-Proto/protocol-bt-cpp`](https://github.com/Jutta-Proto/protocol-bt-cpp)
+  — C++ Bluetooth implementation for the BlueFrog dongle. Their write-up
+  of the obfuscation / encoding scheme, the `@HP:` handshake, and the
+  destructive command set was the starting point for understanding the
+  shared "Jura control language" that the WiFi dongle also speaks.
+* [`Jutta-Proto/protocol-cpp`](https://github.com/Jutta-Proto/protocol-cpp)
+  — C++ UART implementation, which in turn builds on the earlier
+  [Protocol JURA wiki](http://protocoljura.wiki-site.com/index.php/Hauptseite)
+  community work for older serial-only models.
+
+This project is an independent port targeting the *WiFi* transport
+(`Smart Connect` dongle, TT237W firmware family) and was developed by
+reading the J.O.E. Android APK and validating against a physical S8 EB.
+The framing, cipher, and handshake match what the Jutta-Proto repos
+describe; the differences live in the transport (TCP/51515 instead of
+GATT characteristics) and in the WiFi-specific discovery and pairing
+handshake.
+
+Without the Jutta-Proto work the project would not have started in first place.
+
 ## License
 
 MIT.
