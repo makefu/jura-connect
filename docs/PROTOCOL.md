@@ -232,6 +232,7 @@ app uses 40 s as its server-side timeout
 | `@TS:00`         | `@ts`             | str | unlock the display |
 | `@TM:<addr>`     | `@tm:<addr>...`   | str | memory / setting read (firmware-specific) |
 | `@TR:<bank>`     | `@tr:<bank>...`   | str | bank-register read |
+| `@TR:32,<page>`  | `@tr:32,<page>,<8 bytes hex>` | `ProductCounters` (composite) | paginated brew counters — see §5.6 |
 
 ### 5.2 Unsolicited frames (received)
 
@@ -266,15 +267,73 @@ Live example from Kaffeebert:
 ### 5.4 Status bits (`@TF:`)
 
 Bits are addressed globally: `byte_index * 8 + bit_within_byte`. The
-client decodes the well-known S8 alert subset (cf.
-`jura_connect.client._STATUS_BITS`). Live frame from Kaffeebert:
-`@TF:0004000008000000` → byte 1, bit 2 set → `no_beans`.
+client decodes the well-known S8 alert set (cf.
+`jura_connect.client._STATUS_BITS`) and groups each bit by the
+*severity* lifted from the XML's `ALERT.Type` attribute:
 
-### 5.5 **Destructive** commands — kept off the public API
+| XML `Type` | Python severity | Meaning |
+| ---------- | --------------- | ------- |
+| `block`    | `error`         | the machine is genuinely stuck and needs user action (insert tray, fill water, …) |
+| `info` or none | `info`      | informational state or low-supply reminder (`no_beans` with `Blocked="C"`, `heating_up`, `coffee_ready`, …) — not an error, just a flag |
+| `ip`       | `process`       | a "schedule maintenance" prompt (decalc / cleaning / filter / cappu rinse alerts) shown *before* it actually blocks brewing |
+
+Live frame from Kaffeebert at idle: `@TF:0004000008000000`
+→ byte 1 bit 2 (= bit 10 = `no_beans`, severity `info`) and byte 4
+bit 3 (= bit 35 = `cappu_rinse_alert`, severity `process`). Neither
+counts as a blocking error, which matches the machine's actual idle
+state ("running but supplies-low and rinse-overdue").
+
+The `MachineStatus` dataclass exposes `errors`, `info`, and
+`process` as separate tuples plus the unsplit `active_alerts` for
+backwards compatibility; only the first should drive "is the machine
+broken?" logic.
+
+### 5.5 Product brew counters (`@TR:32,<page>`)
+
+The product counter table is paginated. The client issues 16
+requests (`@TR:32,00` through `@TR:32,0F`); each reply has the form
+
+```
+@tr:32,<page_hex>,<8 hex bytes>
+```
+
+The 8-byte payload is four big-endian `u16` slot values. With 16
+pages × 4 slots per page that gives a 64-slot table indexed by
+product code:
+
+* **Slot 0** carries the total number of brews ever performed on the
+  machine.
+* **Slots 1..63** carry the count for the product whose code matches
+  the slot index, with `0xFFFF` reserved for "this code is not
+  configured on this machine".
+
+The product-code → human-name mapping in
+`jura_connect.client.PRODUCT_NAMES` is derived from the per-machine
+XMLs under `apk/assets/documents/xml/` and is stable across the
+TT237W family (S8, ENA8, Z8, …). Unknown codes survive into
+`ProductCounters.by_code` so a future firmware variant still surfaces
+the raw count rather than dropping it on the floor.
+
+Live first page from Kaffeebert (idle, after a few thousand brews):
+
+```
+@tr:32,00,0C9DFFFF004E0253
+        └──┘└──┘└──┘└──┘
+        3229 ----  78  595
+        total       espresso  coffee
+```
+
+The second u16 (`FFFF`) is slot 1 = `ristretto` — not configured on
+this S8 EB.
+
+### 5.6 **Destructive** commands — gated behind `--allow-destructive-commands`
 
 These were observed in the EF536 machine XML or the APK and are
-intentionally **not** wrapped by the Python client. The simulator
-explicitly returns `@an:error` for them as a test-suite guardrail:
+exposed as named registry commands but gated behind
+`--allow-destructive-commands` (or `allow_destructive=True` for
+library callers). The simulator returns `@an:error` for them as a
+test-suite guardrail; running them via `raw '@TG:24'` is gated by
+the same prefix check.
 
 | Command | Effect |
 | ------- | ------ |
@@ -395,9 +454,6 @@ breaks both halves of the test-suite simultaneously.
 
 ## 8. Known unknowns / next steps
 
-* The `@TR:32` "Product counter for Statistic" command returns nothing
-  on TT237W V06.11 — likely needs an additional argument or differs
-  between firmwares.
 * `@TM:50` (PMode num-slots) and `@TM:42,<slot>` (slot product read)
   are documented in the APK; not yet wrapped because they're highly
   per-machine and depend on parsing the device's XML map.

@@ -47,6 +47,38 @@ DEFAULT_MAINT_COUNTERS = bytes.fromhex("0015000100080158 0E21 005B".replace(" ",
 DEFAULT_MAINT_PERCENT = bytes.fromhex("50FF1E")
 DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
+# Sentinel for "no count" inside an @TR:32 page.
+_PC_UNUSED = 0xFFFF
+
+
+def _default_product_counters() -> list[int]:
+    """64-slot product counter table populated with Kaffeebert's numbers.
+
+    Slot 0 is the total brews; other slots are indexed by product code.
+    Used as the simulator's default so the test-suite asserts against
+    realistic values lifted from the real machine.
+    """
+    slots = [_PC_UNUSED] * 64
+    slots[0] = 3229  # total brews
+    slots[0x02] = 78  # espresso
+    slots[0x03] = 595  # coffee
+    slots[0x04] = 64  # cappuccino
+    slots[0x06] = 3  # espresso macchiato
+    slots[0x07] = 19  # latte macchiato
+    slots[0x08] = 52  # milk foam
+    slots[0x0A] = 0  # milk portion
+    slots[0x0D] = 903  # hotwater portion
+    slots[0x0F] = 238  # powder product
+    slots[0x28] = 1019  # americano
+    slots[0x29] = 3  # lungo
+    slots[0x2B] = 2  # unnamed slot present on Kaffeebert
+    slots[0x2C] = 1  # unnamed slot
+    slots[0x2E] = 210  # flat white
+    slots[0x30] = 20  # espresso doppio
+    slots[0x31] = 1  # unnamed slot
+    return slots
+
+
 # DESTRUCTIVE_PREFIXES is re-exported for backwards compatibility with
 # tests that still import it from this module; the canonical home is
 # :mod:`jura_connect.commands`. The simulator refuses-by-default for the
@@ -74,6 +106,12 @@ class SimulatorConfig:
     status_payload: bytes = DEFAULT_STATUS_PAYLOAD
     status_interval: float = 1.0
     screen_locked: bool = False
+    # 64 u16 slots making up the @TR:32 response. Slot 0 = total brews;
+    # slots 1..63 are per-product counts indexed by product code, with
+    # 0xFFFF marking "this code is not configured on this machine".
+    product_counters: list[int] = dataclasses.field(
+        default_factory=_default_product_counters
+    )
 
 
 class Simulator:
@@ -259,6 +297,24 @@ class Simulator:
             # answer, mirroring what the real dongle returns for unknown
             # addresses on this firmware.
             return f"@tm:{arg[:2]}"
+        if cmd.startswith("@TR:32,"):
+            # Paginated product-counter read. Wire format:
+            #   request : @TR:32,<page_hex>
+            #   reply   : @tr:32,<page_hex>,<8 hex bytes>
+            # Each page covers 4 u16 slots from the configured table.
+            page_hex = cmd[len("@TR:32,") :].strip()
+            try:
+                page = int(page_hex, 16)
+            except ValueError:
+                return "@tr:00"
+            if not 0 <= page < 16:
+                return "@tr:00"
+            start = page * 4
+            slots = self.config.product_counters[start : start + 4]
+            while len(slots) < 4:
+                slots.append(_PC_UNUSED)
+            payload = "".join(f"{s & 0xFFFF:04X}" for s in slots)
+            return f"@tr:32,{page:02X},{payload}"
         if cmd.startswith("@TR:"):
             return f"@tr:{cmd[4:6]}00"
         if cmd.startswith("@TG:7E") or cmd.startswith("@TG:FF"):

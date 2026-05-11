@@ -244,6 +244,75 @@ def test_info_result_to_dict_is_nested(sim) -> None:
     _json.loads(_json.dumps(d))
 
 
+def test_brews_returns_product_counters(sim) -> None:
+    from jura_connect.client import ProductCounters
+
+    c = _paired(sim)
+    try:
+        result = run_named(c, "brews", timeout=3.0)
+    finally:
+        c.close()
+    assert isinstance(result.value, ProductCounters)
+    pc = result.value
+    # Defaults straight out of the simulator (mirror Kaffeebert).
+    assert pc.total == 3229
+    assert pc.by_name["espresso"] == 78
+    assert pc.by_name["coffee"] == 595
+    assert pc.by_name["americano"] == 1019
+    assert pc.by_name["lungo"] == 3
+    assert pc.by_name["espresso_doppio"] == 20
+    # Unused slots don't make it into the by_code map.
+    assert "01" not in pc.by_code  # ristretto = 0xFFFF
+    # JSON-serialisable.
+    import json as _json
+
+    _json.loads(_json.dumps(result.to_dict()))
+
+
+def test_brews_format_includes_named_products(sim) -> None:
+    c = _paired(sim)
+    try:
+        result = run_named(c, "brews", timeout=3.0)
+    finally:
+        c.close()
+    text = result.format()
+    assert "total brews : 3229" in text
+    assert "espresso" in text
+    assert "americano" in text
+    assert "espresso_doppio" in text
+
+
+def test_status_categorisation_no_beans_is_info_not_error(sim) -> None:
+    """The user explicitly flagged this: no_beans on Kaffeebert means
+    'bin running low', not 'machine is stuck'. It must NOT appear under
+    .errors."""
+    c = _paired(sim)
+    try:
+        result = run_named(c, "status", timeout=2.0)
+    finally:
+        c.close()
+    st = result.value
+    # Simulator default status frame matches Kaffeebert: no_beans + cappu_rinse_alert.
+    assert "no_beans" in st.info
+    assert "no_beans" not in st.errors
+    # cappu_rinse_alert is a maintenance reminder, classed 'process'.
+    assert "cappu_rinse_alert" in st.process
+    assert "cappu_rinse_alert" not in st.errors
+    # The errors group should be empty for the default frame.
+    assert st.errors == ()
+
+
+def test_status_format_groups_severities(sim) -> None:
+    c = _paired(sim)
+    try:
+        result = run_named(c, "status", timeout=2.0)
+    finally:
+        c.close()
+    text = result.format()
+    assert "errors  : (none)" in text
+    assert "no_beans" in text
+
+
 def test_string_result_to_dict_passthrough(sim) -> None:
     c = _paired(sim)
     try:

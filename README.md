@@ -71,6 +71,7 @@ available commands:
     counters                 maintenance counters (@TG:43)
     percent                  maintenance percent indicators (@TG:C0)
     status                   parsed status / active alerts (@HU? -> @TF:)
+    brews                    per-product brew counters (@TR:32 paginated; 16 pages)
     lock                     lock the front-panel display (@TS:01)
     unlock                   unlock the front-panel display (@TS:00)
     mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
@@ -104,7 +105,9 @@ handshake -> CORRECT  (@hp4)
   handshake state: CORRECT
   auth-hash      : 13908FE4D3EB986B...
   status bits    : 0004000008000000
-  active alerts  : no_beans
+  errors         : (none)
+  info flags     : no_beans
+  process flags  : cappu_rinse_alert
   maintenance    : cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
   maintenance %  : cleaning=80 filter=255 decalc=30
 
@@ -112,13 +115,32 @@ $ jura-connect command --name Kaffeebert counters
 handshake -> CORRECT  (@hp4)
 cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
 
-$ jura-connect command --name Kaffeebert status --watch 5
+$ jura-connect command --name Kaffeebert status
 handshake -> CORRECT  (@hp4)
-bits=0004000008000000  alerts=no_beans
-watching status for 5.0s ...
-<-- '@TF:0004000008000000'
-<-- '@TF:0004000008000000'
+bits=0004000008000000
+  errors  : (none)
+  info    : no_beans
+  process : cappu_rinse_alert
+
+$ jura-connect command --name Kaffeebert brews
+handshake -> CORRECT  (@hp4)
+total brews : 3229
+  espresso            : 78
+  coffee              : 595
+  cappuccino          : 64
+  americano           : 1019
+  lungo               : 3
+  espresso_doppio     : 20
+  flat_white          : 210
+  (unnamed slots): 0x2B=2, 0x2C=1
 ```
+
+Status output now distinguishes blocking **errors** (machine is
+stuck, user must act) from **info** flags (low-supply reminders such
+as `no_beans` — informational, not an error) and **process** flags
+(periodic maintenance prompts such as `cappu_rinse_alert`). The
+unsplit ``active_alerts`` is still on the dataclass for backwards
+compatibility.
 
 For one-off advanced use, `raw` echoes any wire command verbatim:
 

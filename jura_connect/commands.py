@@ -213,6 +213,10 @@ def _r_status(_spec, client, _args, timeout):
     return client.read_status(timeout=timeout)
 
 
+def _r_brews(_spec, client, _args, timeout):
+    return client.read_product_counters(timeout_per_page=timeout)
+
+
 def _r_lock(_spec, client, _args, _timeout):
     return client.lock_screen()
 
@@ -344,6 +348,12 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="parsed status / active alerts (@HU? -> @TF:)",
         arguments=(),
         runner=_r_status,
+    ),
+    CommandSpec(
+        name="brews",
+        description="per-product brew counters (@TR:32 paginated; 16 pages)",
+        arguments=(),
+        runner=_r_brews,
     ),
     CommandSpec(
         name="lock",

@@ -377,6 +377,37 @@ class JuraClient:
         reply = self.request("@HU?", match=r"^@TF:", timeout=timeout)
         return MachineStatus.parse(reply)
 
+    def read_product_counters(
+        self, *, timeout_per_page: float = 6.0
+    ) -> "ProductCounters":
+        """Read the per-product brew counter bank (``@TR:32``).
+
+        The wire protocol paginates the response: the client sends
+        ``@TR:32,<page>`` for each page ``00..0F`` (16 pages total) and
+        reassembles the 8-byte payload of each page into a 64-slot
+        table of ``u16`` counts. Slot 0 is the total number of brews;
+        slots 1..63 are the per-product counts indexed by product code,
+        with ``0xFFFF`` reserved for "this code is not configured on
+        this machine". See :class:`ProductCounters` for the slot map.
+        """
+        slots: list[int] = []
+        for page in range(16):
+            cmd = f"@TR:32,{page:02X}"
+            reply = self.request(
+                cmd, match=rf"^@tr:32,{page:02X}", timeout=timeout_per_page
+            )
+            # "@tr:32,<page>,<8 hex bytes>"
+            try:
+                _, _, body = reply.split(",", 2)
+            except ValueError as exc:
+                raise ValueError(
+                    f"malformed @TR:32 reply for page {page:02X}: {reply!r}"
+                ) from exc
+            page_bytes = bytes.fromhex(body)
+            for i in range(0, len(page_bytes), 2):
+                slots.append(int.from_bytes(page_bytes[i : i + 2], "big"))
+        return ProductCounters.from_slots(slots)
+
     def read_machine_info(self, *, timeout: float = 6.0) -> "MachineInfo":
         """Bundle of everything we can passively learn about the machine."""
         return MachineInfo(
@@ -501,56 +532,131 @@ class MaintenancePercent:
 
 # Bit-to-alert mapping for the S8 / EF536 (see assets/documents/xml/EF536/1.0.xml).
 # Bit index is global: byte_index*8 + bit_within_byte.
-_STATUS_BITS: dict[int, str] = {
-    0: "insert_tray",
-    1: "fill_water",
-    2: "empty_grounds",
-    3: "empty_tray",
-    4: "insert_coffee_bin",
-    5: "outlet_missing",
-    6: "rear_cover_missing",
-    7: "milk_alert",
-    8: "fill_system",
-    9: "system_filling",
-    10: "no_beans",
-    11: "welcome",
-    12: "heating_up",
-    13: "coffee_ready",
-    14: "no_milk_sensor",
-    15: "milk_sensor_error",
-    16: "milk_sensor_no_signal",
-    17: "please_wait",
-    18: "coffee_rinsing",
-    19: "ventilation_closed",
-    20: "close_powder_cover",
+#
+# Each entry is (name, severity). The XML carries a Type attribute that
+# distinguishes blocking errors from informational / in-progress states:
+#
+#   * "error" -> XML Type="block": the machine is in a state that stops it
+#     from operating until the user clears the condition (e.g. fill water,
+#     insert tray).
+#   * "info"  -> XML Type="info" or missing Type: an informational bit
+#     that may or may not block specific products (e.g. "no beans" with
+#     Blocked="C" blocks coffee but isn't an error from the user's
+#     perspective — the bin just needs refilling).
+#   * "process" -> XML Type="ip": an in-process / reminder bit, typically
+#     a "schedule maintenance" prompt (decalc / cleaning / filter / cappu
+#     rinse) that the user is supposed to action eventually.
+_STATUS_BITS: dict[int, tuple[str, str]] = {
+    0: ("insert_tray", "error"),
+    1: ("fill_water", "error"),
+    2: ("empty_grounds", "error"),
+    3: ("empty_tray", "error"),
+    4: ("insert_coffee_bin", "error"),
+    5: ("outlet_missing", "error"),
+    6: ("rear_cover_missing", "error"),
+    7: ("milk_alert", "info"),
+    8: ("fill_system", "error"),
+    9: ("system_filling", "info"),
+    10: ("no_beans", "info"),
+    11: ("welcome", "info"),
+    12: ("heating_up", "info"),
+    13: ("coffee_ready", "info"),
+    14: ("no_milk_sensor", "info"),
+    15: ("milk_sensor_error", "info"),
+    16: ("milk_sensor_no_signal", "info"),
+    17: ("please_wait", "error"),
+    18: ("coffee_rinsing", "info"),
+    19: ("ventilation_closed", "info"),
+    20: ("close_powder_cover", "error"),
+    21: ("fill_powder", "error"),
+    22: ("system_emptying", "info"),
+    23: ("not_enough_powder", "info"),
+    24: ("remove_water_tank", "info"),
+    25: ("press_rinse", "info"),
+    26: ("goodbye", "info"),
+    27: ("periphery_alert", "info"),
+    28: ("powder_product", "info"),
+    29: ("program_mode_status", "error"),
+    30: ("error_status", "error"),
+    31: ("enjoy_product", "info"),
+    32: ("filter_alert", "process"),
+    33: ("decalc_alert", "process"),
+    34: ("cleaning_alert", "process"),
+    35: ("cappu_rinse_alert", "process"),
+    36: ("energy_safe", "info"),
+    37: ("active_rf_filter", "info"),
+    38: ("remote_screen", "info"),
 }
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MachineStatus:
-    """Decoded ``@TF:<hex>`` status frame -- alert / error bit flags."""
+    """Decoded ``@TF:<hex>`` status frame.
+
+    The status frame is a bitfield. The codebook above tags every known
+    bit with a severity (``error`` / ``info`` / ``process``) lifted from
+    the machine XML's ALERT.Type attribute. ``errors`` are the bits the
+    user actually needs to action right now; ``info`` covers normal
+    state transitions and low-supply reminders (e.g. "no beans" when the
+    bean container is low — informational, not an error); ``process``
+    holds the periodic maintenance prompts (decalc / cleaning / filter /
+    cappu rinse) which the machine surfaces *before* they block brewing.
+
+    ``active_alerts`` is kept as the union of all active named bits for
+    backwards compatibility — it's what older callers and the legacy
+    ``status`` CLI output have always returned. Prefer ``errors`` to
+    decide whether the machine is genuinely stuck.
+    """
 
     raw: bytes
     active_alerts: tuple[str, ...]
+    errors: tuple[str, ...]
+    info: tuple[str, ...]
+    process: tuple[str, ...]
 
     @classmethod
     def parse(cls, reply: str) -> MachineStatus:
         data = _hex_body(reply, "@TF:")
         active: list[str] = []
-        for bit_index, name in _STATUS_BITS.items():
+        errors: list[str] = []
+        info: list[str] = []
+        process: list[str] = []
+        for bit_index, (name, severity) in _STATUS_BITS.items():
             byte_i, bit_i = divmod(bit_index, 8)
             if byte_i < len(data) and (data[byte_i] >> bit_i) & 1:
                 active.append(name)
-        return cls(raw=data, active_alerts=tuple(active))
+                if severity == "error":
+                    errors.append(name)
+                elif severity == "process":
+                    process.append(name)
+                else:
+                    info.append(name)
+        return cls(
+            raw=data,
+            active_alerts=tuple(active),
+            errors=tuple(errors),
+            info=tuple(info),
+            process=tuple(process),
+        )
 
     def format(self) -> str:
-        alerts = ", ".join(self.active_alerts) or "(none)"
-        return f"bits={self.raw.hex().upper()}  alerts={alerts}"
+        def _fmt(group: tuple[str, ...]) -> str:
+            return ", ".join(group) if group else "(none)"
+
+        return (
+            f"bits={self.raw.hex().upper()}\n"
+            f"  errors  : {_fmt(self.errors)}\n"
+            f"  info    : {_fmt(self.info)}\n"
+            f"  process : {_fmt(self.process)}"
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "bits_hex": self.raw.hex().upper(),
             "active_alerts": list(self.active_alerts),
+            "errors": list(self.errors),
+            "info": list(self.info),
+            "process": list(self.process),
         }
 
 
@@ -566,7 +672,9 @@ class MachineInfo:
     maintenance_percent: MaintenancePercent
 
     def format(self) -> str:
-        alerts = ", ".join(self.status.active_alerts) or "(none)"
+        def _fmt(group: tuple[str, ...]) -> str:
+            return ", ".join(group) if group else "(none)"
+
         hash_preview = (self.auth_hash[:16] + "...") if self.auth_hash else "(none)"
         return (
             "== machine info ==\n"
@@ -574,7 +682,9 @@ class MachineInfo:
             f"  handshake state: {self.handshake_state}\n"
             f"  auth-hash      : {hash_preview}\n"
             f"  status bits    : {self.status.raw.hex().upper()}\n"
-            f"  active alerts  : {alerts}\n"
+            f"  errors         : {_fmt(self.status.errors)}\n"
+            f"  info flags     : {_fmt(self.status.info)}\n"
+            f"  process flags  : {_fmt(self.status.process)}\n"
             f"  maintenance    : {self.maintenance_counters.format()}\n"
             f"  maintenance %  : {self.maintenance_percent.format()}"
         )
@@ -587,4 +697,105 @@ class MachineInfo:
             "status": self.status.to_dict(),
             "maintenance_counters": self.maintenance_counters.to_dict(),
             "maintenance_percent": self.maintenance_percent.to_dict(),
+        }
+
+
+# Product code -> human-readable name. Derived from the per-machine
+# XML maps under apk/assets/documents/xml/ -- codes are stable across
+# machine variants, so a single table covers every TT237W family
+# firmware (S8, ENA8, Z8 etc.). 0xFFFF in the wire response means the
+# code is not configured on this machine.
+PRODUCT_NAMES: dict[int, str] = {
+    0x01: "ristretto",
+    0x02: "espresso",
+    0x03: "coffee",
+    0x04: "cappuccino",
+    0x05: "milk_coffee",
+    0x06: "espresso_macchiato",
+    0x07: "latte_macchiato",
+    0x08: "milk_foam",
+    0x0A: "milk_portion",
+    0x0D: "hotwater_portion",
+    0x0F: "powder_product",
+    0x11: "two_ristretti",
+    0x12: "two_espressi",
+    0x13: "two_coffees",
+    0x28: "americano",
+    0x29: "lungo",
+    0x2D: "hotwater_green_tea",
+    0x2E: "flat_white",
+    0x30: "espresso_doppio",
+}
+
+# Wire-level sentinel for "this product code is not configured on the
+# current machine" inside an @TR:32 page.
+PRODUCT_COUNT_UNUSED = 0xFFFF
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProductCounters:
+    """Decoded ``@TR:32`` paginated payload — per-product brew counters.
+
+    The dongle returns 16 pages of 4 ``u16`` slots each (64 slots total),
+    indexed by product code:
+
+    * Slot 0 carries the total number of brews ever performed.
+    * Slots 1..63 each carry the count for the product whose code matches
+      the slot index, or ``0xFFFF`` if that code is not configured on
+      the machine.
+
+    The product code -> name mapping in :data:`PRODUCT_NAMES` is shared
+    across the TT237W family; unknown codes are surfaced under
+    ``by_code`` only.
+    """
+
+    total: int
+    by_name: dict[str, int]
+    by_code: dict[str, int]
+    raw_slots: tuple[int, ...]
+
+    @classmethod
+    def from_slots(cls, slots: list[int]) -> ProductCounters:
+        if len(slots) < 1:
+            raise ValueError("product counter table is empty")
+        total = slots[0]
+        by_name: dict[str, int] = {}
+        by_code: dict[str, int] = {}
+        for code in range(1, len(slots)):
+            value = slots[code]
+            if value == PRODUCT_COUNT_UNUSED:
+                continue
+            code_hex = f"{code:02X}"
+            by_code[code_hex] = value
+            name = PRODUCT_NAMES.get(code)
+            if name is not None:
+                by_name[name] = value
+        return cls(
+            total=total,
+            by_name=by_name,
+            by_code=by_code,
+            raw_slots=tuple(slots),
+        )
+
+    def format(self) -> str:
+        lines = [f"total brews : {self.total}"]
+        for name, count in self.by_name.items():
+            lines.append(f"  {name:20s}: {count}")
+        unnamed = {
+            code: count
+            for code, count in self.by_code.items()
+            if int(code, 16) not in PRODUCT_NAMES
+        }
+        if unnamed:
+            lines.append(
+                "  (unnamed slots): "
+                + ", ".join(f"0x{code}={count}" for code, count in unnamed.items())
+            )
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "total": self.total,
+            "by_name": dict(self.by_name),
+            "by_code": dict(self.by_code),
         }

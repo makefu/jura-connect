@@ -76,7 +76,9 @@ def test_command_runs_info_through_simulator(sim, tmp_path, capsys) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert "machine info" in out
-    assert "active alerts" in out
+    # 'no_beans' lives under 'info flags', not 'errors' — it's not a
+    # blocking alert.
+    assert "info flags" in out
     assert "no_beans" in out
 
 

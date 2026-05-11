@@ -22,6 +22,7 @@ APK. Layered as:
 __version__ = "0.6.1"
 
 from .client import (
+    PRODUCT_NAMES,
     HandshakeError,
     HandshakeResult,
     JuraClient,
@@ -31,6 +32,7 @@ from .client import (
     MaintenanceCounters,
     MaintenancePercent,
     PairingTimeout,
+    ProductCounters,
 )
 from .commands import (
     COMMANDS,
@@ -65,7 +67,9 @@ __all__ = [
     "MachineStatus",
     "MaintenanceCounters",
     "MaintenancePercent",
+    "PRODUCT_NAMES",
     "PairingTimeout",
+    "ProductCounters",
     "__version__",
     "decode",
     "discover",
