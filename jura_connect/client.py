@@ -456,6 +456,17 @@ class MaintenanceCounters:
             f"coffee_rinse={self.coffee_rinse} cappu_clean={self.cappu_clean}"
         )
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cleaning": self.cleaning,
+            "filter_change": self.filter_change,
+            "decalc": self.decalc,
+            "cappu_rinse": self.cappu_rinse,
+            "coffee_rinse": self.coffee_rinse,
+            "cappu_clean": self.cappu_clean,
+            "raw_hex": self.raw.hex().upper(),
+        }
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MaintenancePercent:
@@ -485,6 +496,14 @@ class MaintenancePercent:
             f"cleaning={self.cleaning} filter={self.filter_change} "
             f"decalc={self.decalc}"
         )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cleaning": self.cleaning,
+            "filter_change": self.filter_change,
+            "decalc": self.decalc,
+            "raw_hex": self.raw.hex().upper(),
+        }
 
 
 # Bit-to-alert mapping for the S8 / EF536 (see assets/documents/xml/EF536/1.0.xml).
@@ -535,6 +554,12 @@ class MachineStatus:
         alerts = ", ".join(self.active_alerts) or "(none)"
         return f"bits={self.raw.hex().upper()}  alerts={alerts}"
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bits_hex": self.raw.hex().upper(),
+            "active_alerts": list(self.active_alerts),
+        }
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MachineInfo:
@@ -560,3 +585,13 @@ class MachineInfo:
             f"  maintenance    : {self.maintenance_counters.format()}\n"
             f"  maintenance %  : {self.maintenance_percent.format()}"
         )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "conn_id": self.conn_id,
+            "auth_hash": self.auth_hash,
+            "handshake_state": self.handshake_state,
+            "status": self.status.to_dict(),
+            "maintenance_counters": self.maintenance_counters.to_dict(),
+            "maintenance_percent": self.maintenance_percent.to_dict(),
+        }

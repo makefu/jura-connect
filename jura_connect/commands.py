@@ -139,6 +139,21 @@ class CommandResult:
             return formatter()
         return str(self.value)
 
+    def to_dict(self) -> dict[str, object]:
+        """JSON-serialisable representation: ``{"name": ..., "value": ...}``.
+
+        Structured values that expose their own ``to_dict()`` are
+        recursed into; plain strings (lock/unlock/raw replies, etc.)
+        are passed through verbatim.
+        """
+        v = self.value
+        serialiser = getattr(v, "to_dict", None)
+        if callable(serialiser) and not isinstance(v, str):
+            value: object = serialiser()
+        else:
+            value = v
+        return {"name": self.name, "value": value}
+
 
 # --------------------------------------------------------------------- #
 # Helpers

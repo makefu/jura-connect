@@ -165,6 +165,68 @@ def test_command_spec_usage_string() -> None:
 
 
 # --------------------------------------------------------------------- #
+# to_dict() — JSON-serialisable representation
+# --------------------------------------------------------------------- #
+
+
+def test_counters_result_to_dict_round_trips_through_json(sim) -> None:
+    import json as _json
+
+    c = _paired(sim)
+    try:
+        result = run_named(c, "counters", timeout=2.0)
+    finally:
+        c.close()
+    d = result.to_dict()
+    assert d["name"] == "counters"
+    assert d["value"]["cleaning"] == 0x0015
+    assert d["value"]["raw_hex"].startswith("0015")
+    # Whole thing must round-trip via json without TypeError.
+    _json.loads(_json.dumps(d))
+
+
+def test_status_result_to_dict(sim) -> None:
+    c = _paired(sim)
+    try:
+        result = run_named(c, "status", timeout=2.0)
+    finally:
+        c.close()
+    d = result.to_dict()
+    assert d["name"] == "status"
+    assert "no_beans" in d["value"]["active_alerts"]
+    assert d["value"]["bits_hex"] == "0004000008000000"
+
+
+def test_info_result_to_dict_is_nested(sim) -> None:
+    import json as _json
+
+    c = _paired(sim)
+    try:
+        result = run_named(c, "info", timeout=3.0)
+    finally:
+        c.close()
+    d = result.to_dict()
+    assert d["name"] == "info"
+    assert d["value"]["handshake_state"] == "CORRECT"
+    assert d["value"]["maintenance_counters"]["cleaning"] == 0x0015
+    assert d["value"]["status"]["active_alerts"]
+    # Composite must remain JSON-serialisable.
+    _json.loads(_json.dumps(d))
+
+
+def test_string_result_to_dict_passthrough(sim) -> None:
+    c = _paired(sim)
+    try:
+        result = run_named(c, "lock", timeout=2.0)
+    finally:
+        c.close()
+    d = result.to_dict()
+    assert d["name"] == "lock"
+    assert isinstance(d["value"], str)
+    assert d["value"].startswith("@ts")
+
+
+# --------------------------------------------------------------------- #
 # Destructive command gate
 # --------------------------------------------------------------------- #
 

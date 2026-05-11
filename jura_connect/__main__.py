@@ -172,6 +172,12 @@ def cmd_command(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # In --json mode, stdout is reserved for the JSON response. Every
+    # other piece of human-readable progress (handshake banner, watch
+    # announcement, watched frames) is routed to stderr so the result
+    # on stdout is parseable verbatim.
+    info_stream = sys.stderr if args.json else sys.stdout
+
     creds = _resolve_machine(args)
     address = args.address or (creds.address if creds else None)
     conn_id = args.conn_id or (creds.conn_id if creds else DEFAULT_CONN_ID)
@@ -194,7 +200,7 @@ def cmd_command(args: argparse.Namespace) -> int:
         print(f"connect failed: {exc}", file=sys.stderr)
         client.close()
         return 2
-    print(f"handshake -> {handshake.state}  ({handshake.code})")
+    print(f"handshake -> {handshake.state}  ({handshake.code})", file=info_stream)
     if handshake.state != "CORRECT":
         client.close()
         return 2
@@ -219,12 +225,16 @@ def cmd_command(args: argparse.Namespace) -> int:
         except TimeoutError as exc:
             print(f"timeout: {exc}", file=sys.stderr)
             return 2
-        print(result.format())
+        if args.json:
+            json.dump(result.to_dict(), sys.stdout, indent=2, sort_keys=False)
+            sys.stdout.write("\n")
+        else:
+            print(result.format())
         if args.watch:
-            print(f"watching status for {args.watch:.1f}s ...")
+            print(f"watching status for {args.watch:.1f}s ...", file=info_stream)
             until = time.monotonic() + args.watch
             for frame in client.iter_frames(until=until):
-                print(f"<-- {frame!r}")
+                print(f"<-- {frame!r}", file=info_stream)
     finally:
         client.close()
     return 0
@@ -342,6 +352,14 @@ def build_parser() -> argparse.ArgumentParser:
     cm.add_argument(
         "--watch", type=float, default=0.0,
         help="after the command, listen N seconds for unsolicited frames",
+    )
+    cm.add_argument(
+        "--json", action="store_true",
+        help=(
+            "emit the command result as JSON on stdout. All progress, "
+            "handshake banner, watched frames, and error messages go to "
+            "stderr so stdout is parseable verbatim."
+        ),
     )
     cm.add_argument(
         "--allow-destructive-commands",
