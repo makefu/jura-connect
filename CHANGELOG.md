@@ -4,6 +4,53 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-05-11
+
+### Added
+- **Per-machine profiles.** The 88 machine XMLs from the J.O.E. APK
+  are bundled with the package; `jura_connect.profile.load_profile(code)`
+  loads any of them (e.g. `EF1091` for the S8 EB) and surfaces its
+  alert bitmap + product code map. Alert names and brew-counter names
+  are now lifted from the machine's own XML rather than a hard-coded
+  EF536 baseline — Kaffeebert's `0x2B` is "Cortado", not "(unnamed
+  slot)".
+- **`pmode` named command.** Reads programmable-recipe slots via
+  `@TM:50` + `@TM:42,<slot>`. Gracefully surfaces the S8 EB's
+  "every slot returns C2" state as "not supported by machine"
+  instead of crashing.
+- **`set-machine-type` CLI subcommand.** Retro-fit a machine_type
+  onto an existing paired credential:
+  ``jura-connect set-machine-type --name Kaffeebert EF1091``.
+- **`machine-types` CLI subcommand.** Print every known
+  (friendly_name, EF_code) pair, with ``--filter`` substring search
+  and ``--json`` output for scripting.
+- **`pair --machine-type EF1091`** stores the EF code in the
+  credential. Without the flag the pair flow attempts UDP discovery
+  to read the article number and look it up via `JOE_MACHINES.TXT`
+  — works on older firmwares; TT237W doesn't reply to unicast UDP, so
+  the explicit flag is the practical path there.
+- **`command --machine-type EF1091`** lets you override the stored
+  profile for one invocation.
+- New public types: `MachineProfile`, `AlertDef`, `ProductDef`,
+  `MachineCatalogueEntry`, `PModeSlot`, `ProgramModeSlots`.
+- `CredentialStore.set_machine_type(name, code)` for programmatic
+  retrofitting.
+
+### Changed
+- `MachineCredentials` gained a `machine_type` field. Existing
+  credentials without one fall through to the EF536 baseline, so no
+  migration is required.
+- `JuraClient(profile=…)` is the new way to make status/brews aware
+  of a specific machine variant. The CLI loads this automatically
+  from the stored credential.
+
+### Fixed
+- Verified live against Kaffeebert (S8 EB, EF1091): brews output now
+  names every slot (`cortado`, `sweet_latte`, `2_espressi`,
+  `2_coffee`) instead of leaving them as `0x2B=2, 0x2C=1, 0x31=1,
+  0x36=10`. Status output and `pmode` likewise behave correctly on
+  the real machine.
+
 ## [0.7.0] — 2026-05-11
 
 ### Added
