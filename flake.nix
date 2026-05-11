@@ -9,49 +9,56 @@
       let
         pkgs = import nixpkgs { inherit system; };
         python = pkgs.python313;
-        # Build the library itself with a stock setuptools backend.
+        # The package's check phase runs everything CI runs: ruff
+        # lint + format, ty type-check, and the pytest suite. Putting
+        # them on the package (rather than in separate `checks.*`
+        # derivations) means a plain `nix build .#default` exercises
+        # the full QA gate.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_connect";
           version = "0.5.0";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];
+          # ruff and ty work on the source tree and run before the
+          # build (preBuild), so they're build-time tools. pytest
+          # exercises the installed package and stays under
+          # nativeCheckInputs / pytestCheckHook.
+          nativeBuildInputs = [ pkgs.ruff pkgs.ty ];
           nativeCheckInputs = [ python.pkgs.pytestCheckHook ];
-          # Run the tests as the package's check phase. pytestCheckHook picks
-          # up tests/ on its own.
           enabledTestPaths = [ "tests" ];
           pytestFlags = [ "-q" ];
+          # Lint + type-check the source before it is built. Running
+          # at preBuild keeps ty looking only at the source tree (not
+          # the post-install site-packages copy, which would create a
+          # second copy of the package and confuse module resolution).
+          preBuild = ''
+            echo "==> ruff check"
+            ruff check jura_connect/ tests/
+            echo "==> ruff format --check"
+            ruff format --check jura_connect/ tests/
+            echo "==> ty check jura_connect/"
+            ty check jura_connect/
+          '';
           doCheck = true;
           meta = {
             description = "Python WiFi interface for Jura coffee machines (TT237W / S8)";
             mainProgram = "jura-connect";
           };
         };
-        # A separate `checks.tests` derivation that runs pytest as a
-        # passthrough build, so `nix flake check` exercises the full suite.
-        tests = pkgs.runCommand "jura-connect-tests"
-          {
-            nativeBuildInputs = [
-              (python.withPackages (ps: [ ps.pytest ]))
-            ];
-            src = ./.;
-          } ''
-            cp -R "$src" workdir
-            chmod -R u+w workdir
-            cd workdir
-            export PYTHONPATH=$PWD
-            pytest tests/ -q
-            touch $out
-          '';
       in {
         packages.default = package;
         packages.jura-connect = package;
         apps.default = flake-utils.lib.mkApp { drv = package; };
-        checks.tests = tests;
-        checks.default = tests;
+        # `nix flake check` builds the package, which itself runs
+        # ruff + ty + pytest in its preCheck/checkPhase. One QA gate,
+        # one derivation.
+        checks.default = package;
         devShells.default = pkgs.mkShell {
           packages = [
             (python.withPackages (ps: [ ps.pytest ]))
+            pkgs.ruff
+            pkgs.ty
           ];
         };
       });

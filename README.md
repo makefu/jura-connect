@@ -1,5 +1,7 @@
 # jura-connect
 
+[![CI](https://github.com/makefu/jura-connect/actions/workflows/ci.yml/badge.svg)](https://github.com/makefu/jura-connect/actions/workflows/ci.yml)
+
 A dependency-free Python WiFi interface for Jura coffee machines fitted
 with a **Smart Connect** WiFi dongle. Reverse-engineered from the
 official J.O.E. (Jura Operating Experience) Android app and verified
@@ -260,18 +262,32 @@ with JuraClient(creds.address, conn_id=creds.conn_id,
     print(result.format())             # cleaning=21 filter=1 decalc=8 …
 ```
 
-## Tests
+## Tests, lint, and type-check
+
+The package's build derivation runs **all three** as a single QA gate:
 
 ```sh
-# Direct pytest run
-nix shell nixpkgs#python313Packages.pytest --command pytest tests/ -q
-
-# Nix flake check (runs the suite in a sandboxed derivation)
-nix flake check
-
-# Build the package + run its pytest checkPhase in one shot
+# Builds the package; preBuild runs ruff + ty, then pytest runs in
+# the install-check phase. One command, no separate invocations.
 nix build .#default --print-build-logs
+
+# Same derivation, called as a "flake check" — identical behaviour.
+nix flake check
 ```
+
+Concretely the gate is:
+
+1. `ruff check jura_connect/ tests/` — lint.
+2. `ruff format --check jura_connect/ tests/` — formatting drift.
+3. `ty check jura_connect/` — Astral's type checker on the library.
+4. `pytest tests/ -q` — the 319-case test suite against the in-tree
+   simulator.
+
+If you want to run any one of them ad-hoc without the whole build,
+enter the dev shell (`nix develop`) which has all four tools on
+`$PATH`, then run them directly. The [GitHub Actions workflow](./.github/workflows/ci.yml)
+runs `nix build .#default` on every push and PR, so the badge at the
+top of this README turns green only when all four steps pass.
 
 The test-suite covers:
 
