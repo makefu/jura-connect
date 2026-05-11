@@ -304,6 +304,77 @@ This project follows [Semantic Versioning](https://semver.org/). See
 [`CHANGELOG.md`](CHANGELOG.md) for the release history; the current
 version is also exposed as `jura_connect.__version__` and `jura-connect --version`.
 
+## Releasing
+
+Cutting a release is a CLI flow — no clicking around the GitHub UI:
+
+```sh
+# 1. Bump the version in the three places it lives, and add a
+#    CHANGELOG entry. ./jura_connect/__init__.py, pyproject.toml,
+#    flake.nix.
+$EDITOR jura_connect/__init__.py pyproject.toml flake.nix CHANGELOG.md
+
+# 2. Verify locally — this is the same gate CI runs.
+nix build .#default --print-build-logs
+
+# 3. Commit and push.
+git add -A
+git commit -m "jura-connect: release vX.Y.Z"
+git push
+
+# 4. Tag and push the tag.
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+
+# 5. Create the GitHub release. Use --notes-file to feed the
+#    matching CHANGELOG section straight in.
+awk '/^## \[X\.Y\.Z\]/,/^## \[/{ if (/^## \[/ && !/X\.Y\.Z/) exit; print }' \
+    CHANGELOG.md > /tmp/notes.md
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/notes.md
+```
+
+Publishing the GitHub release triggers the
+[`publish` workflow](./.github/workflows/publish.yml), which:
+
+1. re-runs `nix build .#default` against the tag (so a stale or
+   broken tag cannot ship);
+2. builds the sdist + wheel with `python -m build`;
+3. uploads to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/)
+   (OIDC — no long-lived API token in repo secrets).
+
+### One-time PyPI setup
+
+Before the first PyPI upload succeeds, register this repo as a
+trusted publisher at
+<https://pypi.org/manage/account/publishing/> with:
+
+| Field            | Value                              |
+| ---------------- | ---------------------------------- |
+| PyPI Project name | `jura_connect`                    |
+| Owner            | `makefu`                           |
+| Repository name  | `jura-connect`                     |
+| Workflow name    | `publish.yml`                      |
+| Environment name | `pypi`                             |
+
+After registering, create a GitHub environment called `pypi` on the
+repo (Settings → Environments → New environment) to match the
+workflow's `environment.name`.
+
+### Manual fallback (no CI)
+
+If GitHub Actions is unavailable, the same artefacts can be built
+and uploaded by hand:
+
+```sh
+nix shell nixpkgs#python313 nixpkgs#python313Packages.build \
+  nixpkgs#twine \
+  --command bash -c '
+    python -m build --sdist --wheel --outdir dist/
+    twine check dist/*
+    twine upload dist/*    # prompts for credentials
+  '
+```
+
 ## Protocol reference
 
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the technical workflow

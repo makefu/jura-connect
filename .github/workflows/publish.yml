@@ -1,0 +1,79 @@
+name: publish
+
+# Fires when a GitHub Release is published (via `gh release create
+# <tag>` or the web UI). We re-run the full QA gate first — a tag
+# pointer alone isn't proof the code at that tag still passes lint /
+# type-check / tests — and only then upload to PyPI.
+on:
+  release:
+    types: [published]
+  # Keep a manual lever for re-running a release without recreating it.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to build and publish"
+        required: true
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch lets the operator pin to a tag; the
+          # release trigger already gives us github.event.release.tag_name.
+          ref: ${{ github.event.inputs.ref || github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Re-run the same gate CI uses on every PR: ruff + ty + pytest.
+      # Refuse to publish if the tagged ref does not pass.
+      - name: nix build (ruff + ty + pytest)
+        run: nix build --print-build-logs .#default
+
+      # Build the distribution artefacts outside the Nix store so we
+      # can upload them directly with pypa/gh-action-pypi-publish.
+      # withPackages keeps `build` on the same Python's sys.path —
+      # two separate `nix shell` derivations would not compose.
+      - name: Build sdist + wheel
+        run: |
+          nix-shell -p 'python313.withPackages(ps: [ ps.build ])' \
+            --run 'python -m build --sdist --wheel --outdir dist/'
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    name: upload to PyPI (trusted publisher)
+    needs: build
+    runs-on: ubuntu-latest
+    # Required by PyPI's OIDC trusted-publishing flow: this token is
+    # exchanged with PyPI for short-lived credentials. No long-lived
+    # API token in repo secrets.
+    permissions:
+      id-token: write
+    # An 'environment' on the job ties the OIDC claim to a specific
+    # GitHub environment, which PyPI's trusted-publisher config can
+    # require for extra safety. Configure on PyPI side at
+    # https://pypi.org/manage/account/publishing/.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/jura_connect
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
