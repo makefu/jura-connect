@@ -133,7 +133,10 @@ def test_status(sim) -> None:
     finally:
         c.close()
     assert isinstance(result.value, MachineStatus)
+    # Simulator default frame activates bit 10 (no_beans) + bit 34
+    # (cleaning_alert) under MSB-first decoding.
     assert "no_beans" in result.value.active_alerts
+    assert "cleaning_alert" in result.value.active_alerts
 
 
 def test_lock_unlock(sim) -> None:
@@ -224,7 +227,8 @@ def test_status_result_to_dict(sim) -> None:
     d = result.to_dict()
     assert d["name"] == "status"
     assert "no_beans" in d["value"]["active_alerts"]
-    assert d["value"]["bits_hex"] == "0004000008000000"
+    assert "cleaning_alert" in d["value"]["active_alerts"]
+    assert d["value"]["bits_hex"] == "0020000020000000"
 
 
 def test_info_result_to_dict_is_nested(sim) -> None:
@@ -351,21 +355,20 @@ def test_pmode_with_configured_slots(sim_factory) -> None:
 
 
 def test_status_categorisation_no_beans_is_info_not_error(sim) -> None:
-    """The user explicitly flagged this: no_beans on Kaffeebert means
-    'bin running low', not 'machine is stuck'. It must NOT appear under
-    .errors."""
+    """The user explicitly flagged this: no_beans means 'bin running
+    low', not 'machine is stuck'. It must NOT appear under .errors."""
     c = _paired(sim)
     try:
         result = run_named(c, "status", timeout=2.0)
     finally:
         c.close()
     st = result.value
-    # Simulator default status frame matches Kaffeebert: no_beans + cappu_rinse_alert.
+    # Simulator default status frame has bit 10 (no_beans, info) +
+    # bit 34 (cleaning_alert, process) set under MSB-first decoding.
     assert "no_beans" in st.info
     assert "no_beans" not in st.errors
-    # cappu_rinse_alert is a maintenance reminder, classed 'process'.
-    assert "cappu_rinse_alert" in st.process
-    assert "cappu_rinse_alert" not in st.errors
+    assert "cleaning_alert" in st.process
+    assert "cleaning_alert" not in st.errors
     # The errors group should be empty for the default frame.
     assert st.errors == ()
 
@@ -379,6 +382,19 @@ def test_status_format_groups_severities(sim) -> None:
     text = result.format()
     assert "errors  : (none)" in text
     assert "no_beans" in text
+
+
+def test_kaffeebert_idle_frame_decodes_to_coffee_ready_energy_safe() -> None:
+    """Regression test: the live frame captured from Kaffeebert at idle
+    (`@TF:0004000008000000`) must decode to bit 13 (coffee_ready) +
+    bit 36 (energy_safe) under MSB-first byte/bit indexing. Prior to
+    v0.9.0 the LSB-first parser mis-decoded this as no_beans +
+    cappu_rinse_alert."""
+    st = MachineStatus.parse("@TF:0004000008000000")
+    assert "coffee_ready" in st.active_alerts
+    assert "energy_safe" in st.active_alerts
+    assert "no_beans" not in st.active_alerts
+    assert "cappu_rinse_alert" not in st.active_alerts
 
 
 def test_string_result_to_dict_passthrough(sim) -> None:
@@ -501,3 +517,182 @@ def test_destructive_error_message_includes_danger_explanation(sim) -> None:
     # The danger field for set-ssid mentions both the action and recovery.
     assert "WiFi" in msg or "ssid" in msg.lower()
     assert "factory reset" in msg
+
+
+# --------------------------------------------------------------------- #
+# Settings (read + write via profile-driven @TM:<arg>)
+# --------------------------------------------------------------------- #
+
+
+def _paired_with_profile(sim, code: str = "EF1091") -> JuraClient:
+    from jura_connect.profile import load_profile
+
+    host, port = sim.address
+    c = JuraClient(
+        host,
+        port=port,
+        conn_id="cmd-tests",
+        auth_hash="",
+        profile=load_profile(code),
+    )
+    r = c.pair(timeout=2.0)
+    assert r.state == "CORRECT"
+    return c
+
+
+def test_setting_read_resolves_against_profile(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        result = run_named(c, "setting", ["hardness"], timeout=2.0)
+    finally:
+        c.close()
+    # Simulator stores hardness=0x10 (16°dH) by default.
+    assert "hardness" in str(result.value).lower()
+    assert "16" in str(result.value)
+    assert "0x10" in str(result.value)
+
+
+def test_setting_read_via_substring(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        # "bright" is a substring of "display_brightness_setting".
+        result = run_named(c, "setting", ["bright"], timeout=2.0)
+    finally:
+        c.close()
+    assert "0x04" in str(result.value)  # default brightness ITEM value
+
+
+def test_setting_read_unknown_name_lists_known(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        with pytest.raises(CommandError) as exc:
+            run_named(c, "setting", ["definitely_not_a_real_setting"], timeout=1.0)
+    finally:
+        c.close()
+    msg = str(exc.value)
+    assert "EF1091" in msg
+    assert "hardness" in msg  # at least one known setting is enumerated
+
+
+def test_setting_read_refuses_without_profile(sim) -> None:
+    """The 'setting' command needs a profile loaded; the bare client
+    cannot enumerate the catalogue from thin air."""
+    host, port = sim.address
+    c = JuraClient(host, port=port, conn_id="cmd-tests", auth_hash="")
+    c.pair(timeout=2.0)
+    try:
+        with pytest.raises(CommandError, match="MachineProfile"):
+            run_named(c, "setting", ["hardness"], timeout=1.0)
+    finally:
+        c.close()
+
+
+def test_setting_write_is_destructive(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        # Two-arg call triggers the dynamic destructive gate.
+        with pytest.raises(DestructiveCommandError) as exc:
+            run_named(c, "setting", ["hardness", "20"], timeout=1.0)
+    finally:
+        c.close()
+    msg = str(exc.value)
+    assert "@TM:<arg>,<val>" in msg
+    assert "--allow-destructive-commands" in msg
+
+
+def test_setting_write_allowed_with_gate_persists_value(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        # 20°dH should round-trip through hex 0x14.
+        write_res = run_named(
+            c, "setting", ["hardness", "20"], timeout=2.0, allow_destructive=True
+        )
+        assert "0x14" in str(write_res.value)
+        # Now re-read and confirm the simulator stored the new value.
+        read_res = run_named(c, "setting", ["hardness"], timeout=2.0)
+    finally:
+        c.close()
+    assert "20" in str(read_res.value)
+    assert "0x14" in str(read_res.value)
+
+
+def test_setting_write_validates_step_slider_range(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        # Hardness range is 1..30; 99 is out of bounds.
+        with pytest.raises(CommandError, match="outside"):
+            run_named(
+                c,
+                "setting",
+                ["hardness", "99"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+    finally:
+        c.close()
+
+
+def test_setting_write_validates_combobox_unknown_item(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        with pytest.raises(CommandError, match="Allowed"):
+            run_named(
+                c,
+                "setting",
+                ["language", "klingon"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+    finally:
+        c.close()
+
+
+def test_setting_write_accepts_item_name_for_combobox(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        result = run_named(
+            c,
+            "setting",
+            ["language", "french"],
+            timeout=2.0,
+            allow_destructive=True,
+        )
+        assert "0x03" in str(result.value)  # french=03 per EF1091 XML
+        # And the simulator should now report French on read.
+        read = run_named(c, "setting", ["language"], timeout=2.0)
+    finally:
+        c.close()
+    assert "french" in str(read.value).lower()
+
+
+def test_setting_write_accepts_switch_by_off(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        # Frother Instructions: on=01, off=00.
+        run_named(
+            c,
+            "setting",
+            ["frother_instructions", "off"],
+            timeout=2.0,
+            allow_destructive=True,
+        )
+        read = run_named(c, "setting", ["frother_instructions"], timeout=2.0)
+    finally:
+        c.close()
+    assert "off" in str(read.value).lower()
+
+
+def test_setting_write_checksum_must_match(sim) -> None:
+    """A raw write with a wrong checksum must be refused @an:error."""
+    from jura_connect.client import _settings_checksum
+
+    c = _paired_with_profile(sim)
+    try:
+        # Correct payload: @TM:02,14<csum>. We tamper with the csum.
+        good = _settings_checksum("02,14")
+        bad = "00" if good != "00" else "FF"
+        bad_cmd = f"@TM:02,14{bad}"
+        reply = c.request(bad_cmd, match=r"^@(tm|an)", timeout=2.0)
+    finally:
+        c.close()
+    assert "error" in reply.lower()

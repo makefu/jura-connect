@@ -90,6 +90,24 @@ $ jura-connect command --name Kaffeebert --machine-type EF1091 brews
 Credentials without a `machine_type` field fall through to the EF536
 baseline, so older paired machines keep working without migration.
 
+### Machine name ("Kaffeebert")
+
+The string you see on the touchscreen (and in `jura-connect discover`)
+is the WiFi dongle's display name. It's writable via the gated
+`set-name` command (`@HW:82,<name>`):
+
+```sh
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    set-name LatteBot
+```
+
+After the next reconnect, both the touchscreen and discovery report
+the new name. There is no separate per-machine display name — Jura's
+WiFi protocol exposes a single name string that the dongle owns and
+the machine surfaces. The protocol does not expose the
+machine's local PIN-protected "machine name" field (set on the
+machine itself, behind the service menu); only the dongle's name.
+
 ### Run commands against a paired machine
 
 The CLI exposes a `command` subcommand that takes a *named* read
@@ -105,6 +123,7 @@ available commands:
     status                   parsed status / active alerts (@HU? -> @TF:)
     brews                    per-product brew counters (@TR:32 paginated; 16 pages)
     pmode                    programmable-recipe slots (@TM:50 + @TM:42,<slot>); per-machine
+    setting <name> [<value>] read or write a machine setting; profile-aware; write is gated
     lock                     lock the front-panel display (@TS:01)
     unlock                   unlock the front-panel display (@TS:00)
     mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
@@ -139,8 +158,8 @@ handshake -> CORRECT  (@hp4)
   auth-hash      : 13908FE4D3EB986B...
   status bits    : 0004000008000000
   errors         : (none)
-  info flags     : no_beans
-  process flags  : cappu_rinse_alert
+  info flags     : coffee_ready, energy_safe
+  process flags  : (none)
   maintenance    : cleaning=21 filter=1 decalc=8 cappu_rinse=344 coffee_rinse=3617 cappu_clean=91
   maintenance %  : cleaning=80 filter=255 decalc=30
 
@@ -152,8 +171,8 @@ $ jura-connect command --name Kaffeebert status
 handshake -> CORRECT  (@hp4)
 bits=0004000008000000
   errors  : (none)
-  info    : no_beans
-  process : cappu_rinse_alert
+  info    : coffee_ready, energy_safe
+  process : (none)
 
 $ jura-connect command --name Kaffeebert brews
 handshake -> CORRECT  (@hp4)
@@ -176,12 +195,20 @@ The product names above are lifted from the S8 EB's own XML
 `0x2B=2`, `0x2C=1`, `0x31=1`, `0x36=10` as anonymous slots — the EF536
 baseline doesn't know what those codes brew.
 
-Status output now distinguishes blocking **errors** (machine is
-stuck, user must act) from **info** flags (low-supply reminders such
-as `no_beans` — informational, not an error) and **process** flags
-(periodic maintenance prompts such as `cappu_rinse_alert`). The
-unsplit ``active_alerts`` is still on the dataclass for backwards
+Status output distinguishes blocking **errors** (machine is stuck,
+user must act) from **info** flags (low-supply reminders and
+state-of-being bits such as `no_beans`, `coffee_ready`,
+`energy_safe`) and **process** flags (periodic maintenance prompts
+such as `cleaning_alert` and `decalc_alert`). The unsplit
+``active_alerts`` is still on the dataclass for backwards
 compatibility.
+
+Status-bit decoding uses **MSB-first** indexing within each byte
+(matching the J.O.E. APK's `Status.a()`). v0.8.0 and earlier used
+LSB-first, which mis-named every bit by 7 positions per byte and
+made the CLI report e.g. `no_beans` when the live frame actually
+meant `coffee_ready`. v0.9.0 fixes this; see CHANGELOG for the
+correction window.
 
 The `pmode` command reads the programmable-recipe slot table via
 `@TM:50` + `@TM:42,<slot>`. On the S8 EB / EF1091 every slot returns
@@ -194,6 +221,46 @@ $ jura-connect command --name Kaffeebert pmode
 handshake -> CORRECT  (@hp4)
 pmode: 20 slot(s) reported by @TM:50, but every slot returned C2 (= 'not supported by machine'). This firmware does not expose pmode entries over WiFi.
 ```
+
+### Read or write machine settings (`setting`)
+
+Each machine XML declares a `<MACHINESETTINGS>` section listing
+user-tunable settings (water hardness, auto-off delay, display units,
+language, brightness, milk-rinsing mode, frother instructions). The
+`setting` command reads or writes them by name, using the machine
+profile to validate the value before going on the wire.
+
+```sh
+# Read a value
+$ jura-connect command --name Kaffeebert setting hardness
+handshake -> CORRECT  (@hp4)
+hardness = 16 (0x10)
+
+# Substring match is allowed when unambiguous
+$ jura-connect command --name Kaffeebert setting bright
+display_brightness_setting = 40 (0x04)
+
+# Writes are gated. Without the flag, the CLI explains the risk
+# and the catalogue values; with the flag, it validates against the
+# profile (range / step / known item) and computes the @TM:<arg>,<val>
+# trailing checksum before sending.
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    setting language french
+set language = 0x03 (reply: @tm:09)
+
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    setting hardness 99
+refused: hardness: 99 is outside [1, 30]
+```
+
+The catalogue is per-machine: `EF1091` carries 7 settings, other EF
+codes have different lists. Pair with `--machine-type` (or
+`set-machine-type` after the fact) so the profile is loaded.
+
+The trailing two hex chars on every write are a checksum the dongle
+verifies — see `_settings_checksum` in `jura_connect.client` and §5.7
+of [`docs/PROTOCOL.md`](docs/PROTOCOL.md). A bad checksum gets
+`@an:error` from the firmware (and from the simulator).
 
 For one-off advanced use, `raw` echoes any wire command verbatim:
 
@@ -321,7 +388,7 @@ with JuraClient(creds.address, conn_id=creds.conn_id,
     # Either the high-level helpers …
     info = c.read_machine_info()
     print(info.maintenance_counters)   # MaintenanceCounters(cleaning=21, ...)
-    print(info.status.active_alerts)   # ('no_beans',)
+    print(info.status.active_alerts)   # ('coffee_ready', 'energy_safe')
 
     # … or the named-command registry — same API the CLI uses:
     for spec in list_commands():

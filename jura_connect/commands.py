@@ -73,6 +73,7 @@ class Argument:
 
     name: str
     help: str
+    optional: bool = False  # if True, the arg may be omitted on the CLI
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -89,11 +90,20 @@ class CommandSpec:
     # specific: what the command does on the machine *and* what can
     # bite the user (locked out, supplies consumed, irreversible…).
     danger: str | None = None
+    # Optional callable that decides destructiveness from the parsed
+    # arguments — used by commands that combine a safe read and a
+    # destructive write under one name (e.g. ``setting <name>`` reads,
+    # ``setting <name> <value>`` writes). Takes the args tuple, returns
+    # a danger string when destructive, ``None`` when safe.
+    dynamic_danger: Callable[["tuple[str, ...]"], str | None] | None = None
 
     def usage(self) -> str:
         if not self.arguments:
             return self.name
-        return f"{self.name} " + " ".join(f"<{a.name}>" for a in self.arguments)
+        parts = [
+            f"[<{a.name}>]" if a.optional else f"<{a.name}>" for a in self.arguments
+        ]
+        return f"{self.name} " + " ".join(parts)
 
     def run(
         self,
@@ -103,24 +113,33 @@ class CommandSpec:
         timeout: float,
         allow_destructive: bool = False,
     ) -> CommandResult:
-        if len(args) != len(self.arguments):
-            expected = (
-                ", ".join(a.name for a in self.arguments) if self.arguments else "none"
+        required = sum(1 for a in self.arguments if not a.optional)
+        if not required <= len(args) <= len(self.arguments):
+            expected_summary = (
+                ", ".join(a.name + ("?" if a.optional else "") for a in self.arguments)
+                or "none"
             )
             raise CommandError(
-                f"{self.name}: expected {len(self.arguments)} argument(s) "
-                f"({expected}); got {len(args)}"
+                f"{self.name}: expected {required}..{len(self.arguments)} "
+                f"argument(s) ({expected_summary}); got {len(args)}"
             )
 
         # Static gate: the command is destructive by registry declaration.
         if self.destructive and not allow_destructive:
             raise DestructiveCommandError(_format_named_gate(self))
 
-        # Dynamic gate: the raw escape hatch can carry a destructive
-        # payload even though the *command* (raw) is not marked so. Check
-        # here so the bypass can't be used by accident.
-        if self.name == "raw" and not allow_destructive:
-            _ensure_raw_payload_is_safe(args[0])
+        # Dynamic gate: ``setting <n> <v>`` and ``raw '@TG:24'`` are
+        # destructive even though the *command* (setting, raw) is not
+        # marked statically. The decision must run before any wire I/O.
+        if not allow_destructive:
+            if self.dynamic_danger is not None:
+                dynamic = self.dynamic_danger(tuple(args))
+                if dynamic is not None:
+                    raise DestructiveCommandError(
+                        _format_named_gate(dataclasses.replace(self, danger=dynamic))
+                    )
+            if self.name == "raw":
+                _ensure_raw_payload_is_safe(args[0])
 
         value = self.runner(self, client, tuple(args), timeout)
         return CommandResult(name=self.name, value=value)
@@ -323,6 +342,100 @@ def _r_set_name(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Setting (read or write, depending on argv length)
+# --------------------------------------------------------------------- #
+
+
+def _require_profile(client: JuraClient) -> object:
+    if client.profile is None:
+        raise CommandError(
+            "this command needs a MachineProfile. Pair with "
+            "--machine-type <EF_code> or pass --machine-type to "
+            "'command'. See 'jura-connect machine-types' for the "
+            "catalogue."
+        )
+    return client.profile
+
+
+def _resolve_setting(profile, name: str):
+    """Return the SettingDef for the given user-supplied name.
+
+    Looks up by snake_case identifier first; falls back to a
+    case-insensitive substring match so the user can type ``bright``
+    instead of ``display_brightness_setting``.
+    """
+    from .profile import _snake  # local import to dodge cycles
+
+    target = _snake(name)
+    catalogue = profile.setting_by_name
+    if target in catalogue:
+        return catalogue[target]
+    # Substring fallback. Bail if ambiguous.
+    matches = [s for s in catalogue.values() if target in s.name]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = ", ".join(s.name for s in matches)
+        raise CommandError(
+            f"setting {name!r} is ambiguous on profile {profile.code}; matches {names}"
+        )
+    known = ", ".join(sorted(catalogue))
+    raise CommandError(
+        f"setting {name!r} not known on profile {profile.code}. "
+        f"Known: {known or '(none — profile has no MACHINESETTINGS)'}"
+    )
+
+
+def _format_setting_result(definition, raw_value: str) -> str:
+    """Render a setting's wire-format value back as a human string.
+
+    For ITEM-driven settings, look the raw hex up in the catalogue and
+    surface both the friendly name and the raw hex. For step-sliders,
+    parse the hex back into an integer.
+    """
+    cleaned = raw_value.strip().lstrip(",").upper()
+    if definition.kind == "step_slider":
+        try:
+            n = int(cleaned, 16)
+        except ValueError:
+            return f"{definition.name} = {cleaned!r} (raw)"
+        return f"{definition.name} = {n} (0x{cleaned})"
+    for item in definition.items:
+        if item.value.upper() == cleaned:
+            return f"{definition.name} = {item.name} (0x{cleaned})"
+    return f"{definition.name} = 0x{cleaned} (unknown — not in catalogue)"
+
+
+def _r_setting(_spec, client, args, timeout):
+    profile = _require_profile(client)
+    if not args:
+        raise CommandError(
+            "setting: expected at least 1 argument (name). "
+            "Pass a second argument to write."
+        )
+    definition = _resolve_setting(profile, args[0])
+    if len(args) == 1:
+        raw = client.read_setting(definition.p_argument, timeout=timeout)
+        return _format_setting_result(definition, raw)
+    # Write path. The destructive gate runs in CommandSpec.run() before
+    # we get here, so by this point the user has acknowledged the risk.
+    try:
+        value_hex = definition.normalise_value(args[1])
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+    reply = client.write_setting(definition.p_argument, value_hex, timeout=timeout)
+    if reply.lower().startswith("@an:error"):
+        raise CommandError(
+            f"setting {definition.name} write was refused by the machine "
+            f"(reply: {reply!r}). The value passed client-side validation "
+            f"but the firmware rejected it — possibly the setting is "
+            f"read-only on this firmware or the catalogue's allowed "
+            f"values are stale for your EF code."
+        )
+    return f"set {definition.name} = 0x{value_hex} (reply: {reply})"
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -394,6 +507,33 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="send a verbatim '@…' command; payload checked against the destructive set",
         arguments=(Argument("frame", "command frame, e.g. '@TG:43'"),),
         runner=_r_raw,
+    ),
+    CommandSpec(
+        name="setting",
+        description=(
+            "read or write one machine setting ('hardness', 'language', "
+            "'units', 'auto_off', 'brightness', 'milk_rinsing', "
+            "'frother_instructions' on the S8 EB / EF1091); the second "
+            "arg writes and is gated"
+        ),
+        arguments=(
+            Argument("name", "setting identifier (substring match OK)"),
+            Argument("value", "value to write; omit for read", optional=True),
+        ),
+        runner=_r_setting,
+        dynamic_danger=lambda args: (
+            None
+            if len(args) < 2
+            else (
+                "writes a machine setting via @TM:<arg>,<val><checksum>. "
+                "The value passes client-side validation against the "
+                "machine's XML catalogue (kind, range, allowed items), "
+                "but Jura's firmware can still refuse it. A bad write to "
+                "language or brightness is easily reversed; a bad "
+                "auto-off / hardness can survive on the machine after "
+                "this CLI exits."
+            )
+        ),
     ),
     # ---- destructive ----------------------------------------------------
     CommandSpec(
@@ -480,13 +620,19 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name="power-off",
-        description="[destructive] put the machine into standby (@AN:02)",
+        description="[destructive] standby command (@AN:02); likely no-op on WiFi",
         arguments=(),
         runner=_r_power_off,
         destructive=True,
         danger=(
-            "powers the coffee machine into standby. Reaching it again "
-            "afterwards requires somebody to wake it up physically."
+            "tries to put the machine into standby via @AN:02 — but this "
+            "is a UART / Bluetooth-era command the J.O.E. Android app "
+            "does NOT use over WiFi. Live testing against TT237W "
+            "(S8 EB) shows the dongle silently ignores it: the request "
+            "lands but the machine stays on. Kept in the registry for "
+            "completeness; if it actually starts working on your "
+            "firmware, please open an issue with the model + firmware "
+            "string."
         ),
     ),
     CommandSpec(

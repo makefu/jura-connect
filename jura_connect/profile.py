@@ -63,6 +63,98 @@ class ProductDef:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
+class SettingItem:
+    """One ITEM child of a SWITCH / COMBOBOX / ItemSlider setting."""
+
+    name: str  # snake_case form for the CLI
+    raw_name: str  # original XML Name (may have spaces / mixed case)
+    value: str  # hex string, uppercase, e.g. "0F" or "22021C"
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class SettingDef:
+    """One machine setting from <MACHINESETTINGS>.
+
+    ``kind`` distinguishes the input type:
+
+    * ``"switch"`` — two-position toggle (Units, Frother Instructions);
+      values are ITEM-driven (typically ``"00"``/``"01"``).
+    * ``"combobox"`` — pick-one from N values (Language, Brightness,
+      MilkRinsing); values are ITEM-driven.
+    * ``"step_slider"`` — integer-valued slider (Hardness): Min..Max
+      with Step granularity.
+    * ``"item_slider"`` — pick-one from named ITEMs but laid out as a
+      slider in the J.O.E. UI (AutoOFF / switch-off-delay).
+    """
+
+    name: str  # snake_case identifier for CLI, e.g. "hardness"
+    raw_name: str  # original XML Name, e.g. "Hardness"
+    p_argument: str  # hex byte(s), e.g. "02" — the @TM:<arg> code
+    kind: str  # "switch" | "combobox" | "step_slider" | "item_slider"
+    default: str | None  # hex default, e.g. "10" for hardness=16
+    items: tuple[SettingItem, ...]  # may be empty for step_slider
+    minimum: int | None  # step_slider only
+    maximum: int | None  # step_slider only
+    step: int | None  # step_slider only
+    mask: str | None  # step_slider only ("FF", "FFFF" …)
+
+    def item_by_name(self, name: str) -> SettingItem | None:
+        target = _snake(name)
+        for it in self.items:
+            if it.name == target:
+                return it
+        return None
+
+    def normalise_value(self, raw: str) -> str:
+        """Turn a user-supplied value into the wire-format hex string.
+
+        - For switches / comboboxes / item-sliders: accept either an
+          ITEM name (``"on"``, ``"english"``, ``"15min"``) or the hex
+          value itself (``"01"``).
+        - For step sliders: accept a decimal integer in [min, max]
+          honouring the step; return a hex string of the right width.
+
+        Raises ``ValueError`` with a helpful message if the value is
+        invalid.
+        """
+        raw = raw.strip()
+        if self.kind == "step_slider":
+            try:
+                n = int(raw, 0)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{self.raw_name}: expected an integer, got {raw!r}"
+                ) from exc
+            lo = self.minimum if self.minimum is not None else 0
+            hi = self.maximum if self.maximum is not None else 0xFF
+            if not lo <= n <= hi:
+                raise ValueError(f"{self.raw_name}: {n} is outside [{lo}, {hi}]")
+            if self.step and self.step > 1 and (n - lo) % self.step != 0:
+                raise ValueError(
+                    f"{self.raw_name}: {n} is not aligned to the step "
+                    f"({self.step}); allowed values are "
+                    f"{lo}, {lo + self.step}, {lo + 2 * self.step}, …, {hi}"
+                )
+            width = len(self.mask) if self.mask else 2
+            return f"{n:0{width}X}"
+        # SWITCH / COMBOBOX / ItemSlider — match against ITEM names or
+        # raw hex values.
+        item = self.item_by_name(raw)
+        if item is not None:
+            return item.value.upper()
+        # Allow raw hex too (must match one of the catalogue values).
+        candidate = raw.upper()
+        for it in self.items:
+            if it.value.upper() == candidate:
+                return candidate
+        allowed = ", ".join(f"{it.name}={it.value}" for it in self.items)
+        raise ValueError(
+            f"{self.raw_name}: {raw!r} is not a recognised value. "
+            f"Allowed: {allowed or '(no options known)'}"
+        )
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
 class MachineProfile:
     """Static description of one machine variant.
 
@@ -74,6 +166,7 @@ class MachineProfile:
     version: str  # XML schema version, e.g. "1.6"
     alerts: tuple[AlertDef, ...]
     products: tuple[ProductDef, ...]
+    settings: tuple[SettingDef, ...]
     has_pmode: bool  # whether the XML carries a PROGRAMMODE section
 
     # Derived lookup tables, populated in __post_init__. The default
@@ -85,10 +178,14 @@ class MachineProfile:
     product_by_code: dict[int, ProductDef] = dataclasses.field(
         repr=False, default_factory=dict
     )
+    setting_by_name: dict[str, SettingDef] = dataclasses.field(
+        repr=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
+        object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
 
 
 # --------------------------------------------------------------------- #
@@ -97,8 +194,19 @@ class MachineProfile:
 
 
 def _snake(name: str) -> str:
-    """Normalise an XML ``Name`` attribute to a snake_case identifier."""
-    s = name.strip().lower()
+    """Normalise an XML ``Name`` attribute to a snake_case identifier.
+
+    Splits CamelCase ("AutoOFF" → "auto_off",
+    "DisplayBrightnessSetting" → "display_brightness_setting") and
+    flattens runs of non-alphanumerics to single underscores.
+    """
+    s = name.strip()
+    # Split lower→upper boundaries: "fooBar" → "foo Bar"
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s)
+    # Split runs of uppercase followed by a lowercase letter:
+    # "HTMLParser" → "HTML Parser", "AutoOFFTimer" → "Auto OFF Timer".
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)
+    s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     s = s.strip("_")
     return s or "unnamed"
@@ -155,13 +263,110 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
 
     has_pmode = root.find(".//{*}PROGRAMMODE") is not None
 
+    settings = _parse_machine_settings(root)
+
     return MachineProfile(
         code=code,
         version=version,
         alerts=tuple(alerts),
         products=tuple(products),
+        settings=settings,
         has_pmode=has_pmode,
     )
+
+
+# Map XML element tag (local-name) and SliderType attribute -> kind.
+# Order matters when a SLIDER has SliderType="ItemSlider".
+_SETTING_TAG_TO_KIND = {
+    "SWITCH": "switch",
+    "COMBOBOX": "combobox",
+}
+
+
+def _setting_kind(tag: str, slider_type: str | None) -> str | None:
+    """Return the canonical kind string for one settings element."""
+    if tag == "SLIDER":
+        if slider_type == "ItemSlider":
+            return "item_slider"
+        return "step_slider"
+    return _SETTING_TAG_TO_KIND.get(tag)
+
+
+def _parse_machine_settings(root: ET.Element) -> tuple[SettingDef, ...]:
+    """Parse <MACHINESETTINGS> into a tuple of :class:`SettingDef`.
+
+    Recognised element tags: ``SWITCH``, ``COMBOBOX``, ``SLIDER``
+    (with ``SliderType`` = ``"StepSlider"`` or ``"ItemSlider"``). Each
+    must carry ``Name`` and ``P_Argument``; entries lacking either
+    are skipped silently.
+    """
+    container = root.find(".//{*}MACHINESETTINGS")
+    if container is None:
+        return ()
+    settings: list[SettingDef] = []
+    seen_args: set[str] = set()
+    for el in container:
+        # ElementTree returns Clark-notation tags like
+        # "{http://www.top-tronic.com}SWITCH"; strip the namespace.
+        tag = el.tag.split("}", 1)[-1]
+        kind = _setting_kind(tag, el.get("SliderType"))
+        if kind is None:
+            continue
+        raw_name = el.get("Name") or ""
+        p_arg = el.get("P_Argument") or ""
+        if not raw_name or not p_arg:
+            continue
+        p_arg = p_arg.upper()
+        if p_arg in seen_args:
+            # First occurrence wins, matching ElementTree iteration order
+            # and the J.O.E. UI which only renders one widget per arg.
+            continue
+        seen_args.add(p_arg)
+        items: list[SettingItem] = []
+        for item in el.findall("{*}ITEM"):
+            iname = item.get("Name") or ""
+            ivalue = item.get("Value") or ""
+            if not iname or not ivalue:
+                continue
+            items.append(
+                SettingItem(
+                    name=_snake(iname),
+                    raw_name=iname,
+                    value=ivalue.upper(),
+                )
+            )
+        default = el.get("Default")
+        if default is not None:
+            default = default.upper()
+        minimum: int | None = None
+        maximum: int | None = None
+        step: int | None = None
+        mask: str | None = None
+        if kind == "step_slider":
+            try:
+                minimum = int(el.get("Min", "")) if el.get("Min") else None
+                maximum = int(el.get("Max", "")) if el.get("Max") else None
+                step = int(el.get("Step", "")) if el.get("Step") else None
+            except ValueError:
+                pass
+            mask = el.get("Mask")
+            if mask is not None:
+                mask = mask.upper()
+        settings.append(
+            SettingDef(
+                name=_snake(raw_name),
+                raw_name=raw_name,
+                p_argument=p_arg,
+                kind=kind,
+                default=default,
+                items=tuple(items),
+                minimum=minimum,
+                maximum=maximum,
+                step=step,
+                mask=mask,
+            )
+        )
+    return tuple(settings)
 
 
 @lru_cache(maxsize=None)

@@ -37,6 +37,7 @@ import time
 from collections.abc import Iterator
 
 from . import protocol
+from .client import _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,16 @@ log = logging.getLogger(__name__)
 # during our probe -- this lets tests assert against realistic data.
 DEFAULT_MAINT_COUNTERS = bytes.fromhex("0015000100080158 0E21 005B".replace(" ", ""))
 DEFAULT_MAINT_PERCENT = bytes.fromhex("50FF1E")
-DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
+# Synthetic frame that activates bit 10 (no_beans, info) and bit 34
+# (cleaning_alert, process) — picked to exercise both severities the
+# test-suite cares about. MSB-first within each byte per the APK's
+# Status.a() decoder, so bit N lives at byte N//8 mask 1<<(7-N%8).
+DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0020000020000000")
+
+# The real frame Kaffeebert returns at idle: bit 13 (coffee_ready) +
+# bit 36 (energy_safe). Used in regression tests so we keep verifying
+# the live decode end-to-end.
+KAFFEEBERT_IDLE_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
 # Sentinel for "no count" inside an @TR:32 page.
 _PC_UNUSED = 0xFFFF
@@ -121,6 +131,22 @@ class SimulatorConfig:
     # the real EF1091 firmware that reports slots but doesn't expose
     # them over WiFi.
     pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
+
+    # Machine settings: P_Argument (uppercase hex) -> stored hex value.
+    # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
+    # so the test-suite can read/write the same arguments the J.O.E.
+    # app exercises against a real S8 EB.
+    settings: dict[str, str] = dataclasses.field(
+        default_factory=lambda: {
+            "02": "10",  # hardness = 16 decimal
+            "13": "211E",  # auto-off = 30min
+            "08": "00",  # units = ML
+            "09": "02",  # language = English
+            "0A": "04",  # brightness = 40%
+            "04": "00",  # milk rinsing = Automatic
+            "62": "01",  # frother instructions = On
+        }
+    )
 
 
 class Simulator:
@@ -317,11 +343,36 @@ class Simulator:
             # Real reply format: @tm:42,<slot>,<product_code>...<checksum>
             return f"@tm:42,{slot:02X},{product:02X}"
         if cmd.startswith("@TM:"):
-            arg = cmd[4:]
-            # Read-only memory read -- echo address as a synthetic "@tm:<hi>"
-            # answer, mirroring what the real dongle returns for unknown
-            # addresses on this firmware.
-            return f"@tm:{arg[:2]}"
+            arg_full = cmd[4:]
+            # Distinguish writes (@TM:<arg>,<val><checksum>) from reads
+            # by the presence of a comma. Per the J.O.E. APK's
+            # WifiCommandWritePMode and ByteOperations.d, the trailing
+            # two hex chars are a checksum over <arg>,<val>.
+            if "," in arg_full:
+                arg, _, rest = arg_full.partition(",")
+                arg = arg.upper()
+                if len(rest) < 2:
+                    return "@an:error"
+                value_hex = rest[:-2].upper()
+                csum_recv = rest[-2:].upper()
+                payload_for_csum = f"{arg},{value_hex}"
+                expected = _settings_checksum(payload_for_csum)
+                if csum_recv != expected:
+                    log.warning(
+                        "simulator: bad settings checksum for %s (got %s, expected %s)",
+                        cmd,
+                        csum_recv,
+                        expected,
+                    )
+                    return "@an:error"
+                self.config.settings[arg] = value_hex
+                return f"@tm:{arg.lower()}"
+            arg = arg_full.upper()
+            stored = self.config.settings.get(arg)
+            if stored is not None:
+                return f"@tm:{arg.lower()},{stored}"
+            # Unknown address — echo the high nibble like the real dongle.
+            return f"@tm:{arg_full[:2].lower()}"
         if cmd.startswith("@TR:32,"):
             # Paginated product-counter read. Wire format:
             #   request : @TR:32,<page_hex>

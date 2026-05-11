@@ -268,8 +268,21 @@ Live example from Kaffeebert:
 
 ### 5.4 Status bits (`@TF:`)
 
-Bits are addressed globally: `byte_index * 8 + bit_within_byte`. The
-client decodes the well-known S8 alert set (cf.
+Bits are addressed **MSB-first within each byte**, indexed globally
+across the frame. The APK's `Status.a()` is the canonical decoder:
+
+```java
+return ((1 << (7 - (i % 8))) & bArr[i / 8]) != 0;
+```
+
+So bit *N* lives at byte ``N // 8`` with mask ``1 << (7 - (N % 8))``.
+This catches everyone who reads the XML and assumes naïve byte-LSB
+indexing — prior to v0.9.0 this codebase had the bug and mis-named
+every status bit by 7 positions per byte. The `<ALERT Bit="N" …>`
+attribute in the machine XML uses the SAME N that the APK decoder
+expects; only the byte/bit extraction matters.
+
+The client decodes the well-known S8 alert set (cf.
 `jura_connect.client._STATUS_BITS`) and groups each bit by the
 *severity* lifted from the XML's `ALERT.Type` attribute:
 
@@ -279,11 +292,12 @@ client decodes the well-known S8 alert set (cf.
 | `info` or none | `info`      | informational state or low-supply reminder (`no_beans` with `Blocked="C"`, `heating_up`, `coffee_ready`, …) — not an error, just a flag |
 | `ip`       | `process`       | a "schedule maintenance" prompt (decalc / cleaning / filter / cappu rinse alerts) shown *before* it actually blocks brewing |
 
-Live frame from Kaffeebert at idle: `@TF:0004000008000000`
-→ byte 1 bit 2 (= bit 10 = `no_beans`, severity `info`) and byte 4
-bit 3 (= bit 35 = `cappu_rinse_alert`, severity `process`). Neither
-counts as a blocking error, which matches the machine's actual idle
-state ("running but supplies-low and rinse-overdue").
+Live frame from Kaffeebert at idle: `@TF:0004000008000000`. Byte 1 =
+`0x04` → MSB-position 5 set → global bit 13 = `coffee_ready`
+(severity `info`). Byte 4 = `0x08` → MSB-position 4 set → global bit
+36 = `energy_safe` (severity `info`). The machine is idle in
+energy-save mode and the previous coffee is ready — neither bit is
+an error, which matches reality.
 
 The `MachineStatus` dataclass exposes `errors`, `info`, and
 `process` as separate tuples plus the unsplit `active_alerts` for
@@ -366,7 +380,52 @@ mid-table; the client catches `(ConnectionError, OSError)` and marks
 the remaining slots as unsupported rather than blowing up the whole
 ``pmode`` command.
 
-### 5.7 **Destructive** commands — gated behind `--allow-destructive-commands`
+### 5.7 Machine settings (`@TM:<arg>` read / write)
+
+Every machine XML carries a ``<MACHINESETTINGS>`` block. Each
+``SWITCH`` / ``COMBOBOX`` / ``SLIDER`` element has a ``P_Argument``
+attribute (e.g. ``"02"`` for hardness on EF1091); reading the setting
+is
+
+```
+client → @TM:<P_Argument>
+dongle → @tm:<P_Argument>,<value_hex>
+```
+
+Writing is the same address with a value and a trailing checksum byte:
+
+```
+client → @TM:<P_Argument>,<value_hex><checksum>
+dongle → @tm:<P_Argument>           (success — echo of the address)
+dongle → @an:error                  (rejected — checksum or value bad)
+```
+
+The checksum is two upper-case hex chars computed by the J.O.E. APK's
+``ByteOperations.d``: sum the codepoint of every char in
+``"<P_Argument>,<value_hex>"``, format ``(-1 - sum) & 0xFF``. The
+Python port is in
+``jura_connect.client._settings_checksum``.
+
+Each EF code's ``<MACHINESETTINGS>`` block enumerates the user-tunable
+settings. On EF1091 (S8 EB) the seven settings are:
+
+| Name | Kind | Arg | Notes |
+| ---- | ---- | --- | ----- |
+| Hardness | StepSlider | `02` | 1..30°dH, step 1, mask `FF` |
+| AutoOFF | ItemSlider | `13` | 15min..9h, 11 named ITEMs (1-byte + 3-byte values mixed) |
+| Units | Switch | `08` | `00`=mL / `01`=oz |
+| Language | Combobox | `09` | 11 languages, `01`=German .. `0B`=Estonian |
+| DisplayBrightnessSetting | Combobox | `0A` | 10..100% in 10% steps, `01`..`0A` |
+| MilkRinsing | Combobox | `04` | `00`=Automatic / `01`=Manual |
+| Frother Instructions | Switch | `62` | `01`=On / `00`=Off |
+
+``jura_connect.profile.SettingDef`` carries the parsed catalogue;
+``SettingDef.normalise_value`` validates user-supplied input (range
++ step for sliders, item name OR raw hex for switches/comboboxes)
+before the write is sent. The CLI's ``setting`` command goes through
+both validation and the destructive gate.
+
+### 5.8 **Destructive** commands — gated behind `--allow-destructive-commands`
 
 These were observed in the EF536 machine XML or the APK and are
 exposed as named registry commands but gated behind

@@ -479,6 +479,56 @@ class JuraClient:
             unsupported=tuple(unsupported),
         )
 
+    def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:
+        """Read one machine setting via ``@TM:<p_argument>``.
+
+        ``p_argument`` is the ``P_Argument`` attribute from the XML
+        ``<MACHINESETTINGS>`` block (e.g. ``"02"`` for hardness).
+
+        Returns the raw hex payload after the ``@tm:<arg>,`` prefix.
+        For most settings this is a one- or two-byte value; for
+        ItemSlider settings it can be longer (the AutoOFF table's
+        ``"22021C"`` for 9h). Callers that know the SettingDef can
+        compare against the catalogue's ITEM ``Value`` strings.
+        """
+        arg = p_argument.upper()
+        cmd = f"@TM:{arg}"
+        # (?i) — the dongle may echo the argument in either case
+        # (observed lowercase for "0a" / "0A" alike), so match
+        # case-insensitively on the reply.
+        reply = self.request(cmd, match=rf"(?i)^@tm:{arg}", timeout=timeout)
+        # Reply shape: "@tm:<arg>,<hex>" or "@tm:<arg><hex>" depending on
+        # firmware; strip the leading prefix + optional comma.
+        prefix = f"@tm:{arg.lower()}"
+        body = reply[len(prefix) :] if reply.lower().startswith(prefix) else reply
+        return body.lstrip(",").strip()
+
+    def write_setting(
+        self,
+        p_argument: str,
+        value_hex: str,
+        *,
+        timeout: float = 3.0,
+    ) -> str:
+        """Write one setting via ``@TM:<arg>,<value><checksum>``.
+
+        The dongle confirms via an ``@tm:<arg>`` echo or ``@an:error``
+        on rejection. The checksum follows the J.O.E. APK's
+        ``ByteOperations.d``: sum every ASCII byte of ``"<arg>,<value>"``,
+        cast ``-1 - sum`` to a signed byte, format as two upper-case
+        hex chars and append.
+
+        Caller is responsible for validating ``value_hex`` against the
+        machine's :class:`~jura_connect.profile.SettingDef`. This
+        method takes raw hex strings; see
+        :meth:`jura_connect.profile.SettingDef.normalise_value`.
+        """
+        arg = p_argument.upper()
+        value = value_hex.upper()
+        checksum = _settings_checksum(f"{arg},{value}")
+        cmd = f"@TM:{arg},{value}{checksum}"
+        return self.request(cmd, match=r"^@(tm|an)", timeout=timeout)
+
     def lock_screen(self) -> str:
         """Lock the machine's front panel (``@TS:01``)."""
         return self.request("@TS:01", match=r"^@ts")
@@ -502,6 +552,22 @@ def _hex_body(reply: str, expected_prefix: str) -> bytes:
     if not body.lower().startswith(expected_prefix.lower()):
         raise ValueError(f"{expected_prefix!r} reply expected, got {reply!r}")
     return bytes.fromhex(body[len(expected_prefix) :])
+
+
+def _settings_checksum(payload: str) -> str:
+    """Compute the @TM:<arg>,<val> trailing checksum.
+
+    Ported from ``ByteOperations.d`` in the J.O.E. APK::
+
+        sum = sum(c for c in payload)
+        return f"{(-1 - sum) & 0xFF:02X}"
+
+    where ``c`` is the codepoint of each character. Empirically the
+    dongle requires every settings write to carry this trailing byte;
+    omitting it gets you ``@an:error``.
+    """
+    total = sum(ord(c) for c in payload)
+    return f"{(-1 - total) & 0xFF:02X}"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -698,8 +764,10 @@ class MachineStatus:
         else:
             bits = _STATUS_BITS
         for bit_index, (name, severity) in bits.items():
-            byte_i, bit_i = divmod(bit_index, 8)
-            if byte_i < len(data) and (data[byte_i] >> bit_i) & 1:
+            # MSB-first within each byte, per the J.O.E. APK's
+            # `Status.a()`: `(1 << (7 - (i%8))) & bArr[i/8]`.
+            byte_i, bit_in_byte = divmod(bit_index, 8)
+            if byte_i < len(data) and (data[byte_i] >> (7 - bit_in_byte)) & 1:
                 active.append(name)
                 if severity == "error":
                     errors.append(name)
