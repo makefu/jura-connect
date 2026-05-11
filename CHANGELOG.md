@@ -4,6 +4,22 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] — 2026-05-11
+
+### Fixed
+- **Settings writes silently dropped on TT237W.** v0.9.0 and v0.9.1
+  sent bare ``@TM:<arg>,<value><checksum>``; the dongle ACKs with
+  ``@tm:<arg>`` so the CLI showed success, but the machine ignored
+  the new value until power cycle. The J.O.E. APK always wraps
+  these writes in ``@TS:01`` (lock keypad) / ``@TS:00`` (release
+  keypad) via its ``PriorityChannel.PMODE`` dispatch path (visible
+  in ``apk_unpacked/smali_classes2/k8/c.smali:367``); the Python
+  port now does the same. Defence in depth:
+  ``JuraClient.write_setting(..., verify=True)`` reads the value
+  back after the unlock and raises :class:`ValueError` if the
+  stored value doesn't match what was sent, so the silent-drop
+  failure mode can never look like a successful write again.
+
 ## [0.9.1] — 2026-05-11
 
 ### Fixed
