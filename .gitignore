@@ -1,0 +1,16 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Nix build artefacts
+/result
+/result-*
+
+# Reverse-engineering source material (kept locally, not tracked)
+/apk/
+/tmp/
+/protocol-bt-cpp/
+/protocol-cpp/
+/manifest.json
+/icon.png

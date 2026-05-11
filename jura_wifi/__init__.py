@@ -1,0 +1,54 @@
+"""Python WiFi interface for Jura coffee machines (S8/EB, TT237W series).
+
+Reverse-engineered from the J.O.E. (Jura Operating Experience) Android
+APK. Layered as:
+
+* :mod:`jura_wifi.crypto`     -- byte-level WiFi obfuscation cipher
+  (port of ``WifiCryptoUtil``); self-inverse, shared client/server.
+* :mod:`jura_wifi.protocol`   -- frame helpers (``* … \\r\\n``) used by
+  both the client and the in-tree simulator.
+* :mod:`jura_wifi.discovery`  -- UDP/51515 broadcast scan + TCP fallback
+  sweep for firmwares that don't answer UDP.
+* :mod:`jura_wifi.client`     -- ``@HP:`` handshake, unset-PIN pair flow,
+  structured read commands.
+* :mod:`jura_wifi.simulator`  -- TCP server speaking the same protocol;
+  used by the test-suite to exercise the client end-to-end without a
+  physical machine.
+* :mod:`jura_wifi.credentials` -- JSON file storage of pairing secrets.
+"""
+
+from .client import (
+    JuraClient,
+    JuraConnection,
+    HandshakeError,
+    HandshakeResult,
+    MachineInfo,
+    MachineStatus,
+    MaintenanceCounters,
+    MaintenancePercent,
+    PairingTimeout,
+)
+from .credentials import CredentialStore, MachineCredentials
+from .crypto import decode, encode
+from .discovery import Machine, discover, probe, scan_tcp, tcp_probe
+
+__all__ = [
+    "CredentialStore",
+    "HandshakeError",
+    "HandshakeResult",
+    "JuraClient",
+    "JuraConnection",
+    "Machine",
+    "MachineCredentials",
+    "MachineInfo",
+    "MachineStatus",
+    "MaintenanceCounters",
+    "MaintenancePercent",
+    "PairingTimeout",
+    "decode",
+    "discover",
+    "encode",
+    "probe",
+    "scan_tcp",
+    "tcp_probe",
+]
