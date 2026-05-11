@@ -4,6 +4,22 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — 2026-05-11
+
+### Added
+- `AGENTS.md` — distilled conventions and gotchas for contributors
+  and AI assistants. Covers the protocol's reverse-engineered
+  status, the destructive-command incident and gate, the
+  no-mocks-only-simulator test discipline, the library/CLI split,
+  the QA gate via `nix build .#default`, the
+  naming / versioning / release flow, and commit style.
+- README: a short "Usage of LLMs" note recording that the codebase
+  was written by Claude Code (Opus 4.7) from 2026-05-11 onwards.
+
+### Changed
+- README acknowledgement: tightened the closing line about the
+  Jutta-Proto project.
+
 ## [0.6.0] — 2026-05-11
 
 ### Added

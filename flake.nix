@@ -16,7 +16,7 @@
         # the full QA gate.
         package = python.pkgs.buildPythonPackage {
           pname = "jura_connect";
-          version = "0.6.0";
+          version = "0.6.1";
           src = ./.;
           pyproject = true;
           build-system = [ python.pkgs.setuptools ];
