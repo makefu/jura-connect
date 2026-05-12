@@ -42,6 +42,22 @@ A `recv` parser should:
 2. Read until the next un-escaped `\r\n`.
 3. Decrypt with the recovered key.
 
+**Inner CRLF (verified against the J.O.E. Android app on TT237W).**
+The *cleartext* body — the ASCII command string before the cipher runs
+— also ends with a literal `\r\n`. So the bytes the dongle decodes
+look like e.g. `@TM:13,211E96\r\n`, not `@TM:13,211E96`. This inner
+CRLF is in addition to the outer frame terminator above. Discovered
+the hard way: TT237W (Jura S8 EB) silently rejects settings writes
+whose body has no inner CRLF, replying `@tm:00` for any
+`@TM:<arg>,<val><csum>`. Reads happen to work without it, which made
+the asymmetry hard to spot. `jura_connect.protocol.wrap` always
+appends the inner CRLF on send (idempotent) and
+`jura_connect.protocol.unwrap` / `FrameReader.next_frame` strip it on
+receive so callers see clean payloads. Empirically every J.O.E.
+phone→dongle and dongle→phone frame in the pcap carries the inner
+CRLF, so this appears to be a general protocol rule, not a TT237W
+quirk.
+
 ### 1.2 Reserved byte set
 
 Five byte values trigger the escape mechanism inside the encoded body:
@@ -416,6 +432,35 @@ default for ``WifiCommandWritePMode`` — through a
 :meth:`jura_connect.client.JuraClient.write_setting`; releases
 0.9.0 - 0.9.1 omitted it, which is why settings appeared to write
 successfully but never took effect.
+
+In addition, **the cleartext body must end with `\r\n` before the
+cipher runs** (see §1.1). TT237W's failure mode for a missing inner
+CRLF is the opposite of the missing lock/unlock wrapper: instead of
+ACKing with ``@tm:<arg>``, the dongle ACKs with ``@tm:00`` (the
+rejection token) and the value never changes. Releases 0.9.0-0.9.2
+hit this on every write. Discovered by pcap-decoding the J.O.E.
+Android app's AutoOFF write on Kaffeebert (``192.168.111.192``);
+every J.O.E. body carries the trailing CRLF inside the cipher body.
+
+#### ItemSlider value storage (AutoOFF on EF1091)
+
+``ItemSlider`` settings like AutoOFF (``P_Argument="13"``) use a
+1-byte *type-tag* prefix on the wire:
+
+* ``21<vv>`` — 1-byte unsigned value ``vv`` follows
+  (``211E`` = 30 dec = 30min, ``213C`` = 60 dec = 1h)
+* ``22<vvvv>`` — 2-byte unsigned value ``vvvv`` follows
+  (``220168`` = 360 dec = 6h, ``22021C`` = 540 dec = 9h)
+* ``0F`` — a one-byte literal value with no tag (15min)
+
+The dongle persists only the value bytes for the ``21`` form (so
+writing ``211E`` and then reading ``@TM:13`` gives back ``1E``) but
+returns the literal value including the ``22`` tag for the
+two-byte form (writing ``220168`` reads back ``220168``).
+:meth:`jura_connect.client.JuraClient.write_setting` accepts both
+shapes when verifying the readback, and the CLI's
+``setting auto_off`` lookup falls back to suffix-matching the
+ItemSlider catalogue so ``1E`` resolves to ``30min``.
 
 The checksum is two upper-case hex chars computed by the J.O.E. APK's
 ``ByteOperations.d``: sum the codepoint of every char in

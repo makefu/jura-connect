@@ -587,6 +587,19 @@ class JuraClient:
 
         if reply.lower().startswith("@an:error"):
             return reply
+        # `@tm:00` from a non-00 write means the dongle rejected the
+        # request (this happens when the cleartext body is missing the
+        # trailing CRLF that protocol.wrap now appends). Surface it as
+        # a hard error so callers don't silently get a stale value.
+        reply_arg = ""
+        if reply.lower().startswith("@tm:"):
+            reply_arg = reply[len("@tm:") :].split(",", 1)[0].strip().upper()
+        if arg != "00" and reply_arg == "00":
+            raise ValueError(
+                f"setting write for arg={arg}: dongle replied "
+                f"{reply!r} (rejection — likely missing CRLF in body, "
+                f"see protocol.wrap)."
+            )
         if verify:
             try:
                 stored = self.read_setting(arg, timeout=timeout)
@@ -594,22 +607,20 @@ class JuraClient:
                 # Read-back failed; surface the original reply rather
                 # than masking it.
                 return reply
-            if stored.upper() != value:
+            stored_u = stored.upper()
+            # ItemSlider values for AutoOFF (P_Argument=13) use a
+            # 1-byte type-tag prefix (`21` = follow with 1-byte value,
+            # `22` = follow with 2-byte value). The dongle stores the
+            # raw value bytes and on read returns either the stripped
+            # form (`211E` written -> `1E` stored) or the full form
+            # (`220168` -> `220168`) depending on the firmware code
+            # path. Accept either: equality OR the stored form being a
+            # trailing slice of the written value.
+            if stored_u != value and not value.endswith(stored_u):
                 raise ValueError(
-                    f"setting write for arg={arg}: dongle replied "
-                    f"{reply!r} and the read-back is still {stored!r} "
-                    f"(we sent {value!r}). On the S8 EB / TT237W "
-                    f"firmware (Kaffeebert), we have not yet found a "
-                    f"wire format the dongle accepts — every "
-                    f"@TM:<arg>,<val><csum> attempt returns @tm:00, "
-                    f"every bank-write @TM:00,FC,<block> attempt "
-                    f"returns @tm:80, and value never changes. The "
-                    f"J.O.E. Android app may use a Bluetooth side "
-                    f"channel for settings writes on this dongle "
-                    f"variant. Until we identify the right path, "
-                    f"settings reads work but writes are effectively "
-                    f"unsupported on TT237W. Issue tracking: "
-                    f"https://github.com/makefu/jura-connect/issues"
+                    f"setting write for arg={arg}: dongle ACK'd "
+                    f"{reply!r} but read-back is {stored!r} (we sent "
+                    f"{value!r})."
                 )
         return reply
 

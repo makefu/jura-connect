@@ -403,6 +403,13 @@ def _format_setting_result(definition, raw_value: str) -> str:
     for item in definition.items:
         if item.value.upper() == cleaned:
             return f"{definition.name} = {item.name} (0x{cleaned})"
+    # Fallback for the AutoOFF-style readbacks: the dongle may store
+    # only the value bytes (e.g. `1E` for the `211E` 30min item) and
+    # drop the leading length-tag byte. Try matching as a trailing
+    # slice of any catalogue value too.
+    for item in definition.items:
+        if item.value.upper().endswith(cleaned):
+            return f"{definition.name} = {item.name} (0x{cleaned})"
     return f"{definition.name} = 0x{cleaned} (unknown — not in catalogue)"
 
 

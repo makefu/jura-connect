@@ -26,8 +26,18 @@ LINEBREAK = b"\r\n"
 
 
 def wrap(payload: bytes, *, key: int | None = None) -> bytes:
-    """Encode ``payload`` and produce a framed wire message."""
-    return b"*" + crypto.encode_payload(payload, key=key) + LINEBREAK
+    """Encode ``payload`` and produce a framed wire message.
+
+    The J.O.E. Android app appends ``\\r\\n`` to the *cleartext body*
+    BEFORE encoding, in addition to the outer ``\\r\\n`` frame
+    terminator. Some firmwares (TT237W on the S8 EB / Kaffeebert)
+    silently reject writes when the inner CRLF is missing: the dongle
+    still ACKs ``@TM:`` with ``@tm:<arg>`` but the value is dropped.
+    Reads happen to work without it. We always append the inner CRLF
+    here so every caller matches the official app.
+    """
+    body = payload if payload.endswith(LINEBREAK) else payload + LINEBREAK
+    return b"*" + crypto.encode_payload(body, key=key) + LINEBREAK
 
 
 def unwrap(raw: bytes) -> bytes:
@@ -37,7 +47,12 @@ def unwrap(raw: bytes) -> bytes:
         raw = raw[1:]
     while raw and raw[-1] in (0x0D, 0x0A):
         raw = raw[:-1]
-    return crypto.decode_payload(raw)
+    decoded = crypto.decode_payload(raw)
+    # Real dongles also include CRLF in the cleartext body. Strip it
+    # so callers see just the payload text.
+    while decoded and decoded[-1] in (0x0D, 0x0A):
+        decoded = decoded[:-1]
+    return decoded
 
 
 class FrameReader:
@@ -77,7 +92,13 @@ class FrameReader:
                     if crlf >= 0:
                         body = bytes(self._buf[star + 1 : crlf])
                         del self._buf[: crlf + len(LINEBREAK)]
-                        return crypto.decode_payload(body)
+                        decoded = crypto.decode_payload(body)
+                        # Real dongles append CRLF inside the cleartext
+                        # body too (see :func:`wrap`); strip it so the
+                        # caller sees a clean payload.
+                        while decoded and decoded[-1] in (0x0D, 0x0A):
+                            decoded = decoded[:-1]
+                        return decoded
                 self._pump()
         finally:
             self._sock.settimeout(old)

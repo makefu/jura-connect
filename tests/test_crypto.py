@@ -64,3 +64,34 @@ def test_wrap_unwrap_includes_sync_and_crlf() -> None:
     assert frame.startswith(b"*")
     assert frame.endswith(b"\r\n")
     assert crypto.unwrap_frame(frame) == payload
+
+
+def test_protocol_wrap_appends_inner_crlf() -> None:
+    """``protocol.wrap`` must append ``\\r\\n`` to the cleartext body
+    before encoding — TT237W rejects writes with ``@tm:00`` otherwise.
+
+    Verified against the J.O.E. Android app's pcap on Kaffeebert:
+    every payload it sends ends with ``\\r\\n`` inside the cipher body
+    *and* the outer frame terminator.
+    """
+    from jura_connect import protocol
+
+    frame = protocol.wrap(b"@TM:13,211E96", key=0x42)
+    # Decode the inner body and check it ends with the inner CRLF.
+    body = frame[1:-2]  # strip leading '*' and trailing outer CRLF
+    decoded = crypto.decode_payload(body)
+    assert decoded == b"@TM:13,211E96\r\n"
+
+    # Idempotent: callers that already include the CRLF aren't doubled.
+    frame2 = protocol.wrap(b"@TS:00\r\n", key=0x42)
+    decoded2 = crypto.decode_payload(frame2[1:-2])
+    assert decoded2 == b"@TS:00\r\n"
+
+
+def test_protocol_unwrap_strips_inner_crlf() -> None:
+    """``protocol.unwrap`` strips the inner CRLF so callers see clean
+    payloads (the real dongle adds CRLF inside its replies too)."""
+    from jura_connect import protocol
+
+    frame = protocol.wrap(b"@tm:13", key=0x42)
+    assert protocol.unwrap(frame) == b"@tm:13"
