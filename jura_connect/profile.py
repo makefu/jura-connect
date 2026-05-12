@@ -105,6 +105,73 @@ class SettingDef:
                 return it
         return None
 
+    def item_from_hex(self, raw_hex: str) -> SettingItem | None:
+        """Resolve a read-back hex value to its catalogue ITEM.
+
+        Exact-match first, then suffix-match — AutoOFF (P_Argument=13)
+        writes ``211E`` but reads back the dongle's stored value
+        ``1E`` (the length-tag byte ``21`` is dropped); we want both
+        to resolve to the same ``30min`` item. Returns ``None`` when
+        the value is not in the catalogue.
+        """
+        cleaned = raw_hex.strip().lstrip(",").upper()
+        for it in self.items:
+            if it.value.upper() == cleaned:
+                return it
+        for it in self.items:
+            if it.value.upper().endswith(cleaned):
+                return it
+        return None
+
+    def validate_wire_hex(self, raw: str) -> str:
+        """Validate a wire-format hex value (the form
+        :meth:`JuraClient.write_setting` sends).
+
+        Differs from :meth:`normalise_value` in that step-slider input
+        is parsed as **hex**, not decimal — write_setting's contract is
+        hex-format end-to-end. ITEM names are still accepted as a
+        convenience (so library callers can write
+        ``write_setting("13", "30min")``).
+
+        Returns the canonical upper-case hex form, or raises
+        :class:`ValueError` if the input is neither a known ITEM name
+        nor a valid in-range / in-catalogue hex value.
+        """
+        raw = raw.strip()
+        # ITEM-name match (covers switch / combobox / item_slider).
+        item = self.item_by_name(raw)
+        if item is not None:
+            return item.value.upper()
+        candidate = raw.upper()
+        if self.kind == "step_slider":
+            try:
+                n = int(candidate, 16)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{self.raw_name}: expected a hex value or item name, got {raw!r}"
+                ) from exc
+            lo = self.minimum if self.minimum is not None else 0
+            hi = self.maximum if self.maximum is not None else 0xFF
+            if not lo <= n <= hi:
+                raise ValueError(
+                    f"{self.raw_name}: 0x{candidate} (={n}) is outside [{lo}, {hi}]"
+                )
+            if self.step and self.step > 1 and (n - lo) % self.step != 0:
+                raise ValueError(
+                    f"{self.raw_name}: {n} is not aligned to the step ({self.step})"
+                )
+            width = len(self.mask) if self.mask else 2
+            return f"{n:0{width}X}"
+        # ITEM-driven kinds: hex must exactly match a catalogue entry.
+        for it in self.items:
+            if it.value.upper() == candidate:
+                return candidate
+        allowed = ", ".join(f"{it.name}={it.value}" for it in self.items)
+        raise ValueError(
+            f"{self.raw_name}: {raw!r} is not a recognised value. "
+            f"Allowed: {allowed or '(no options known)'}"
+        )
+
     def normalise_value(self, raw: str) -> str:
         """Turn a user-supplied value into the wire-format hex string.
 
@@ -186,6 +253,16 @@ class MachineProfile:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
         object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
+
+    def setting_by_arg(self, p_argument: str) -> SettingDef | None:
+        """Find the :class:`SettingDef` for a ``P_Argument`` hex code
+        (e.g. ``"13"`` for AutoOFF). Returns ``None`` if no setting in
+        the profile carries that P_Argument."""
+        target = p_argument.strip().upper()
+        for s in self.settings:
+            if s.p_argument.upper() == target:
+                return s
+        return None
 
 
 # --------------------------------------------------------------------- #

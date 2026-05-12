@@ -35,6 +35,7 @@ from .client import (
     PModeSlot,
     ProductCounters,
     ProgramModeSlots,
+    SettingValue,
 )
 from .profile import (
     AlertDef,
@@ -94,6 +95,7 @@ __all__ = [
     "ProgramModeSlots",
     "SettingDef",
     "SettingItem",
+    "SettingValue",
     "__version__",
     "decode",
     "discover",

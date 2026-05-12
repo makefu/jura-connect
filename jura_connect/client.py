@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Callable, Iterator
 
 from . import protocol
-from .profile import MachineProfile
+from .profile import MachineProfile, SettingDef
 
 DEFAULT_PORT = 51515
 DEFAULT_CONN_ID = "jura-connect"
@@ -555,10 +555,18 @@ class JuraClient:
         ``-1 - sum`` to a signed byte, format as two upper-case hex
         chars and append.
 
-        Caller is responsible for validating ``value_hex`` against the
-        machine's :class:`~jura_connect.profile.SettingDef`. This
-        method takes raw hex strings; see
-        :meth:`jura_connect.profile.SettingDef.normalise_value`.
+        When :attr:`profile` is set and carries a
+        :class:`~jura_connect.profile.SettingDef` for ``p_argument``,
+        ``value_hex`` is run through
+        :meth:`~jura_connect.profile.SettingDef.normalise_value`
+        first. That accepts an ITEM name (``"30min"``), a raw catalogue
+        hex value (``"211E"``), or — for step sliders — a decimal
+        integer in range; any other input raises :class:`ValueError`
+        before the dongle ever sees it. This guards against writing
+        e.g. ``auto_off = "30"`` (which would mean raw byte ``0x30 =
+        48 dec`` rather than the ``30min`` ItemSlider entry ``"211E"``).
+        When no profile is loaded, the value is passed through
+        unchanged.
 
         When ``verify`` is true (default), reads the setting back
         AFTER the unlock and raises :class:`ValueError` if the
@@ -569,6 +577,13 @@ class JuraClient:
         """
         arg = p_argument.upper()
         value = value_hex.upper()
+        if self.profile is not None:
+            definition = self.profile.setting_by_arg(arg)
+            if definition is not None:
+                # Raises ValueError on invalid input. Also turns
+                # ITEM-name input like "30min" into the wire-format
+                # hex "211E" so library callers can pass either form.
+                value = definition.validate_wire_hex(value_hex)
         checksum = _settings_checksum(f"{arg},{value}")
         cmd = f"@TM:{arg},{value}{checksum}"
 
@@ -632,9 +647,104 @@ class JuraClient:
         """Unlock the machine's front panel (``@TS:00``)."""
         return self.request("@TS:00", match=r"^@ts")
 
+    # -- name-based settings API --------------------------------------
+    def _require_setting(self, name: str) -> SettingDef:
+        if self.profile is None:
+            raise RuntimeError(
+                "no MachineProfile loaded — pass profile=load_profile('EFxxxx') "
+                "to JuraClient() to use the name-based settings API."
+            )
+        catalogue = self.profile.setting_by_name
+        if name in catalogue:
+            return catalogue[name]
+        known = ", ".join(sorted(catalogue)) or "(none)"
+        raise ValueError(
+            f"setting {name!r} is not in the {self.profile.code} catalogue. "
+            f"Known: {known}"
+        )
+
+    def list_settings(self) -> tuple[SettingDef, ...]:
+        """Return every :class:`SettingDef` from the loaded profile.
+
+        Useful for enumerating writable settings and their allowed
+        ITEM values from a script or REPL. Raises :class:`RuntimeError`
+        when no profile is loaded.
+        """
+        if self.profile is None:
+            raise RuntimeError("no MachineProfile loaded on this client")
+        return self.profile.settings
+
+    def get_setting(self, name: str, *, timeout: float = 3.0) -> SettingValue:
+        """Read a setting by snake_case name (``"auto_off"``,
+        ``"hardness"``, ``"language"``, …).
+
+        Returns a :class:`SettingValue` carrying both the raw wire-format
+        hex and the resolved ITEM name (when the hex matches a
+        catalogue entry, including AutoOFF's type-tag-stripped form).
+        Requires :attr:`profile` to be set. Raises :class:`ValueError`
+        if the setting name is unknown.
+        """
+        definition = self._require_setting(name)
+        raw = self.read_setting(definition.p_argument, timeout=timeout)
+        item = definition.item_from_hex(raw)
+        return SettingValue(
+            name=definition.name,
+            raw=raw.upper(),
+            item=item.name if item is not None else None,
+            definition=definition,
+        )
+
+    def set_setting(
+        self,
+        name: str,
+        value: str,
+        *,
+        timeout: float = 3.0,
+        verify: bool = True,
+    ) -> str:
+        """Write a setting by snake_case name.
+
+        ``value`` may be:
+
+        * an ITEM name from the catalogue (``"30min"``, ``"english"``,
+          ``"on"``)
+        * the wire-format hex (``"211E"`` for ``auto_off=30min``)
+        * for step sliders, the hex form of an in-range integer
+          (``"0D"`` = 13 °dH for hardness)
+
+        Anything else raises :class:`ValueError` before the request
+        hits the wire. Requires :attr:`profile` to be loaded.
+        """
+        definition = self._require_setting(name)
+        return self.write_setting(
+            definition.p_argument, value, timeout=timeout, verify=verify
+        )
+
     @staticmethod
     def random_conn_id() -> str:
         return f"jura-connect-{uuid.uuid4().hex[:8]}"
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class SettingValue:
+    """Result of :meth:`JuraClient.get_setting`.
+
+    ``raw`` is the wire-format hex (``"1E"`` for AutoOFF=30min on the
+    dongle's read path), ``item`` is the catalogue ITEM name when the
+    value resolves (``"30min"``) and ``None`` when the hex isn't in
+    the catalogue. ``definition`` carries the full :class:`SettingDef`
+    so callers can inspect allowed values, kind, range, etc.
+    """
+
+    name: str
+    raw: str
+    item: str | None
+    definition: SettingDef
+
+    def __str__(self) -> str:  # pragma: no cover - human formatting
+        if self.item is not None:
+            return f"{self.name} = {self.item} (0x{self.raw})"
+        return f"{self.name} = 0x{self.raw}"
 
 
 # --------------------------------------------------------------------- #
