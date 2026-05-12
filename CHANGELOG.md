@@ -4,6 +4,60 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] — 2026-05-12
+
+### Fixed
+- **``JuraClient.write_setting`` accepted arbitrary hex.** Library
+  callers could pass any string and have it forwarded to the dongle,
+  so e.g. ``write_setting("13", "30")`` (intending the ``"30min"``
+  ItemSlider entry, but written as raw hex) would push byte
+  ``0x30 = 48 dec`` onto the machine — a value the AutoOFF catalogue
+  has no name for. The CLI was safe because ``_r_setting`` runs the
+  value through ``SettingDef.normalise_value`` first; only library
+  callers were exposed. ``write_setting`` now validates against the
+  loaded :class:`MachineProfile`'s :class:`SettingDef` (when a
+  profile is set) and raises :class:`ValueError` before the request
+  hits the wire. ITEM names like ``"30min"`` are also accepted as a
+  convenience, so ``client.write_setting("13", "30min")`` now works
+  the same way the CLI does.
+
+### Added
+- **Name-based settings API on :class:`JuraClient`.** Three new
+  methods that use snake_case setting names (``"auto_off"``,
+  ``"hardness"``, ``"language"``) and named ITEM values
+  (``"30min"``, ``"english"``) end-to-end:
+
+  * :meth:`JuraClient.get_setting(name)` — returns a
+    :class:`SettingValue` with both the raw wire hex (``"1E"``) and
+    the resolved ITEM name (``"30min"``), plus the underlying
+    :class:`SettingDef` for further inspection.
+  * :meth:`JuraClient.set_setting(name, value)` — value accepts an
+    ITEM name (``"30min"``), a wire-format hex string (``"211E"``),
+    or for step-sliders a hex integer in range. Raises
+    :class:`ValueError` for anything else before the request hits
+    the wire.
+  * :meth:`JuraClient.list_settings()` — returns the full
+    :class:`SettingDef` catalogue from the loaded profile so
+    callers can enumerate writable settings and their allowed
+    ITEM values from a script or REPL.
+
+  All three require a :class:`MachineProfile` to be loaded on the
+  client (pass ``profile=load_profile("EFxxxx")`` or use the CLI's
+  ``--machine-type`` / stored credential).
+- :meth:`SettingDef.validate_wire_hex` — hex-form variant of
+  ``normalise_value`` for the library write path (step-slider input
+  parsed as hex with range / step check; ITEM-driven kinds must match
+  a catalogue value exactly). The pre-existing ``normalise_value``
+  is unchanged — it still parses step-slider input as decimal for
+  the CLI.
+- :meth:`SettingDef.item_from_hex` — resolve a read-back hex value
+  to its catalogue ITEM (exact match, falling back to suffix-match
+  for AutoOFF's stripped readback form).
+- :meth:`MachineProfile.setting_by_arg` — look up a setting by its
+  ``P_Argument`` hex code (e.g. ``"13"`` for AutoOFF).
+- :class:`jura_connect.SettingValue` dataclass returned by
+  ``get_setting``; re-exported from the top-level package.
+
 ## [0.9.3] — 2026-05-12
 
 ### Fixed
