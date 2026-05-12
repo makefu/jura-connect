@@ -4,6 +4,39 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.3] — 2026-05-12
+
+### Fixed
+- **Settings writes still silently rejected on TT237W after the
+  v0.9.2 lock/unlock wrapper.** Every ``@TM:<arg>,<val><csum>``
+  attempt came back as ``@tm:00`` (the dongle's rejection token)
+  and the value never changed. A pcap of the J.O.E. Android app
+  writing AutoOFF on the same machine (Kaffeebert, ``192.168.111.192``)
+  showed the missing piece: the J.O.E. app appends a literal
+  ``\r\n`` to the *cleartext body* before encoding, in addition
+  to the outer frame terminator. So the actual decoded body the
+  dongle sees is e.g. ``@TM:13,211E96\r\n``, not ``@TM:13,211E96``.
+  TT237W rejects writes whose body has no inner CRLF; reads happen
+  to work without it, which is why v0.9.0–v0.9.2 looked half-OK.
+  ``protocol.wrap`` now always appends the inner CRLF (idempotent
+  for callers who already include it) and ``protocol.unwrap`` /
+  ``FrameReader.next_frame`` strip it from incoming bodies so
+  callers see clean payloads. Real-machine verified: AutoOFF on
+  Kaffeebert now toggles between 30min and 6h on demand.
+- ``JuraClient.write_setting`` no longer treats a stripped readback
+  as a write failure. AutoOFF (``P_Argument=13``) ItemSlider writes
+  use a 1-byte type-tag prefix (``21`` = 1-byte value follows,
+  ``22`` = 2-byte value follows); the dongle stores and reads back
+  only the value bytes for the ``21`` form, so writing ``211E``
+  (30min) gives a readback of ``1E``. Verify now accepts when the
+  stored form is a trailing slice of the written value, and the
+  CLI's ITEM-name lookup falls back to suffix matching so
+  ``setting auto_off`` displays ``30min`` rather than
+  ``unknown — not in catalogue``.
+- ``@tm:00`` from a non-00 write is now surfaced as an explicit
+  rejection (``ValueError``) instead of being lumped in with the
+  generic readback-mismatch error.
+
 ## [0.9.2] — 2026-05-11
 
 ### Fixed
