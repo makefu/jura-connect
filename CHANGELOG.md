@@ -4,6 +4,41 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Brewing actually brews now.** ``brew`` used to send the bare
+  product code (``@TP:0D``) as the Bluetooth-era docs suggest.
+  TT237W-family WiFi firmware ACKs that with ``@tp`` and then
+  silently does nothing — the same ACK-but-ignore trap as the
+  unwrapped ``@TM:`` writes fixed in v0.9.2. Verified live on an
+  E8 (EB) / EF538: the firmware executes a **16-byte recipe blob**
+  with the product code at byte 0 and every recipe parameter at the
+  byte offset given by its machine-XML ``Argument`` F-number minus
+  one (the F-numbers count the Bluetooth command's leading key byte,
+  which the WiFi blob doesn't carry). Water travels as 5 ml ticks;
+  an unset water byte means 255 ticks ≈ 1.275 litres, so the blob is
+  always sent in full. See §5.9 of ``docs/PROTOCOL.md``.
+
+### Added
+- **Recipe parameters parsed from the machine XMLs.**
+  :class:`ProductDef` now carries the product's recipe parameters
+  (water amount, coffee strength, temperature, milk foam, bypass,
+  milk break) as :class:`ProductParam` entries — XML units, ranges,
+  steps, and ITEM catalogues included —
+  and :meth:`ProductDef.build_recipe_hex` builds the validated
+  16-byte ``@TP:`` blob from them.
+- **:meth:`JuraClient.brew`** — brew by product name or code with
+  keyword overrides: ``client.brew("hotwater", ml=220)``,
+  ``client.brew("espresso", strength=7, temperature="high")``.
+  Product names resolve like settings do (exact snake_case first,
+  then unambiguous substring). Values are validated against the
+  machine XML before anything goes on the wire.
+- **CLI: ``brew <product> [param=value …]``** — e.g.
+  ``brew hotwater water=220 temp=high``. Accepts a profile product
+  name, a 2-hex product code, or a full recipe blob verbatim as an
+  escape hatch. Out-of-catalogue values are refused client-side.
+
 ## [0.9.4] — 2026-05-12
 
 ### Fixed

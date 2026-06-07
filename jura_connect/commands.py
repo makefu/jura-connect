@@ -28,6 +28,7 @@ escape hatch can't be used as an accidental bypass.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Callable, Sequence
 
 from .client import JuraClient
@@ -314,8 +315,77 @@ def _r_power_off(_spec, client, _args, timeout):
     return _request_or_disconnect(client, "@AN:02", timeout, "machine powering off")
 
 
+# CLI key -> recipe-parameter kind (the snake_case XML tag). Friendly
+# short forms first; the full kind names work too.
+_BREW_KEY_TO_KIND = {
+    "water": "water_amount",
+    "ml": "water_amount",
+    "water_amount": "water_amount",
+    "strength": "coffee_strength",
+    "coffee_strength": "coffee_strength",
+    "temp": "temperature",
+    "temperature": "temperature",
+    "milk": "milk_foam_amount",
+    "milk_foam": "milk_foam_amount",
+    "milk_foam_amount": "milk_foam_amount",
+    "milk_break": "milk_break",
+    "bypass": "bypass",
+}
+
+
 def _r_brew(_spec, client, args, timeout):
-    recipe = _ascii_arg("recipe", args[0])
+    """Start a product. Three input forms for ``<product>``:
+
+    * a product name from the machine profile (``espresso``,
+      ``hotwater`` — unambiguous substrings OK) — requires a profile;
+    * a 2-hex product code (``0D``) — resolved against the profile
+      when present, else sent verbatim (legacy behaviour);
+    * a full recipe blob (4+ hex chars) — sent verbatim, escape hatch
+      for firmware variants with a different layout.
+
+    Optional ``param=value`` args override the XML defaults, e.g.
+    ``water=220 strength=6 temp=high``. Values are validated against
+    the profile's catalogue before anything goes on the wire.
+    """
+    target = _ascii_arg("product", args[0])
+    overrides: dict[str, int | str] = {}
+    for raw in args[1:]:
+        key, sep, value = raw.partition("=")
+        if not sep or not value:
+            raise CommandError(
+                f"brew: expected param=value (e.g. water=220), got {raw!r}"
+            )
+        kind = _BREW_KEY_TO_KIND.get(key.strip().lower())
+        if kind is None:
+            known = ", ".join(sorted(set(_BREW_KEY_TO_KIND)))
+            raise CommandError(f"brew: unknown parameter {key!r}. Known: {known}")
+        overrides[kind] = value.strip()
+
+    is_hex = bool(re.fullmatch(r"[0-9A-Fa-f]+", target)) and len(target) % 2 == 0
+    if is_hex and len(target) > 2:
+        # Full recipe blob: trust the caller, send verbatim.
+        if overrides:
+            raise CommandError(
+                "brew: param=value overrides cannot be combined with a "
+                "raw recipe blob — bake the values into the blob instead."
+            )
+        return client.request(f"@TP:{target}", timeout=timeout)
+    if client.profile is None:
+        if is_hex:
+            # Legacy escape hatch: no profile to build a blob from.
+            # NB on TT237W-family WiFi firmware a bare product code is
+            # ACK'd but ignored; pair with --machine-type to get blobs.
+            return client.request(f"@TP:{target}", timeout=timeout)
+        raise CommandError(
+            "brew: product names need a machine profile. Pair with "
+            "--machine-type <EF_code> (or pass --machine-type to "
+            "'command'); see 'jura-connect machine-types'."
+        )
+    try:
+        definition = client.resolve_product(target)
+        recipe = definition.build_recipe_hex(overrides)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
     return client.request(f"@TP:{recipe}", timeout=timeout)
 
 
@@ -637,17 +707,34 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name="brew",
-        description="[destructive] start brewing a recipe (@TP:<recipe>)",
+        description="[destructive] start brewing a product (@TP:<recipe blob>)",
         arguments=(
-            Argument("recipe", "product code, e.g. 01 (espresso). Firmware-specific."),
+            Argument(
+                "product",
+                "profile product name ('espresso', 'hotwater'…; substring "
+                "OK), 2-hex product code, or a full recipe blob",
+            ),
+            Argument(
+                "param=value",
+                "recipe override(s): water=<ml> strength=<level> "
+                "temp=<low|normal|high> milk=<s> milk_break=<s> "
+                "bypass=<ml>; defaults come from the machine XML",
+                optional=True,
+            ),
+            Argument("param=value", "additional override", optional=True),
+            Argument("param=value", "additional override", optional=True),
+            Argument("param=value", "additional override", optional=True),
+            Argument("param=value", "additional override", optional=True),
+            Argument("param=value", "additional override", optional=True),
         ),
         runner=_r_brew,
         destructive=True,
         danger=(
-            "immediately starts brewing the given product recipe. The "
-            "machine will draw water, run the grinder, and dispense at the "
-            "spout — make sure a suitable cup is in place. Wrong recipe "
-            "codes can waste beans, water, or steam."
+            "immediately starts brewing the given product. The machine "
+            "will draw water, run the grinder, and dispense at the "
+            "spout — make sure a suitable cup is in place; there is no "
+            "remote abort. Quantities are validated against the machine "
+            "XML, but a wrong product still wastes beans, water, or milk."
         ),
     ),
     CommandSpec(

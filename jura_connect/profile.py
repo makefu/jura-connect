@@ -53,6 +53,102 @@ class AlertDef:
     raw_name: str  # the original XML Name (with spaces)
 
 
+#: Total length of the ``@TP:`` recipe blob in bytes. Verified live
+#: against an E8 (EB) / EF538: the dongle ACKs and brews a 16-byte
+#: payload, while a bare product code is ACKed but silently ignored.
+RECIPE_BLOB_BYTES = 16
+
+#: Recipe-parameter kinds whose XML values are millilitres encoded on
+#: the wire as 5 ml ticks (one byte). WATER_AMOUNT is live-verified on
+#: an E8 (EB): sending 0x2C (44 ticks) dispensed exactly 220 ml.
+#: BYPASS shares WATER_AMOUNT's ml semantics in the XML (ml-ranged,
+#: Step=5) so it gets the same encoding; not yet live-verified.
+_ML_TICK_KINDS = frozenset({"water_amount", "bypass"})
+
+#: 5 ml per wire tick for the kinds above (matches the Bluetooth
+#: protocol's "1 second = 5 ml" documented by Jutta-Proto).
+_ML_PER_TICK = 5
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProductParam:
+    """One recipe parameter of a PRODUCT entry (WATER_AMOUNT, …).
+
+    ``argument`` is the XML ``Argument`` attribute's F-number
+    (``Argument="F4"`` → 4). The F-numbers are byte positions in the
+    Bluetooth start-product command *including* its leading key byte;
+    the WiFi ``@TP:`` blob carries no key byte, so the byte offset
+    inside the blob is ``argument - 1`` (:attr:`offset`). Verified
+    live on an E8 (EB) / EF538 — water at F4 lands on blob byte 3.
+    """
+
+    kind: str  # snake_case XML tag, e.g. "water_amount"
+    argument: int  # F-number from the XML, e.g. 4 for Argument="F4"
+    default: int | None  # XML Value/Default in XML units (ml / level / s)
+    minimum: int | None
+    maximum: int | None
+    step: int | None
+    items: tuple[SettingItem, ...]  # TEMPERATURE only
+
+    @property
+    def offset(self) -> int:
+        """Byte offset of this parameter inside the recipe blob."""
+        return self.argument - 1
+
+    def encode(self, value: int | str) -> int:
+        """Validate ``value`` (in XML units) and return the wire byte.
+
+        * ml-ranged kinds (water, bypass): validated against Min/Max/
+          Step, then divided into 5 ml ticks;
+        * ITEM-driven kinds (temperature): accepts an ITEM name
+          (``"normal"``) or a hex value from the catalogue (``"01"``);
+        * everything else (strength level, milk seconds): validated
+          against Min/Max/Step and sent as-is.
+        """
+        if self.items:
+            if isinstance(value, str):
+                item = next((it for it in self.items if it.name == _snake(value)), None)
+                if item is None:
+                    # Allow the raw catalogue hex too ("01").
+                    candidate = value.strip().upper()
+                    item = next(
+                        (it for it in self.items if it.value == candidate), None
+                    )
+                if item is None:
+                    allowed = ", ".join(f"{it.name}={it.value}" for it in self.items)
+                    raise ValueError(
+                        f"{self.kind}: {value!r} is not a recognised value. "
+                        f"Allowed: {allowed}"
+                    )
+                return int(item.value, 16)
+            if not any(int(it.value, 16) == value for it in self.items):
+                allowed = ", ".join(f"{it.name}={it.value}" for it in self.items)
+                raise ValueError(
+                    f"{self.kind}: {value} is not in the catalogue. Allowed: {allowed}"
+                )
+            return value
+        if isinstance(value, str):
+            try:
+                value = int(value, 10)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{self.kind}: expected an integer, got {value!r}"
+                ) from exc
+        lo = self.minimum
+        hi = self.maximum
+        if lo is not None and hi is not None and not lo <= value <= hi:
+            raise ValueError(f"{self.kind}: {value} is outside [{lo}, {hi}]")
+        if self.step and self.step > 1 and lo is not None:
+            if (value - lo) % self.step != 0:
+                raise ValueError(
+                    f"{self.kind}: {value} is not aligned to the step ({self.step})"
+                )
+        wire = value // _ML_PER_TICK if self.kind in _ML_TICK_KINDS else value
+        if not 0 <= wire <= 0xFE:  # 0xFF means "parameter not set"
+            raise ValueError(f"{self.kind}: {value} does not fit the wire byte")
+        return wire
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ProductDef:
     """One PRODUCT entry from the machine XML."""
@@ -60,6 +156,57 @@ class ProductDef:
     code: int  # product code, e.g. 0x02
     name: str  # snake_case, e.g. "espresso"
     raw_name: str  # original XML Name
+    params: tuple[ProductParam, ...] = ()  # recipe parameters, may be empty
+
+    def param(self, kind: str) -> ProductParam | None:
+        """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
+        for p in self.params:
+            if p.kind == kind:
+                return p
+        return None
+
+    def build_recipe_hex(self, overrides: dict[str, int | str] | None = None) -> str:
+        """Build the 16-byte ``@TP:`` recipe blob for this product.
+
+        Blob layout (verified live against an E8 (EB) / EF538):
+
+        * byte 0 — the product code;
+        * byte ``F-1`` for every XML parameter (water at F4 → byte 3
+          in 5 ml ticks, strength at F3 → byte 2, milk foam at F6 →
+          byte 5 in seconds, temperature at F7 → byte 6 as 00/01/02);
+        * ``FF`` everywhere else ("parameter not set").
+
+        ``overrides`` maps parameter kinds to values in XML units,
+        e.g. ``{"water_amount": 220, "temperature": "high"}``.
+        Parameters not overridden fall back to the XML default.
+        Values are validated against the XML catalogue *before*
+        anything goes on the wire — an unset water byte (``FF`` = 255
+        ticks) would brew **1.275 litres**, which is exactly the
+        accident this helper exists to prevent.
+
+        Raises :class:`ValueError` on unknown override kinds or
+        out-of-range values.
+        """
+        overrides = dict(overrides or {})
+        blob = ["FF"] * RECIPE_BLOB_BYTES
+        blob[0] = f"{self.code:02X}"
+        for p in self.params:
+            if not 0 < p.offset < RECIPE_BLOB_BYTES:
+                raise ValueError(
+                    f"{self.name}: parameter {p.kind} has offset {p.offset} "
+                    f"outside the {RECIPE_BLOB_BYTES}-byte recipe blob"
+                )
+            value = overrides.pop(p.kind, p.default)
+            if value is None:
+                continue
+            blob[p.offset] = f"{p.encode(value):02X}"
+        if overrides:
+            known = ", ".join(p.kind for p in self.params) or "(none)"
+            raise ValueError(
+                f"{self.name}: unknown recipe parameter(s) "
+                f"{', '.join(sorted(overrides))}. This product accepts: {known}"
+            )
+        return "".join(blob)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -335,6 +482,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 code=code_int,
                 name=_snake(raw_name),
                 raw_name=raw_name,
+                params=_parse_product_params(product),
             )
         )
 
@@ -350,6 +498,70 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         settings=settings,
         has_pmode=has_pmode,
     )
+
+
+def _parse_product_params(product: ET.Element) -> tuple[ProductParam, ...]:
+    """Parse a PRODUCT element's recipe parameters.
+
+    Every direct child carrying an ``Argument="F<n>"`` attribute is a
+    recipe parameter (WATER_AMOUNT, COFFEE_STRENGTH, TEMPERATURE,
+    MILK_FOAM_AMOUNT, BYPASS, MILK_BREAK, …). Children without an
+    F-numbered Argument (e.g. PRESELECTION) are skipped.
+    """
+    params: list[ProductParam] = []
+    for el in product:
+        arg = el.get("Argument") or ""
+        if not arg.startswith("F"):
+            continue
+        try:
+            argument = int(arg[1:])
+        except ValueError:
+            continue
+        tag = el.tag.split("}", 1)[-1]
+        items: list[SettingItem] = []
+        for item in el.findall("{*}ITEM"):
+            iname = item.get("Name") or ""
+            ivalue = item.get("Value") or ""
+            if not iname or not ivalue:
+                continue
+            items.append(
+                SettingItem(name=_snake(iname), raw_name=iname, value=ivalue.upper())
+            )
+        # Defaults: ranged parameters carry Value (XML units, decimal);
+        # ITEM-driven parameters (TEMPERATURE) carry Default (hex,
+        # matching an ITEM Value).
+        default: int | None = None
+        raw_value = el.get("Value")
+        raw_default = el.get("Default")
+        try:
+            if raw_value is not None:
+                default = int(raw_value)
+            elif raw_default is not None:
+                default = int(raw_default, 16)
+        except ValueError:
+            default = None
+
+        def _int_attr(name: str) -> int | None:
+            raw = el.get(name)
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+
+        params.append(
+            ProductParam(
+                kind=_snake(tag),
+                argument=argument,
+                default=default,
+                minimum=_int_attr("Min"),
+                maximum=_int_attr("Max"),
+                step=_int_attr("Step"),
+                items=tuple(items),
+            )
+        )
+    return tuple(params)
 
 
 # Map XML element tag (local-name) and SliderType attribute -> kind.

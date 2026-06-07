@@ -92,6 +92,63 @@ def test_known_machine_names_is_sorted_and_unique():
     assert len(names) == len(set(names))
 
 
+def test_ef538_product_params_parsed_from_xml():
+    """The E8 (EB)'s recipe parameters must survive parsing — they
+    drive the @TP recipe-blob builder."""
+    p = load_profile("EF538")
+    hot_water = p.product_by_code[0x0D]
+    water = hot_water.param("water_amount")
+    assert water is not None
+    assert (water.argument, water.offset) == (4, 3)
+    assert (water.default, water.minimum, water.maximum, water.step) == (
+        220,
+        25,
+        450,
+        5,
+    )
+    temp = hot_water.param("temperature")
+    assert temp is not None
+    assert (temp.argument, temp.offset) == (7, 6)
+    assert {it.name for it in temp.items} == {"low", "normal", "high"}
+    # Espresso carries a strength parameter at F3 -> blob byte 2.
+    espresso = p.product_by_code[0x02]
+    strength = espresso.param("coffee_strength")
+    assert strength is not None
+    assert strength.offset == 2
+    # PRESELECTION has no F-argument and must not become a parameter.
+    assert hot_water.param("preselection") is None
+
+
+def test_build_recipe_hex_matches_live_verified_blob():
+    """Live-verified on an E8 (EB): this exact blob dispensed 220 ml."""
+    p = load_profile("EF538")
+    hot_water = p.product_by_code[0x0D]
+    assert (
+        hot_water.build_recipe_hex({"water_amount": 220})
+        == "0DFFFF2CFFFF01FFFFFFFFFFFFFFFFFF"
+    )
+    # XML defaults only — same blob, since 220 ml is the XML default.
+    assert hot_water.build_recipe_hex() == "0DFFFF2CFFFF01FFFFFFFFFFFFFFFFFF"
+    # Temperature accepts ITEM names and lands on byte 6.
+    assert (
+        hot_water.build_recipe_hex({"temperature": "high"})
+        == "0DFFFF2CFFFF02FFFFFFFFFFFFFFFFFF"
+    )
+
+
+def test_build_recipe_hex_validates_against_catalogue():
+    p = load_profile("EF538")
+    hot_water = p.product_by_code[0x0D]
+    with pytest.raises(ValueError, match="outside"):
+        hot_water.build_recipe_hex({"water_amount": 9999})
+    with pytest.raises(ValueError, match="step"):
+        hot_water.build_recipe_hex({"water_amount": 33})
+    with pytest.raises(ValueError, match="not a recognised value"):
+        hot_water.build_recipe_hex({"temperature": "lukewarm"})
+    with pytest.raises(ValueError, match="unknown recipe parameter"):
+        hot_water.build_recipe_hex({"coffee_strength": 5})  # no grounds in water
+
+
 def test_parse_xml_handles_default_namespace():
     """The Jura XMLs use a default namespace; the loader must strip it."""
     text = """<?xml version="1.0"?>

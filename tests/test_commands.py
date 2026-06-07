@@ -496,6 +496,123 @@ def test_safe_raw_payload_is_not_gated(sim) -> None:
     assert result.value.startswith("@tg:43")  # type: ignore[union-attr]
 
 
+# ---- brew: recipe-blob building --------------------------------------
+
+
+def _paired_with_profile(sim) -> JuraClient:
+    from jura_connect.profile import load_profile
+
+    c = _paired(sim)
+    c.profile = load_profile("EF538")
+    return c
+
+
+def test_brew_by_name_builds_blob_and_reaches_wire(sim) -> None:
+    """Named product + profile -> 16-byte blob on the wire. The
+    simulator's @an:error refusal is the proof of wire contact."""
+    c = _paired_with_profile(sim)
+    try:
+        result = run_named(
+            c,
+            "brew",
+            ["hotwater", "water=220"],
+            timeout=2.0,
+            allow_destructive=True,
+        )
+    finally:
+        c.close()
+    assert result.value.startswith("@an:error")  # type: ignore[union-attr]
+
+
+def test_brew_full_blob_passthrough(sim) -> None:
+    """A full recipe blob is sent verbatim, profile or not."""
+    c = _paired(sim)
+    try:
+        result = run_named(
+            c,
+            "brew",
+            ["0DFFFF2CFFFF01FFFFFFFFFFFFFFFFFF"],
+            timeout=2.0,
+            allow_destructive=True,
+        )
+    finally:
+        c.close()
+    assert result.value.startswith("@an:error")  # type: ignore[union-attr]
+
+
+def test_brew_by_name_without_profile_is_refused_client_side(sim) -> None:
+    c = _paired(sim)
+    try:
+        with pytest.raises(CommandError, match="machine profile"):
+            run_named(c, "brew", ["espresso"], timeout=1.0, allow_destructive=True)
+    finally:
+        c.close()
+
+
+def test_brew_validates_overrides_before_wire(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        with pytest.raises(CommandError, match="outside"):
+            run_named(
+                c,
+                "brew",
+                ["hotwater", "water=9999"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+        with pytest.raises(CommandError, match="unknown parameter"):
+            run_named(
+                c,
+                "brew",
+                ["hotwater", "beans=42"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+        with pytest.raises(CommandError, match="param=value"):
+            run_named(
+                c,
+                "brew",
+                ["hotwater", "220"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+        with pytest.raises(CommandError, match="cannot be combined"):
+            run_named(
+                c,
+                "brew",
+                ["0DFFFF2CFFFF01FFFFFFFFFFFFFFFFFF", "water=220"],
+                timeout=1.0,
+                allow_destructive=True,
+            )
+    finally:
+        c.close()
+
+
+def test_brew_unknown_and_ambiguous_product_names(sim) -> None:
+    c = _paired_with_profile(sim)
+    try:
+        with pytest.raises(CommandError, match="not known"):
+            run_named(c, "brew", ["americano"], timeout=1.0, allow_destructive=True)
+        # 'espresso' prefix-matches espresso, espresso_macchiato,
+        # espresso_doppio… — but the exact name must win.
+        result = run_named(c, "brew", ["espresso"], timeout=2.0, allow_destructive=True)
+        assert result.value.startswith("@an:error")  # type: ignore[union-attr]
+        with pytest.raises(CommandError, match="ambiguous"):
+            run_named(c, "brew", ["esp"], timeout=1.0, allow_destructive=True)
+    finally:
+        c.close()
+
+
+def test_client_brew_api_builds_and_sends(sim) -> None:
+    """The library-level JuraClient.brew() mirrors the CLI path."""
+    c = _paired_with_profile(sim)
+    try:
+        reply = c.brew("hotwater", ml=100, temperature="high")
+    finally:
+        c.close()
+    assert reply.startswith("@an:error")  # simulator refuses @TP:
+
+
 def test_set_pin_validates_numeric(sim) -> None:
     c = _paired(sim)
     try:
