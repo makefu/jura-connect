@@ -235,12 +235,19 @@ class JuraClient:
         timeout: float = DEFAULT_PAIR_TIMEOUT,
         on_user_prompt: Callable[[str], None] | None = None,
     ) -> HandshakeResult:
-        """Run the unset-PIN pairing flow.
+        """Run the initial pairing flow (no auth hash yet).
 
-        Opens the connection, sends ``@HP:,<conn_id_hex>,`` and blocks for
-        up to ``timeout`` seconds while the user accepts on the machine.
+        Opens the connection, sends ``@HP:<pin>,<conn_id_hex>,`` (empty auth
+        hash) and blocks for up to ``timeout`` seconds while the user accepts
+        the "pair with this device?" prompt on the machine's display.
         Calls ``on_user_prompt`` once with a one-line instruction so the
         UI / CLI can tell the user to press OK on the coffee machine.
+
+        For machines that have a setup PIN configured (e.g. Jura E6 / EF1030)
+        the PIN **must** be set on the :class:`JuraClient` instance before
+        calling this method — it is included in the ``@HP:`` request so the
+        machine can verify the caller before showing the confirmation dialog.
+        Machines without a PIN work the same way with ``pin=""`` (the default).
 
         Returns the same :class:`HandshakeResult` as :meth:`connect`. On
         ``CORRECT`` with a new hash, the new hash is captured in
@@ -248,7 +255,6 @@ class JuraClient:
         can persist it.
         """
         self.auth_hash = ""
-        self.pin = ""
         self.conn.connect()
         if on_user_prompt is not None:
             on_user_prompt(

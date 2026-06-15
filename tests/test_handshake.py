@@ -66,10 +66,29 @@ def test_aborted_when_empty_hash_after_existing_pairing(sim) -> None:
     b.close()
 
 
-def test_wrong_pin(sim_factory) -> None:
+def test_pair_with_correct_pin_succeeds(sim_factory) -> None:
     sim = sim_factory(pin="1234")
     host, port = sim.address
-    client = JuraClient(host, port=port, conn_id="device-E", pin="0000")
+    client = JuraClient(host, port=port, conn_id="device-E", pin="1234")
+    r = client.pair(timeout=2.0)
+    assert r.state == "CORRECT"
+    assert r.new_hash is not None
+    client.close()
+
+
+def test_pair_with_wrong_pin_returns_wrong_pin(sim_factory) -> None:
+    sim = sim_factory(pin="1234")
+    host, port = sim.address
+    client = JuraClient(host, port=port, conn_id="device-F", pin="0000")
+    r = client.pair(timeout=2.0)
+    assert r.state == "WRONG_PIN"
+    client.close()
+
+
+def test_wrong_pin_on_connect(sim_factory) -> None:
+    sim = sim_factory(pin="1234")
+    host, port = sim.address
+    client = JuraClient(host, port=port, conn_id="device-G", pin="0000")
     r = client.connect(timeout=2.0)
     assert r.state == "WRONG_PIN"
     client.close()
@@ -79,7 +98,7 @@ def test_pair_invokes_user_prompt_callback(sim_factory) -> None:
     sim = sim_factory(require_user_accept=True, user_accept_delay=0.1)
     host, port = sim.address
     prompts: list[str] = []
-    client = JuraClient(host, port=port, conn_id="device-F")
+    client = JuraClient(host, port=port, conn_id="device-H")
     r = client.pair(timeout=3.0, on_user_prompt=prompts.append)
     assert prompts and "press OK" in prompts[0]
     assert r.state == "CORRECT"
@@ -112,7 +131,7 @@ def test_handshake_error_on_garbage_reply() -> None:
     t = threading.Thread(target=handle, daemon=True)
     t.start()
     try:
-        client = JuraClient("127.0.0.1", port=port, conn_id="device-G")
+        client = JuraClient("127.0.0.1", port=port, conn_id="device-I")
         with pytest.raises(HandshakeError):
             client.connect(timeout=2.0)
         client.close()
