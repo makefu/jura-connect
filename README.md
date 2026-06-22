@@ -17,7 +17,8 @@ end-to-end against a **JURA S8 EB** running firmware **TT237W V06.11**
 | storage of authentication codes | ✓ |
 | Read commands: maintenance counters, maintenance %, machine status / alerts, screen lock/unlock | ✓ |
 | Per-machine profiles — 88 bundled XMLs from the J.O.E. APK; alert names + product codes are looked up per `EF_code` so a Cortado on an S8 EB names itself, not `0x2B=2` | ✓ |
-| Brewing / writes / maintenance processes | available but require extra attention |
+| Brewing by product name — `brew hotwater water=220 temp=high` — with water / strength / temperature / milk overrides validated against the machine XML | ✓ ; the `@TP:` recipe-blob format is verified live on an E8 (EB) / EF538, see §5.9 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
+| Other writes / maintenance processes | available but require extra attention |
 
 ## Installation
 
@@ -139,7 +140,7 @@ available commands:
     reset-counters           [destructive] zero every maintenance counter (@TG:7E)
     restart                  [destructive] reboot the WiFi dongle (@TF:02)
     power-off                [destructive] put the machine into standby (@AN:02)
-    brew <recipe>            [destructive] start brewing a recipe (@TP:<recipe>)
+    brew <product> [<param=value>…]  [destructive] start brewing a product (@TP:<recipe blob>)
     set-pin <pin>            [destructive] write a new front-panel PIN (@HW:01,<pin>)
     set-ssid <ssid>          [destructive] write a new WiFi SSID for the dongle (@HW:80,<ssid>)
     set-password <password>  [destructive] write a new WiFi password (@HW:81,<pwd>)
@@ -304,6 +305,61 @@ responses) come through as ``payload["value"]`` directly. Every
 structured result type — `MaintenanceCounters`, `MaintenancePercent`,
 `MachineStatus`, `MachineInfo`, `CommandResult` — exposes the same
 `to_dict()` from Python.
+
+### Brew a product (`brew`)
+
+`brew` starts a product by its profile name (substring match OK), by
+its 2-hex product code, or — as an escape hatch — by a full verbatim
+recipe blob. Optional `param=value` arguments override the machine
+XML's defaults; every value is validated against the XML catalogue
+(range, step, allowed items) before anything goes on the wire:
+
+```sh
+# Hot water with the XML default quantity (here: 220 ml)
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew hotwater
+handshake -> CORRECT  (@hp4)
+@tp
+
+# An espresso, stronger and shorter than the default
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew espresso water=35 strength=7
+
+# Cappuccino with more milk foam, high temperature
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew cappuccino milk=20 temp=high
+
+# Out-of-catalogue values never reach the machine
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew hotwater water=9999
+refused: water_amount: 9999 is outside [25, 450]
+```
+
+Parameter keys: `water`/`ml` (millilitres), `strength` (level),
+`temp`/`temperature` (`low` / `normal` / `high`), `milk` (seconds),
+`milk_break` (seconds), `bypass` (millilitres). Which parameters a
+product accepts comes from its machine-XML entry.
+
+The wire command is **not** a bare product code: TT237W-family WiFi
+firmware ACKs `@TP:0D` with `@tp` and then silently ignores it. The
+working format is a 16-byte recipe blob with the product code at byte
+0 and each XML parameter at its `Argument` offset minus one — water
+in 5 ml ticks, where an unset byte means 255 ticks (≈ 1.3 l!), which
+is why `brew` always sends the full validated blob. See §5.9 of
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the layout, verified live
+on an E8 (EB) / EF538.
+
+From Python:
+
+```python
+from jura_connect import JuraClient, load_profile
+
+with JuraClient(addr, conn_id=cid, auth_hash=h,
+                profile=load_profile("EF538")) as c:
+    c.brew("hotwater", ml=220)                      # '@tp' on accept
+    c.brew("espresso", strength=7, temperature="high")
+    # then watch @TB / @TV:41… progress / @TV:3E… done via c.iter_frames()
+```
 
 ### Destructive commands (gated)
 

@@ -507,7 +507,7 @@ the same prefix check.
 | `@TG:FF` | reset (something) |
 | `@TF:02` | restart machine |
 | `@AN:02` | power off |
-| `@TP:<recipe>` | start brewing a product |
+| `@TP:<recipe blob>` | start brewing a product — see §5.9 |
 | `@HW:01,<pin>` | set machine PIN |
 | `@HW:80,<ssid>` | set WiFi SSID |
 | `@HW:81,<pwd>` | set WiFi password |
@@ -515,6 +515,58 @@ the same prefix check.
 
 Use these only via raw `JuraClient.request()` and only with explicit
 intent — running `@TG:24` will start a real cleaning cycle.
+
+### 5.9 Product start (`@TP:`) — the recipe blob (verified live)
+
+Verified end-to-end against an **E8 (EB) / EF538** WiFi dongle
+(2026-06): brewing works, but **not** with a bare product code. The
+firmware ACKs `@TP:0D` with `@tp` and then silently does nothing —
+the same ACK-but-ignore behaviour the bare (unwrapped) `@TM:` writes
+show. What it executes is a **16-byte recipe blob**:
+
+```
+@TP:0DFFFF2CFFFF01FFFFFFFFFFFFFFFFFF        (hot water, 220 ml, normal temp)
+     │ │ │ │ │ │ │ └─────────────────── bytes 7..15: FF (unused)
+     │ │ │ │ │ │ └── byte 6: temperature (00 low / 01 normal / 02 high)
+     │ │ │ │ │ └──── byte 5: milk-foam amount, seconds
+     │ │ │ │ └────── byte 4: (unused here)
+     │ │ │ └──────── byte 3: water amount, 5 ml ticks (0x2C = 44 = 220 ml)
+     │ │ └────────── byte 2: coffee strength level
+     │ └──────────── byte 1: (unused here)
+     └────────────── byte 0: product code
+```
+
+* **Byte positions come from the machine XML.** Every PRODUCT element
+  lists its parameters with an `Argument="F<n>"` attribute
+  (WATER_AMOUNT at F4, COFFEE_STRENGTH at F3, MILK_FOAM_AMOUNT at F6,
+  TEMPERATURE at F7, BYPASS at F10, MILK_BREAK at F11). The F-numbers
+  are the byte offsets of the *Bluetooth* start-product command, which
+  carries a leading key byte; the WiFi blob does not, so **blob offset
+  = F − 1**.
+* **Water is sent in 5 ml ticks** (`ml / 5`, one byte), matching the
+  Jutta-Proto Bluetooth finding "1 second = 5 ml". XML `Value`/ `Min`/
+  `Max` attributes are in ml. Milk foam and milk break are seconds,
+  sent as-is; strength is the level number.
+* **`FF` means "parameter not set"** — for parameters the product
+  doesn't have. *Never* leave a parameter the product does have at
+  `FF`: an unset water byte reads as 255 ticks ≈ **1.275 litres** of
+  water headed for a 220 ml cup. (Found out empirically. The cup did
+  not survive unassisted.)
+* No trailing checksum is needed (unlike `@TM:` writes), and no
+  `@TS:01`/`@TS:00` lock wrapper is required.
+* Reply behaviour: the dongle ACKs the accepted blob with `@tp`, then
+  emits `@TB` when the brew starts, `@TV:41<code>…` progress frames
+  (byte 4 = current tick, byte 5 = target ticks, second-to-last byte =
+  percent 0x00–0x64), and `@TV:3E<code>` on completion.
+* A machine in `energy_safe` wakes on the first `@TP:` but may ignore
+  that first command; the retry then brews.
+
+The named `brew` command builds this blob from the machine profile —
+`brew hotwater water=220 temp=high` — validating every value against
+the XML catalogue (range, step, allowed items) before it goes on the
+wire. `JuraClient.brew()` / `ProductDef.build_recipe_hex()` are the
+library entry points; a full hex blob is still accepted verbatim as
+an escape hatch for firmware variants with a different layout.
 
 ---
 

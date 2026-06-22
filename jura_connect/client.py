@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Callable, Iterator
 
 from . import protocol
-from .profile import MachineProfile, SettingDef
+from .profile import MachineProfile, ProductDef, SettingDef
 
 DEFAULT_PORT = 51515
 DEFAULT_CONN_ID = "jura-connect"
@@ -725,6 +725,106 @@ class JuraClient:
         return self.write_setting(
             definition.p_argument, value, timeout=timeout, verify=verify
         )
+
+    # -- brewing ---------------------------------------------------------
+    def resolve_product(self, product: str | int) -> ProductDef:
+        """Resolve a product by code, snake_case name, or 2-hex code.
+
+        Accepts an int product code (``0x0D``), a snake_case name from
+        the profile (``"espresso"``; unambiguous substrings are OK, so
+        ``"hotwater"`` finds ``hotwater_portion_normal``), or the
+        2-char hex code (``"0D"``). Requires :attr:`profile`.
+        """
+        if self.profile is None:
+            raise RuntimeError(
+                "no MachineProfile loaded — pass profile=load_profile('EFxxxx') "
+                "to JuraClient() to brew by product name."
+            )
+        catalogue = self.profile.product_by_code
+        if isinstance(product, int):
+            if product in catalogue:
+                return catalogue[product]
+            raise ValueError(
+                f"product code 0x{product:02X} is not in the "
+                f"{self.profile.code} catalogue."
+            )
+        text = product.strip()
+        # snake_case name, exact then unambiguous-substring.
+        target = text.lower()
+        by_name = {p.name: p for p in self.profile.products}
+        if target in by_name:
+            return by_name[target]
+        matches = [p for p in self.profile.products if target in p.name]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            names = ", ".join(p.name for p in matches)
+            raise ValueError(
+                f"product {product!r} is ambiguous on {self.profile.code}; "
+                f"matches {names}"
+            )
+        # 2-char hex code fallback ("0D").
+        if re.fullmatch(r"[0-9A-Fa-f]{2}", text):
+            code = int(text, 16)
+            if code in catalogue:
+                return catalogue[code]
+        known = ", ".join(sorted(by_name)) or "(none)"
+        raise ValueError(
+            f"product {product!r} not known on profile {self.profile.code}. "
+            f"Known: {known}"
+        )
+
+    def brew(
+        self,
+        product: str | int,
+        *,
+        ml: int | None = None,
+        strength: int | None = None,
+        temperature: int | str | None = None,
+        milk_foam: int | None = None,
+        milk_break: int | None = None,
+        bypass: int | None = None,
+        timeout: float = 6.0,
+    ) -> str:
+        """Start brewing a product (``@TP:<recipe blob>``).
+
+        **Destructive**: the machine immediately heats up, grinds, and
+        dispenses at the spout. Make sure a suitable cup is in place;
+        there is no remote abort.
+
+        ``product`` is resolved via :meth:`resolve_product`. Recipe
+        parameters use XML units — ``ml`` for water, brew ``strength``
+        level, ``temperature`` as ITEM name (``"low"`` / ``"normal"`` /
+        ``"high"``) or value, ``milk_foam`` / ``milk_break`` in
+        seconds, ``bypass`` in ml. Anything left ``None`` falls back to
+        the XML default for this product. Values are validated against
+        the machine XML before going on the wire.
+
+        The wire format is a 16-byte blob (verified live on an E8 (EB)
+        / EF538): byte 0 is the product code; each XML parameter lands
+        on byte ``F-1``. A bare product code — what the Bluetooth-era
+        docs suggest — is ACK'd with ``@tp`` but silently ignored by
+        TT237W-family WiFi firmware, and an unset water byte means 255
+        ticks ≈ 1.3 l, so always send the full validated blob.
+
+        Returns the dongle's reply (``"@tp"`` on accept). The machine
+        then emits ``@TB`` (brew start) and ``@TV:`` progress frames,
+        observable via :meth:`iter_frames`.
+        """
+        definition = self.resolve_product(product)
+        overrides: dict[str, int | str] = {}
+        for kind, value in (
+            ("water_amount", ml),
+            ("coffee_strength", strength),
+            ("temperature", temperature),
+            ("milk_foam_amount", milk_foam),
+            ("milk_break", milk_break),
+            ("bypass", bypass),
+        ):
+            if value is not None:
+                overrides[kind] = value
+        recipe = definition.build_recipe_hex(overrides)
+        return self.request(f"@TP:{recipe}", timeout=timeout)
 
     @staticmethod
     def random_conn_id() -> str:
