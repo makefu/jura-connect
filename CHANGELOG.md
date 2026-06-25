@@ -4,6 +4,28 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.5] — 2026-06-25
+
+### Fixed
+- **Odd-length ``@TF:`` status frames crashed the first data fetch.**
+  The J8 (SAS / EF1069) WiFi Connect dongle emits status frames of 15
+  hex nibbles — the 8-byte baseline frame with the final low nibble of
+  byte 7 truncated. ``_hex_body`` fed that straight to
+  ``bytes.fromhex``, which raised ``fromhex() arg must contain an even
+  number of hexadecimal digits`` and left the integration stuck
+  retrying setup (jura-connect-hass#3, thanks @DaftHonk and @petxya).
+  Odd-length hex bodies are now padded with a trailing ``0`` before
+  decoding, so byte 7 — which carries the J8-only bits 54
+  (``ml_oz_status``) and 56 (``coffee_eye_cup_detected``) — is parsed
+  instead of dropped. Captured-live regression fixtures cover the idle,
+  water-tank-removed, and cup-detected frames.
+
+### Added
+- **S10 (EF1125) machine profile.** Bundled the S10 machine XML and
+  refreshed the vendored profile data (``JOE_MACHINES.TXT`` and
+  several existing EF XMLs), bringing the profile registry to 89
+  machines (thanks @DaftHonk).
+
 ## [0.9.4] — 2026-05-12
 
 ### Fixed

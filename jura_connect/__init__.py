@@ -19,7 +19,7 @@ APK. Layered as:
 * :mod:`jura_connect.credentials` -- JSON file storage of pairing secrets.
 """
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 
 from .client import (
     PRODUCT_NAMES,
