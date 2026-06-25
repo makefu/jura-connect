@@ -762,7 +762,11 @@ def _hex_body(reply: str, expected_prefix: str) -> bytes:
     body = reply.strip()
     if not body.lower().startswith(expected_prefix.lower()):
         raise ValueError(f"{expected_prefix!r} reply expected, got {reply!r}")
-    return bytes.fromhex(body[len(expected_prefix) :])
+    hex_part = body[len(expected_prefix) :]
+    # Pad with trailing 0 if odd length to ensure valid hex pairs
+    if len(hex_part) % 2 != 0:
+        hex_part += "0"
+    return bytes.fromhex(hex_part)
 
 
 def _settings_checksum(payload: str) -> str:
