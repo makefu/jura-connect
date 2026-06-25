@@ -368,4 +368,8 @@
   <MANUALS>
     <LINK Name="manual.coffeeMachineManual" URL="www.jura.com/manualXY"/>
   </MANUALS>
+  
+  <MACHINEMANIFEST>
+    <CAPABILITIES IntakeF18="true"/>
+  </MACHINEMANIFEST>
 </JOE>

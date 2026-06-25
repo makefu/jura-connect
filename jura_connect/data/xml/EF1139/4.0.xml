@@ -629,6 +629,7 @@
         <BUTTON Name="FilterChange" Pos="1" Text="58" MessageText="215" Title="216" Type="FilterChange" ProcessButton="" Process="FilterChange" Video_Text="218" VideoURL="www.jura.com/yt-z10filter" Shop_Text="219" ShopURL="www.jura.com/joe-filtersmart" Progress="true"/>
         <BUTTON Name="Cleaning" Pos="2" Text="59" MessageText="220" Title="221" Type="Cleaning" ProcessButton="366" Process="Cleaning" Video_Text="218" VideoURL="www.jura.com/yt-z10cleaning" Shop_Text="219" ShopURL="www.jura.com/joe-cleaning" Progress="true"/>
         <BUTTON Name="CappuClean" Pos="3" Text="61" MessageText="214" Title="238" Type="CappuClean" ProcessButton="61" Process="CappuClean" Video_Text="218" VideoURL="www.jura.com/yt-z10milkclean" Shop_Text="219" ShopURL="www.jura.com/joe-milkclean" Progress="false"/>
+        <BUTTON Name="CappuRinse" Pos="5" Text="60" MessageText="212" Title="237" Type="CappuRinse" ProcessButton="60" Process="CappuRinse" Video_Text="218" VideoURL="" Shop_Text="219" ShopURL="" Progress="true"/>
         <BUTTON Name="Decalc" Pos="4" Text="63" MessageText="223" Title="222" Type="Decalc" ProcessButton="371" Process="Decalc" Video_Text="218" VideoURL="www.jura.com/yt-l10descale" Shop_Text="219" ShopURL="www.jura.com/joe-descale" Progress="true"/>
     </MAINTENANCEINSTRUCTIONS>
     <PREDICTIVEMAINTENANCE>
