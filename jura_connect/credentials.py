@@ -14,6 +14,7 @@ File format (pretty-printed; one entry per machine)::
           "address": "192.168.1.42",
           "conn_id": "jura-connect-7f31a8c2",
           "auth_hash": "13908FE4...C13156C052",
+          "pin": "1234",
           "paired_at": "2026-05-11T08:42:00Z"
         }
       }
@@ -53,6 +54,10 @@ class MachineCredentials:
     address: str
     conn_id: str
     auth_hash: str
+    # Front-panel setup PIN, stored verbatim because PIN-protected
+    # machines demand it on every reconnect (not just at pair time).
+    # None for machines without a PIN — the common case.
+    pin: str | None = None
     paired_at: str | None = None
     # EF code of the machine variant (e.g. "EF1091" for the S8 EB).
     # When None, callers fall through to a generic profile. Populated
@@ -61,11 +66,29 @@ class MachineCredentials:
     # subcommand.
     machine_type: str | None = None
 
-    def to_dict(self) -> dict[str, str | None]:
+    def to_dict(self) -> dict[str, str | bool | None]:
+        """JSON-safe view for user-facing commands.
+
+        The credential file stores the PIN because some machines demand
+        it on every reconnect, but ``creds --json`` should only reveal
+        whether a PIN is present, not the PIN itself.
+        """
         return {
             "address": self.address,
             "conn_id": self.conn_id,
             "auth_hash": self.auth_hash,
+            "paired_at": self.paired_at,
+            "machine_type": self.machine_type,
+            "pin_stored": self.pin is not None,
+        }
+
+    def to_store_dict(self) -> dict[str, str | None]:
+        """Full on-disk view, including the PIN."""
+        return {
+            "address": self.address,
+            "conn_id": self.conn_id,
+            "auth_hash": self.auth_hash,
+            "pin": self.pin,
             "paired_at": self.paired_at,
             "machine_type": self.machine_type,
         }
@@ -107,6 +130,7 @@ class CredentialStore:
             address=str(entry.get("address", "")),
             conn_id=str(entry.get("conn_id", "")),
             auth_hash=str(entry.get("auth_hash", "")),
+            pin=entry.get("pin") or None,
             paired_at=entry.get("paired_at"),
             machine_type=entry.get("machine_type"),
         )
@@ -149,7 +173,7 @@ class CredentialStore:
                 .isoformat()
                 .replace("+00:00", "Z")
             )
-        entries[creds.name] = creds.to_dict()
+        entries[creds.name] = creds.to_store_dict()
         self._write(entries)
 
     def remove(self, name: str) -> bool:

@@ -31,6 +31,33 @@ def test_store_round_trip(tmp_path) -> None:
     assert "Kaffeebert" in data["machines"]
 
 
+def test_store_round_trips_pin_and_omits_it_by_default(tmp_path) -> None:
+    store = CredentialStore(tmp_path / "creds.json")
+
+    # No PIN: field absent from on-disk entry, reads back as None.
+    store.put(MachineCredentials("nopin", "10.0.0.1", "cid", "H" * 64))
+    entry = json.loads((tmp_path / "creds.json").read_text())["machines"]["nopin"]
+    assert entry["pin"] is None
+    assert store.get("nopin").pin is None
+
+    # With a PIN: persisted verbatim and read back.
+    store.put(MachineCredentials("pin", "10.0.0.2", "cid", "H" * 64, pin="1234"))
+    got = store.get("pin")
+    assert got is not None and got.pin == "1234"
+    entry = json.loads((tmp_path / "creds.json").read_text())["machines"]["pin"]
+    assert entry["pin"] == "1234"
+
+
+def test_to_dict_redacts_pin_but_to_store_dict_keeps_it() -> None:
+    creds = MachineCredentials("m", "10.0.0.3", "cid", "H" * 64, pin="4711")
+    # User-facing view: only a presence flag, never the value.
+    public = creds.to_dict()
+    assert public["pin_stored"] is True
+    assert "pin" not in public
+    # On-disk view: full PIN retained.
+    assert creds.to_store_dict()["pin"] == "4711"
+
+
 def test_store_lists_and_removes(tmp_path) -> None:
     store = CredentialStore(tmp_path / "creds.json")
     store.put(MachineCredentials("a", "10.0.0.1", "cid", "hashA"))

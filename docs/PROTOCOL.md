@@ -218,7 +218,28 @@ app uses 40 s as its server-side timeout
 (`WifiCommand.timeoutAfterSeconds = 40L`); the Python client uses
 60 s by default for human comfort.
 
-### 4.4 Failure modes seen in practice
+### 4.4 PIN pairing flow (machines with a setup PIN)
+
+Machines that carry a front-panel setup PIN (e.g. Jura E6 / EF1030)
+verify the PIN *before* showing the "Connect" dialog. The flow is
+otherwise identical to §4.3, with the PIN filled into the first field:
+
+1. **Client → dongle**: open TCP, send `@HP:<pin>,<conn_id_hex>,`
+   (auth_hash empty, `<pin>` the ASCII digits).
+2. **Dongle**: rejects with `@hp5` / `@hp5:00` (WRONG_PIN) if the PIN is
+   missing or wrong; otherwise pops up the "Connect" dialog.
+3. **User**: presses OK on the coffee machine.
+4. **Dongle → client**: `@hp4:<64-hex-char-hash>`.
+5. **Client**: persists both `<hash>` **and the PIN** (see §6) — the PIN
+   is required again on every reconnect, so the client stores it and
+   replays `@HP:<pin>,<conn_id_hex>,<hash>` each time.
+
+CLI: pass `--pin <digits>` to `jura-connect pair`; it is written to the
+credential store and reused automatically on later `jura-connect
+command` runs. Pass `--pin` again only to override a stored PIN. The
+PIN itself is never shown by `creds --json` (only `pin_stored: true`).
+
+### 4.5 Failure modes seen in practice
 
 * `@hp5:02 ABORTED` when reconnecting with an empty hash on a conn-id
   that was previously paired — the dongle remembers the slot and won't
@@ -685,12 +706,17 @@ Override with the global CLI flag `--store /path/to.json` or the
       "address": "192.168.1.42",
       "conn_id": "jura-connect-7f31a8c2",
       "auth_hash": "13908FE4D3EB986B2465ACDB50398D4C1622836A5A1632257FF065C13156C052",
+      "pin": "1234",
       "machine_type": "EF1091",
       "paired_at": "2026-05-11T08:42:00Z"
     }
   }
 }
 ```
+
+`pin` is optional — present only for machines that require a setup PIN
+on every reconnect (see §4.4). It is stored verbatim so reconnects
+replay it, but `creds --json` redacts it to `pin_stored: true`.
 
 `machine_type` is optional — omitted entries silently fall through to
 the EF536 baseline. `CredentialStore.set_machine_type(name, code)`
@@ -711,9 +737,9 @@ machine.
 │          │ ──────────────────┐
 │          │                   │   open TCP/51515
 │          │                   ▼
-│          │           ┌─────────────┐  @HP:,<conn_id>,    ┌───────────────┐
+│          │           ┌─────────────┐ @HP:<pin>,<conn_id>, ┌───────────────┐
 │          │           │ JuraClient  │ ───────────────────►│  dongle       │
-│          │           │             │                     │  "Connect?"   │
+│          │           │             │  (pin empty if none)│  "Connect?"   │
 │          │ ◄────────────────── waiting up to 60 s … ─────│  dialog       │
 │  presses │                                               └───────┬───────┘
 │  OK on   │                   "Connect" prompt shown              │
@@ -731,7 +757,7 @@ machine.
 │          │ ──────────────────┐
 │          │                   ▼
 │          │   CredentialStore.get("Kaffeebert")
-│          │           ┌─────────────┐ @HP:,<conn_id>,<hash>┌───────────────┐
+│          │           ┌─────────────┐@HP:<pin>,<conn_id>,<hash>┌───────────┐
 │          │           │ JuraClient  │ ───────────────────► │  dongle       │
 │          │           │             │ ◄─── @hp4 ──────────│               │
 │          │           │             │ @TG:43, @TG:C0, @HU? │               │

@@ -429,3 +429,257 @@ def test_cli_refuses_destructive_raw_payload_without_flag(
     err = capsys.readouterr().err
     assert "@TG:24" in err
     assert "--allow-destructive-commands" in err
+
+
+def test_pair_without_pin_sends_empty_pin_field(sim, tmp_path, capsys) -> None:
+    """Default (no --pin) pairing must send an empty PIN field so machines
+    without a configured PIN keep working exactly as before."""
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "pair",
+            f"{host}:{port}",
+            "--name",
+            "Sim",
+            "--conn-id",
+            "cli-nopin",
+            "--timeout",
+            "3",
+        ]
+    )
+    assert rc == 0
+    # Simulator records (pin, conn_id_hex, hash) per handshake.
+    assert sim.handshakes, "expected one handshake"
+    pin, _conn_id_hex, given_hash = sim.handshakes[0]
+    assert pin == ""
+    assert given_hash == ""
+
+
+def test_pair_with_pin_succeeds_against_pin_machine(
+    sim_factory, tmp_path, capsys
+) -> None:
+    """A machine with a configured PIN accepts pairing when --pin matches."""
+    sim = sim_factory(pin="1234")
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "pair",
+            f"{host}:{port}",
+            "--name",
+            "Sim",
+            "--conn-id",
+            "cli-pin",
+            "--pin",
+            "1234",
+            "--timeout",
+            "3",
+        ]
+    )
+    assert rc == 0
+    assert sim.handshakes[0][0] == "1234"
+    out = capsys.readouterr().out
+    assert "CORRECT" in out
+
+
+def test_pair_without_pin_rejected_by_pin_machine(
+    sim_factory, tmp_path, capsys
+) -> None:
+    """Omitting --pin against a PIN-protected machine yields WRONG_PIN, rc 2."""
+    sim = sim_factory(pin="1234")
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "pair",
+            f"{host}:{port}",
+            "--name",
+            "Sim",
+            "--conn-id",
+            "cli-pin-missing",
+            "--timeout",
+            "3",
+        ]
+    )
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "WRONG_PIN" in out
+
+
+def test_command_with_pin_runs_against_pin_machine(
+    sim_factory, tmp_path, capsys
+) -> None:
+    """`command --pin` reconnects to a PIN-protected machine and runs a read."""
+    from jura_connect.client import JuraClient
+    from jura_connect.credentials import CredentialStore, MachineCredentials
+
+    sim = sim_factory(pin="4321")
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+
+    # Pair once (through the library) to obtain a persisted auth hash.
+    c = JuraClient(host, port=port, conn_id="cli-pin-cmd", auth_hash="", pin="4321")
+    r = c.pair(timeout=2.0)
+    c.close()
+    assert r.new_hash
+    CredentialStore(store_path).put(
+        MachineCredentials(
+            name="Sim",
+            address=f"{host}:{port}",
+            conn_id="cli-pin-cmd",
+            auth_hash=r.new_hash,
+        )
+    )
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            r.new_hash,
+            "--conn-id",
+            "cli-pin-cmd",
+            "--pin",
+            "4321",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "3",
+            "info",
+        ]
+    )
+    assert rc == 0
+    # Every @HP: handshake to this PIN machine must carry the PIN.
+    assert all(h[0] == "4321" for h in sim.handshakes)
+    out = capsys.readouterr().out
+    assert "machine info" in out
+
+
+def test_pair_stores_pin_and_command_reuses_it(sim_factory, tmp_path, capsys) -> None:
+    """`pair --pin` persists the PIN so a later `command` reconnects to a
+    PIN-protected machine WITHOUT re-passing --pin."""
+    from jura_connect.credentials import CredentialStore
+
+    sim = sim_factory(pin="9999")
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "pair",
+            f"{host}:{port}",
+            "--name",
+            "Sim",
+            "--conn-id",
+            "cli-pin-store",
+            "--pin",
+            "9999",
+            "--timeout",
+            "3",
+        ]
+    )
+    assert rc == 0
+    # PIN persisted verbatim in the credential store.
+    stored = CredentialStore(store_path).get("Sim")
+    assert stored is not None and stored.pin == "9999"
+    capsys.readouterr()  # drain pair output
+
+    # Reconnect with NO --pin: the stored PIN must be replayed.
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--conn-id",
+            "cli-pin-store",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "3",
+            "info",
+        ]
+    )
+    assert rc == 0
+    assert all(h[0] == "9999" for h in sim.handshakes)
+    out = capsys.readouterr().out
+    assert "machine info" in out
+
+
+def test_command_missing_stored_pin_hints_to_pass_one(
+    sim_factory, tmp_path, capsys
+) -> None:
+    """A paired credential with no stored PIN against a now-PIN'd machine
+    surfaces a helpful WRONG_PIN hint instead of a bare failure."""
+    from jura_connect.credentials import CredentialStore, MachineCredentials
+
+    sim = sim_factory(pin="5555")
+    host, port = sim.address
+    store_path = tmp_path / "creds.json"
+    # Credential exists but carries no PIN.
+    CredentialStore(store_path).put(
+        MachineCredentials(
+            name="Sim",
+            address=f"{host}:{port}",
+            conn_id="cli-nopin-stored",
+            auth_hash="h" * 64,
+        )
+    )
+
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--conn-id",
+            "cli-nopin-stored",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "3",
+            "info",
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "requires a PIN" in err
+
+
+def test_creds_json_redacts_pin(capsys, tmp_path) -> None:
+    """`creds --json` must expose pin_stored, never the PIN value."""
+    from jura_connect.credentials import CredentialStore, MachineCredentials
+
+    p = tmp_path / "creds.json"
+    CredentialStore(p).put(
+        MachineCredentials("a", "1.2.3.4", "cid", "h" * 64, pin="4711")
+    )
+    rc = main(["--store", str(p), "creds", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["pin_stored"] is True
+    assert "pin" not in payload[0]
+    assert "4711" not in json.dumps(payload)

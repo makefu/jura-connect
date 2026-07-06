@@ -57,6 +57,17 @@ machine type   : EF1091  (discovery)
 saved credentials for 'Kaffeebert' -> /home/you/.local/share/jura-connect/credentials.json
 ```
 
+If the machine has a setup PIN configured, pass it on the handshake:
+
+```sh
+$ jura-connect pair 192.168.1.42 --name Kaffeebert --pin 12345678
+```
+
+The PIN is stored alongside the auth-hash so later reconnects reuse it
+automatically; `jura-connect command --name Kaffeebert info` just works.
+Pass `--pin` again only to override a stored PIN. `creds --json` never
+prints the PIN — it reports `pin_stored: true` instead.
+
 The auth-hash is written to `$XDG_DATA_HOME/jura-connect/credentials.json`
 with `0600` permissions. Override the location with the global
 `--store /path/to.json` flag.
@@ -463,6 +474,7 @@ for m in discover(timeout=4.0):
     print(m.name, m.fw, m.address)
 
 # First-time pair (requires user to press OK on the machine)
+# Set pin="12345678" here if the machine requires a setup PIN.
 client = JuraClient("192.168.1.42", conn_id="laptop-1")
 result = client.pair(timeout=60.0,
                      on_user_prompt=lambda msg: print(msg))
