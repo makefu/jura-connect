@@ -4,6 +4,26 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-07-06
+
+### Added
+- **PIN-protected machines are now supported from the CLI.** `pair` and
+  `command` gained a `--pin` flag that is sent in the `@HP:<pin>,…`
+  handshake, so machines with a front-panel setup PIN (e.g. Jura E6 /
+  EF1030) can be paired and controlled. The PIN is persisted in the
+  credential store (`MachineCredentials.pin`) and replayed automatically
+  on every reconnect, so `--pin` is only needed once at pair time (or to
+  override a stored PIN). Live-verified that the empty-PIN flow is
+  unchanged against a non-PIN S8 (EF1091). `pair` now also accepts a
+  `host:port` address like `command` already did.
+
+### Security
+- **`creds --json` never prints the stored PIN.** The credential store
+  keeps the PIN on disk (some machines demand it on every reconnect),
+  but the user-facing `to_dict()` view redacts it to `pin_stored: true`;
+  the full value only lives in the new `to_store_dict()` used for
+  writing the JSON file.
+
 ## [0.11.0] — 2026-07-03
 
 ### Added
