@@ -928,6 +928,13 @@ def _hex_body(reply: str, expected_prefix: str) -> bytes:
     return bytes.fromhex(hex_part)
 
 
+#: Distance between a product's counter slot and the counter slot of its
+#: double. Observed on a Z10 (NAA, article 15361, profile EF545): slot
+#: 0x13 held 141 "2 x Coffee" brews while the catalogue's command code
+#: for that product, 0x36, read 0xFFFF. See docs/PROTOCOL.md §5.5.
+DOUBLE_COUNTER_OFFSET = 0x10
+
+
 def _settings_checksum(payload: str) -> str:
     """Compute the @TM:<arg>,<val> trailing checksum.
 
@@ -1302,6 +1309,16 @@ class ProductCounters:
             code_hex = f"{code:02X}"
             by_code[code_hex] = value
             name = code_to_name.get(code)
+            if name is None and code > DOUBLE_COUNTER_OFFSET:
+                # The counter table indexes a double product one nibble
+                # above its single (0x02 espresso -> 0x12), which is not
+                # the command code the XML catalogue lists for that
+                # double (0x31 for "2 Espressi"). Where the two happen to
+                # agree the profile already named the slot, so this only
+                # fills in the doubles the catalogue cannot reach.
+                single = code_to_name.get(code - DOUBLE_COUNTER_OFFSET)
+                if single is not None:
+                    name = f"2_{single}"
             if name is not None:
                 by_name[name] = value
         return cls(

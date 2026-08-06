@@ -408,3 +408,58 @@ def test_sub_indexed_arguments_are_skipped():
     # And the defaults blob builds instead of raising.
     blob = milkcoffee.build_recipe_hex()
     assert blob == "05000512070301000100000000000000"
+
+
+def test_ef545_names_double_products_from_their_counter_slots():
+    """A Z10's doubles are counted at single + 0x10, not at the command
+    code the catalogue lists for them.
+
+    Slot table read from a real Z10 (NAA, article 15361) and checked
+    against the statistics CSV the J.O.E. app exported for the same
+    machine: 2 x Coffee = 141 at slot 0x13, while the catalogue's command
+    code for that product, 0x36, reads 0xFFFF.
+    """
+    from jura_connect.client import ProductCounters
+
+    table = {
+        0: 5945,
+        2: 610,
+        3: 8,
+        4: 1,
+        5: 2957,
+        6: 0,
+        7: 6,
+        8: 116,
+        10: 24,
+        12: 0,
+        13: 1192,
+        15: 554,
+        18: 0,
+        19: 141,
+        40: 0,
+        41: 2,
+        43: 0,
+        45: 192,
+        46: 1,
+        48: 0,
+        56: 0,
+        57: 0,
+    }
+    slots = [table.get(i, 0xFFFF) for i in range(64)]
+
+    counters = ProductCounters.from_slots(slots, profile=load_profile("EF545"))
+
+    assert counters.by_name["2_coffee"] == 141
+    assert counters.by_name["2_espresso"] == 0
+    # The catalogue's own codes for those two doubles are unconfigured.
+    assert "31" not in counters.by_code
+    assert "36" not in counters.by_code
+    # Where counter slot and command code agree the profile already named
+    # the slot, so this must not shadow it with a synthesised name.
+    assert counters.by_name["2_cafe_barista"] == 0
+    assert counters.by_name["2_barista_lungo"] == 0
+    # Every product the machine's CSV lists is now named.
+    assert len(counters.by_name) == 21
+    # The machine bills a double as two products, so the residual between
+    # the reported total and the per-slot sum is exactly the 141 doubles.
+    assert counters.total - sum(counters.by_name.values()) == 141

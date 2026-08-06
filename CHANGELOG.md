@@ -4,6 +4,21 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Double products are now counted under a name instead of vanishing
+  into `by_code`.** The `@TR:32` table indexes a double one nibble above
+  its single (`0x02` espresso → `0x12`), which is not the command code
+  the XML catalogue lists for that double (`0x31` for "2 Espressi").
+  Where the two coincide — the Barista pair, `0x38`/`0x39` — the profile
+  already named the slot, which is why the divergence went unnoticed.
+  `from_slots` now names an otherwise-unnamed slot `2_<single>` when the
+  slot `0x10` below it is a known product. Observed on a Z10 (NAA,
+  article 15361, profile EF545): slot `0x13` held 141 brews while `0x36`
+  read `0xFFFF`, matching the machine's own J.O.E. CSV export
+  (`2 x Coffee,141`).
+
 ## [0.12.0] — 2026-07-06
 
 ### Added

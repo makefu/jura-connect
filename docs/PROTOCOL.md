@@ -360,6 +360,28 @@ product code:
   the slot index, with `0xFFFF` reserved for "this code is not
   configured on this machine".
 
+A **double product is not counted under the command code the catalogue
+lists for it.** Its counter slot sits one nibble above its single's:
+
+| Single | Counter slot of its double | Catalogue command code |
+|---|---|---|
+| `0x02` Espresso | `0x12` | `0x31` |
+| `0x03` Coffee | `0x13` | `0x36` |
+| `0x28` Cafe Barista | `0x38` | `0x38` |
+| `0x29` Barista Lungo | `0x39` | `0x39` |
+
+For the Barista pair the two happen to coincide, which is why the
+divergence is easy to miss. Observed on a Z10 (NAA, article 15361,
+profile EF545): slot `0x13` held 141 brews while `0x36` read `0xFFFF`,
+and the machine's own J.O.E. CSV export lists `2 x Coffee,141`. The
+lifetime total corroborates it — 5945 reported against 5804 summed over
+the per-product slots, a residual of exactly the 141 double coffees,
+because the machine bills a double as two products.
+
+`from_slots` therefore names an otherwise-unnamed slot `2_<single>` when
+the slot `0x10` below it is a known product
+(`jura_connect.client.DOUBLE_COUNTER_OFFSET`).
+
 The product-code → human-name mapping comes from a `MachineProfile`
 loaded by EF code (see §6 below). `jura_connect.client.PRODUCT_NAMES`
 is the union map over the TT237W family (S8, ENA8, Z8, …) and is the
