@@ -251,6 +251,20 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
   seen, but the dongle's display is asleep / not engaged: the dongle
   silently emits `@TF:` status frames without ever sending
   `@hp4`/`@hp5`. The Python client treats this as a `PairingTimeout`.
+* `ConnectionResetError` mid-handshake when **reconnecting too soon
+  after closing a session**. Observed on a Z10 (NAA, EF545): the TCP
+  connection is accepted, the `@HP:` frame is written, and the dongle
+  resets instead of answering. It is session churn the dongle objects
+  to, not connections — a socket that connects and then sends nothing
+  is held open indefinitely without a reset, and the same credentials
+  that fail back-to-back succeed with `@hp4` once left alone. Leaving
+  ~20s between sessions was reliable; retrying immediately was not,
+  through several consecutive attempts. Worth ruling out before
+  suspecting a stale pairing, since the symptom looks identical.
+
+  This may be the same behaviour as the mid-read drops noted for
+  `@TM:42` in §5.6 — both are the dongle tearing down a session it has
+  decided it is done with, rather than answering.
 
 ---
 
