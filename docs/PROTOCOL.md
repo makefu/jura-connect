@@ -251,6 +251,20 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
   seen, but the dongle's display is asleep / not engaged: the dongle
   silently emits `@TF:` status frames without ever sending
   `@hp4`/`@hp5`. The Python client treats this as a `PairingTimeout`.
+* `ConnectionResetError` mid-handshake when **reconnecting too soon
+  after closing a session**. Observed on a Z10 (NAA, EF545): the TCP
+  connection is accepted, the `@HP:` frame is written, and the dongle
+  resets instead of answering. It is session churn the dongle objects
+  to, not connections — a socket that connects and then sends nothing
+  is held open indefinitely without a reset, and the same credentials
+  that fail back-to-back succeed with `@hp4` once left alone. Leaving
+  ~20s between sessions was reliable; retrying immediately was not,
+  through several consecutive attempts. Worth ruling out before
+  suspecting a stale pairing, since the symptom looks identical.
+
+  This may be the same behaviour as the mid-read drops noted for
+  `@TM:42` in §5.6 — both are the dongle tearing down a session it has
+  decided it is done with, rather than answering.
 
 ---
 
@@ -529,8 +543,34 @@ is
 
 ```
 client → @TM:<P_Argument>
-dongle → @tm:<P_Argument>,<value_hex>
+dongle → @tm:<P_Argument>,<value_hex><csum>
 ```
+
+**A read echoes the same trailing checksum a write sends** — it is not
+a bare value. `<csum>` is the two hex chars described further down this
+section (`(-1 - sum("<P_Argument>,<value_hex>")) & 0xFF`), and
+:meth:`jura_connect.client.JuraClient.read_setting` verifies it before
+returning the value with it stripped.
+
+Folding the check byte into the value is the obvious failure mode and
+it is silent: every setting decodes to a plausible-looking but wrong
+number, and short values alias onto other catalogue entries rather than
+going out of range. Observed on a Z10 (NAA, EF545) — the fourth column
+is what a decoder that keeps the check byte reports:
+
+| Setting | Arg | Reply | Value | Naively decoded as |
+| ------- | --- | ----- | ----- | ------------------ |
+| Hardness | `02` | `0110` | `01` (1°dH) | 272°dH |
+| AutoOFF | `13` | `1EF9` | `1E` (30min) | — |
+| Units | `08` | `22010046` | `220100` (oz) | — |
+| Language | `09` | `0208` | `02` (english) | `08` = russian |
+| Brightness | `0A` | `07FB` | `07` (70%) | 2043% |
+
+The language row is the dangerous one: `0208` ends in `08`, which is
+russian's own code, so a decoder that suffix-matches the catalogue
+reports a confidently wrong answer instead of an obviously broken one.
+(`read_setting`'s docstring records the same class of bug from v0.9.0,
+where hardness=13 came back as 3581.)
 
 Writing is the same address with a value and a trailing checksum
 byte, **wrapped in @TS:01 / @TS:00**:
