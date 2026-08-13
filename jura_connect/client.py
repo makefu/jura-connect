@@ -1243,6 +1243,25 @@ PRODUCT_NAMES: dict[int, str] = {
     0x30: "espresso_doppio",
 }
 
+#: Machine types whose ``@TR:32`` table counts a product somewhere other
+#: than at its own product code, keyed by EF code: product code -> slot.
+#:
+#: This mirrors the only per-machine quirk J.O.E. carries. Its
+#: ``CoffeeMachineGenerator`` builds the remap as
+#: ``str.equals("EF545") ? {"31": "12", "36": "13"} : emptyMap`` and
+#: ``ProductCounterStatisticsParser`` reads each catalogue product from
+#: ``remap.getOrDefault(code, code)``. Every other machine — and every
+#: other product on the Z10 — is counted at its own code. See
+#: docs/PROTOCOL.md §5.5.
+COUNTER_SLOT_OVERRIDES: dict[str, dict[int, int]] = {
+    # Z10 (EF545): the two plain doubles are counted one nibble above
+    # their singles. Observed on a real Z10 (NAA, article 15361): slot
+    # 0x13 held 141 brews and matched the machine's own J.O.E. CSV
+    # export ("2 x Coffee,141") while code 0x36 read 0xFFFF.
+    "EF545": {0x31: 0x12, 0x36: 0x13},
+}
+
+
 # Wire-level sentinel for "this product code is not configured on the
 # current machine" inside an @TR:32 page.
 PRODUCT_COUNT_UNUSED = 0xFFFF
@@ -1290,9 +1309,18 @@ class ProductCounters:
         by_code: dict[str, int] = {}
         code_to_name: dict[int, str]
         if profile is not None and getattr(profile, "product_by_code", None):
-            code_to_name = {
-                code: product.name for code, product in profile.product_by_code.items()
-            }
+            overrides = COUNTER_SLOT_OVERRIDES.get(getattr(profile, "code", ""), {})
+            code_to_name = {}
+            for code, product in profile.product_by_code.items():
+                slot = overrides.get(code, code)
+                if slot != code and (
+                    slot >= len(slots) or slots[slot] == PRODUCT_COUNT_UNUSED
+                ):
+                    # The override target carries nothing on this
+                    # firmware; fall back to the product's own code so a
+                    # machine that does count there is still named.
+                    slot = code
+                code_to_name[slot] = product.name
         else:
             code_to_name = dict(PRODUCT_NAMES)
         for code in range(1, len(slots)):

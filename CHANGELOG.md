@@ -4,6 +4,19 @@ All notable changes to `jura-connect` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A Z10's double products are counted under their catalogue names
+  again.** The Z10 (EF545) counts "2 Espressi" and "2 Coffee" at slots
+  `0x12`/`0x13` rather than at their catalogue codes `0x31`/`0x36`, so
+  those brews fell out of `ProductCounters.by_name` and survived only as
+  raw entries in `by_code`. `client.COUNTER_SLOT_OVERRIDES` now carries
+  the same per-machine remap J.O.E. uses, so the counts land under the
+  machine's own product names. Machines outside the table — every other
+  bundled profile — decode exactly as before. Reported with a full slot
+  dump and a J.O.E. CSV cross-check by @bobcat0070 (#9).
+
 ## [0.12.0] — 2026-07-06
 
 ### Added

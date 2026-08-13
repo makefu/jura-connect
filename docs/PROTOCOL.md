@@ -382,6 +382,61 @@ Live first page from Kaffeebert (idle, after a few thousand brews):
 The second u16 (`FFFF`) is slot 1 = `ristretto` — not configured on
 this S8 EB.
 
+#### Counter slot ≠ product code on some machines
+
+A product is normally counted at its own code, but not always: the
+**Z10 (EF545) counts its two plain doubles one nibble above their
+singles.** Its catalogue lists them at `0x31` ("2 Espressi") and `0x36`
+("2 Coffee"), while the counters live at `0x12` and `0x13` and the
+catalogue codes read `0xFFFF`.
+
+This is a per-machine quirk, not a family rule. J.O.E. carries exactly
+one such remap, built in `CoffeeMachineGenerator` as
+
+```java
+coffeeMachine.remap = str.equals("EF545")
+        ? mapOf("31" to "12", "36" to "13") : emptyMap()
+```
+
+and consumed in `ProductCounterStatisticsParser`, which walks the
+machine's *products* and reads each one from `remap[code] ?: code`.
+`equals("EF545")` is the only machine-type special case anywhere in the
+app, and the quirk is not derivable from the XML — EF545's and EF1091's
+`<PRODUCT Code="31" …>` entries are identical down to `PosCSV`.
+
+`jura_connect.client.COUNTER_SLOT_OVERRIDES` mirrors that table (with
+one addition: if the override target reads `0xFFFF` on the machine in
+front of us, the product's own code is used, so a firmware that counts
+at the catalogue code keeps its counts). Machines outside the table are
+untouched — an S8 EB (EF1091/EF1151) really does count its doubles at
+`0x31`/`0x36`: reading one live gave `2_espressi` = 1 and `2_coffee` =
+10, with `0x12`/`0x13` unused.
+
+Both layouts can be cross-checked with the total: the machine bills a
+double as two products, so `slot 0` minus the sum over the per-product
+slots equals the number of double brews. Z10: 5945 − 5804 = 141 = the
+`0x13` count. S8 EB: 3740 − 3729 = 11 = 1 + 10.
+
+#### Other counter banks (not implemented)
+
+`@TR:32` is one of several counter banks a machine's XML may declare
+under `<PRODUCTCOUNTER>`:
+
+| Bank | Name | Profiles |
+|---|---|---|
+| `@TR:32` | Product counter | 89 / 89 |
+| `@TR:33` | Overflow product counter | 34 |
+| `@TR:52` | Special counter | 14 |
+| `@TR:34` | Barista counter | 4 |
+| `@TR:53` | Overflow special counter | 4 |
+| `@TR:35` | Overflow barista counter | 3 |
+
+The overflow banks carry one byte per slot holding the high word:
+J.O.E. combines them as `value + (overflow << 16)`, skipping overflow
+bytes of `0x00` and `0xFF`. Without them a per-product count wraps at
+65535. `jura_connect` reads only `@TR:32` today; EF545, EF1091 and
+EF1151 declare no other bank, so nothing is lost on those machines.
+
 ### 5.6 Programmable-recipe slots (`@TM:50` + `@TM:42,<slot>`)
 
 The dongle's "PMode" interface exposes a small table of user-editable
