@@ -6,6 +6,19 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Brew counts past 65535 survive on machines with an overflow bank.**
+  34 of the 89 bundled profiles declare an `@TR:33` "Overflow Product
+  Counter" alongside `@TR:32`; it carries the high byte of each slot,
+  and without it a per-product count wraps at 65535.
+  `MachineProfile.counter_banks` now records what a machine declares,
+  and `read_product_counters()` reads `@TR:33` for those machines and
+  folds it in as `value + (high << 16)`, matching J.O.E. Machines that
+  declare no overflow bank — every S8/Z10 profile among them — issue the
+  same single bank read as before. **Untested against hardware:** no
+  machine available to the project declares the bank, so this path is
+  covered by the simulator and by the decompiled app only.
+
 ### Fixed
 - **A Z10's double products are counted under their catalogue names
   again.** The Z10 (EF545) counts "2 Espressi" and "2 Coffee" at slots
