@@ -529,8 +529,34 @@ is
 
 ```
 client → @TM:<P_Argument>
-dongle → @tm:<P_Argument>,<value_hex>
+dongle → @tm:<P_Argument>,<value_hex><csum>
 ```
+
+**A read echoes the same trailing checksum a write sends** — it is not
+a bare value. `<csum>` is the two hex chars described further down this
+section (`(-1 - sum("<P_Argument>,<value_hex>")) & 0xFF`), and
+:meth:`jura_connect.client.JuraClient.read_setting` verifies it before
+returning the value with it stripped.
+
+Folding the check byte into the value is the obvious failure mode and
+it is silent: every setting decodes to a plausible-looking but wrong
+number, and short values alias onto other catalogue entries rather than
+going out of range. Observed on a Z10 (NAA, EF545) — the fourth column
+is what a decoder that keeps the check byte reports:
+
+| Setting | Arg | Reply | Value | Naively decoded as |
+| ------- | --- | ----- | ----- | ------------------ |
+| Hardness | `02` | `0110` | `01` (1°dH) | 272°dH |
+| AutoOFF | `13` | `1EF9` | `1E` (30min) | — |
+| Units | `08` | `22010046` | `220100` (oz) | — |
+| Language | `09` | `0208` | `02` (english) | `08` = russian |
+| Brightness | `0A` | `07FB` | `07` (70%) | 2043% |
+
+The language row is the dangerous one: `0208` ends in `08`, which is
+russian's own code, so a decoder that suffix-matches the catalogue
+reports a confidently wrong answer instead of an obviously broken one.
+(`read_setting`'s docstring records the same class of bug from v0.9.0,
+where hardness=13 came back as 3581.)
 
 Writing is the same address with a value and a trailing checksum
 byte, **wrapped in @TS:01 / @TS:00**:
