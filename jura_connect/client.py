@@ -33,6 +33,7 @@ subsequent runs to skip the on-machine confirmation.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import socket
 import threading
@@ -42,6 +43,8 @@ from collections.abc import Callable, Iterator
 
 from . import profile, protocol
 from .profile import MachineProfile, ProductDef, SettingDef
+
+log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 51515
 DEFAULT_CONN_ID = "jura-connect"
@@ -426,24 +429,81 @@ class JuraClient:
         slots 1..63 are the per-product counts indexed by product code,
         with ``0xFFFF`` reserved for "this code is not configured on
         this machine". See :class:`ProductCounters` for the slot map.
+
+        When the machine's profile declares an overflow bank
+        (:data:`OVERFLOW_COUNTER_BANK`, ``@TR:33``) its per-slot high
+        bytes are read as well and folded in, so counts past 65535
+        survive. Machines that declare no such bank — every S8/Z10
+        profile among them — issue one bank read as before.
         """
-        slots: list[int] = []
+        slots = self._read_counter_bank(
+            "@TR:32", bytes_per_value=2, timeout_per_page=timeout_per_page
+        )
+        if slots is None:
+            raise ValueError("machine does not implement the @TR:32 counter bank")
+        overflow = None
+        if self.profile is not None and (
+            OVERFLOW_COUNTER_BANK in self.profile.counter_banks
+        ):
+            try:
+                overflow = self._read_counter_bank(
+                    OVERFLOW_COUNTER_BANK,
+                    bytes_per_value=1,
+                    timeout_per_page=timeout_per_page,
+                )
+            except (TimeoutError, ValueError) as exc:
+                # No machine here answers this bank, so treat any
+                # surprise — silence, a reply shape we don't know — as
+                # "no overflow data" rather than losing the base counts.
+                log.warning(
+                    "%s declares %s but the read failed (%s); "
+                    "reporting base counts only",
+                    self.profile.code,
+                    OVERFLOW_COUNTER_BANK,
+                    exc,
+                )
+        return ProductCounters.from_slots(
+            slots, profile=self.profile, overflow=overflow
+        )
+
+    def _read_counter_bank(
+        self, bank: str, *, bytes_per_value: int, timeout_per_page: float
+    ) -> list[int] | None:
+        """Read one paginated counter bank (``@TR:32``, ``@TR:33``, …).
+
+        The dongle answers ``@tr:<bank>,<page>,<8 hex bytes>`` for pages
+        ``00..0F``, or a bare ``@tr:00`` when it does not implement the
+        bank at all — J.O.E. accepts the same two shapes. Returns the
+        decoded values, or ``None`` when the very first page says the
+        bank is not implemented. A ``@tr:00`` on a later page ends the
+        bank early and returns what was read so far: J.O.E. sizes some
+        banks differently (its special-counter read asks for 4 pages,
+        the product counter for 16), so a shorter bank is a plausible
+        firmware answer rather than an error.
+        """
+        echo = bank.lower()
+        values: list[int] = []
         for page in range(16):
-            cmd = f"@TR:32,{page:02X}"
             reply = self.request(
-                cmd, match=rf"^@tr:32,{page:02X}", timeout=timeout_per_page
+                f"{bank},{page:02X}",
+                match=rf"^({re.escape(echo)},{page:02X}|@tr:00)",
+                timeout=timeout_per_page,
             )
-            # "@tr:32,<page>,<8 hex bytes>"
+            if reply.lower().startswith("@tr:00"):
+                return values or None
+            # "@tr:<bank>,<page>,<8 hex bytes>"
             try:
                 _, _, body = reply.split(",", 2)
             except ValueError as exc:
                 raise ValueError(
-                    f"malformed @TR:32 reply for page {page:02X}: {reply!r}"
+                    f"malformed {bank} reply for page {page:02X}: {reply!r}"
                 ) from exc
             page_bytes = bytes.fromhex(body)
-            for i in range(0, len(page_bytes), 2):
-                slots.append(int.from_bytes(page_bytes[i : i + 2], "big"))
-        return ProductCounters.from_slots(slots, profile=self.profile)
+            for i in range(0, len(page_bytes), bytes_per_value):
+                values.append(
+                    int.from_bytes(page_bytes[i : i + bytes_per_value], "big")
+                )
+        return values
 
     def read_machine_info(self, *, timeout: float = 6.0) -> "MachineInfo":
         """Bundle of everything we can passively learn about the machine."""
@@ -1243,9 +1303,37 @@ PRODUCT_NAMES: dict[int, str] = {
     0x30: "espresso_doppio",
 }
 
+#: Machine types whose ``@TR:32`` table counts a product somewhere other
+#: than at its own product code, keyed by EF code: product code -> slot.
+#:
+#: This mirrors the only per-machine quirk J.O.E. carries. Its
+#: ``CoffeeMachineGenerator`` builds the remap as
+#: ``str.equals("EF545") ? {"31": "12", "36": "13"} : emptyMap`` and
+#: ``ProductCounterStatisticsParser`` reads each catalogue product from
+#: ``remap.getOrDefault(code, code)``. Every other machine — and every
+#: other product on the Z10 — is counted at its own code. See
+#: docs/PROTOCOL.md §5.5.
+COUNTER_SLOT_OVERRIDES: dict[str, dict[int, int]] = {
+    # Z10 (EF545): the two plain doubles are counted one nibble above
+    # their singles. Observed on a real Z10 (NAA, article 15361): slot
+    # 0x13 held 141 brews and matched the machine's own J.O.E. CSV
+    # export ("2 x Coffee,141") while code 0x36 read 0xFFFF.
+    "EF545": {0x31: 0x12, 0x36: 0x13},
+}
+
+
 # Wire-level sentinel for "this product code is not configured on the
 # current machine" inside an @TR:32 page.
 PRODUCT_COUNT_UNUSED = 0xFFFF
+
+#: Bank command carrying the high byte of each product counter. A
+#: machine declares it in its XML (:attr:`MachineProfile.counter_banks`);
+#: without it a per-product count wraps at 65535.
+OVERFLOW_COUNTER_BANK = "@TR:33"
+
+# Overflow bytes that carry no high word. J.O.E. skips both: 0x00 is
+# "no overflow yet", 0xFF the same not-configured sentinel @TR:32 uses.
+OVERFLOW_COUNT_UNUSED = frozenset({0x00, 0xFF})
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -1275,6 +1363,7 @@ class ProductCounters:
         cls,
         slots: list[int],
         profile: MachineProfile | None = None,
+        overflow: list[int] | None = None,
     ) -> ProductCounters:
         """Decode a 64-slot @TR:32 table.
 
@@ -1282,17 +1371,41 @@ class ProductCounters:
         whose per-product name map is preferred over the package-wide
         :data:`PRODUCT_NAMES` fallback. Unknown codes still surface
         through ``by_code``.
+
+        ``overflow`` is the per-slot high byte from the machine's
+        ``@TR:33`` bank, if it has one. A slot's count is then
+        ``value + (high << 16)``, which is how a machine reports past
+        65535. Overflow bytes of ``0x00``/``0xFF`` carry no high word,
+        and a slot the base table marks unused stays unused.
         """
         if len(slots) < 1:
             raise ValueError("product counter table is empty")
+        if overflow:
+            merged = list(slots)
+            for code, high in enumerate(overflow[: len(merged)]):
+                if high in OVERFLOW_COUNT_UNUSED:
+                    continue
+                if merged[code] == PRODUCT_COUNT_UNUSED:
+                    continue
+                merged[code] += high << 16
+            slots = merged
         total = slots[0]
         by_name: dict[str, int] = {}
         by_code: dict[str, int] = {}
         code_to_name: dict[int, str]
         if profile is not None and getattr(profile, "product_by_code", None):
-            code_to_name = {
-                code: product.name for code, product in profile.product_by_code.items()
-            }
+            overrides = COUNTER_SLOT_OVERRIDES.get(getattr(profile, "code", ""), {})
+            code_to_name = {}
+            for code, product in profile.product_by_code.items():
+                slot = overrides.get(code, code)
+                if slot != code and (
+                    slot >= len(slots) or slots[slot] == PRODUCT_COUNT_UNUSED
+                ):
+                    # The override target carries nothing on this
+                    # firmware; fall back to the product's own code so a
+                    # machine that does count there is still named.
+                    slot = code
+                code_to_name[slot] = product.name
         else:
             code_to_name = dict(PRODUCT_NAMES)
         for code in range(1, len(slots)):

@@ -123,6 +123,17 @@ class SimulatorConfig:
     product_counters: list[int] = dataclasses.field(
         default_factory=_default_product_counters
     )
+    # Per-slot high bytes of the @TR:33 "Overflow Product Counter" bank,
+    # for machines whose XML declares it (34 of the 89 bundled profiles;
+    # no S8/Z10 among them). None models a machine without the bank,
+    # which answers a bare "@tr:00" — the same shape J.O.E.'s matcher
+    # accepts as "bank not implemented".
+    product_counter_overflow: list[int] | None = None
+    # Reply served for @TR:33 when no overflow table is configured.
+    # "@tr:00" is the shape J.O.E.'s matcher accepts as "bank not
+    # implemented"; tests override it to model a firmware that answers
+    # something else entirely.
+    overflow_bank_reply: str = "@tr:00"
     # @TM:50 reply bytes (per-kind slot counts; summed = total slots).
     # Default matches Kaffeebert: 5 kinds × 4 slots = 20 reported.
     pmode_slot_bytes: bytes = bytes.fromhex("0404040404")
@@ -394,6 +405,27 @@ class Simulator:
                 slots.append(_PC_UNUSED)
             payload = "".join(f"{s & 0xFFFF:04X}" for s in slots)
             return f"@tr:32,{page:02X},{payload}"
+        if cmd.startswith("@TR:33,"):
+            # Overflow bank: one byte per slot, 8 slots per page.
+            overflow = self.config.product_counter_overflow
+            if overflow is None:
+                return self.config.overflow_bank_reply
+            page_hex = cmd[len("@TR:33,") :].strip()
+            try:
+                page = int(page_hex, 16)
+            except ValueError:
+                return "@tr:00"
+            if not 0 <= page < 16:
+                return "@tr:00"
+            start = page * 8
+            if start >= len(overflow):
+                # Bank shorter than 16 pages — the dongle stops answering
+                # with data and falls back to the "no such bank" reply.
+                return "@tr:00"
+            highs = list(overflow[start : start + 8])
+            highs += [0x00] * (8 - len(highs))
+            payload = "".join(f"{h & 0xFF:02X}" for h in highs)
+            return f"@tr:33,{page:02X},{payload}"
         if cmd.startswith("@TR:"):
             return f"@tr:{cmd[4:6]}00"
         if cmd.startswith("@TG:7E") or cmd.startswith("@TG:FF"):

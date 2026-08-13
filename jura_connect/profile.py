@@ -495,6 +495,11 @@ class MachineProfile:
     products: tuple[ProductDef, ...]
     settings: tuple[SettingDef, ...]
     has_pmode: bool  # whether the XML carries a PROGRAMMODE section
+    # Bank commands the XML declares under <STATISTIC><PRODUCTCOUNTER>,
+    # in document order, e.g. ("@TR:32", "@TR:33"). Every machine
+    # declares "@TR:32"; a subset also declares overflow / special /
+    # barista banks. See docs/PROTOCOL.md §5.5.
+    counter_banks: tuple[str, ...] = ()
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -593,6 +598,12 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
 
     has_pmode = root.find(".//{*}PROGRAMMODE") is not None
 
+    counter_banks = tuple(
+        command
+        for bank in root.findall(".//{*}PRODUCTCOUNTER/{*}BANK")
+        if (command := (bank.get("Command") or "").strip())
+    )
+
     settings = _parse_machine_settings(root)
 
     return MachineProfile(
@@ -602,6 +613,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         products=tuple(products),
         settings=settings,
         has_pmode=has_pmode,
+        counter_banks=counter_banks,
     )
 
 

@@ -382,6 +382,109 @@ Live first page from Kaffeebert (idle, after a few thousand brews):
 The second u16 (`FFFF`) is slot 1 = `ristretto` — not configured on
 this S8 EB.
 
+#### Counter slot ≠ product code on some machines
+
+A product is normally counted at its own code, but not always: the
+**Z10 (EF545) counts its two plain doubles one nibble above their
+singles.** Its catalogue lists them at `0x31` ("2 Espressi") and `0x36`
+("2 Coffee"), while the counters live at `0x12` and `0x13` and the
+catalogue codes read `0xFFFF`.
+
+This is a per-machine quirk, not a family rule. J.O.E. carries exactly
+one such remap, built in `CoffeeMachineGenerator` as
+
+```java
+coffeeMachine.remap = str.equals("EF545")
+        ? mapOf("31" to "12", "36" to "13") : emptyMap()
+```
+
+and consumed in `ProductCounterStatisticsParser`, which walks the
+machine's *products* and reads each one from `remap[code] ?: code`.
+`equals("EF545")` is the only machine-type special case anywhere in the
+app, and the quirk is not derivable from the XML — EF545's and EF1091's
+`<PRODUCT Code="31" …>` entries are identical down to `PosCSV`.
+
+`jura_connect.client.COUNTER_SLOT_OVERRIDES` mirrors that table (with
+one addition: if the override target reads `0xFFFF` on the machine in
+front of us, the product's own code is used, so a firmware that counts
+at the catalogue code keeps its counts). Machines outside the table are
+untouched — an S8 EB (EF1091/EF1151) really does count its doubles at
+`0x31`/`0x36`: reading one live gave `2_espressi` = 1 and `2_coffee` =
+10, with `0x12`/`0x13` unused.
+
+Both layouts can be cross-checked with the total: the machine bills a
+double as two products, so `slot 0` minus the sum over the per-product
+slots equals the number of double brews. Z10: 5945 − 5804 = 141 = the
+`0x13` count. S8 EB: 3740 − 3729 = 11 = 1 + 10.
+
+#### Other counter banks
+
+`@TR:32` is one of several counter banks a machine's XML may declare
+under `<PRODUCTCOUNTER>` (parsed into
+`MachineProfile.counter_banks`):
+
+| Bank | Name | Profiles |
+|---|---|---|
+| `@TR:32` | Product counter | 89 / 89 |
+| `@TR:33` | Overflow product counter | 34 |
+| `@TR:52` | Special counter | 14 |
+| `@TR:34` | Barista counter | 4 |
+| `@TR:53` | Overflow special counter | 4 |
+| `@TR:35` | Overflow barista counter | 3 |
+
+The overflow banks carry **one byte per slot** holding the high word.
+J.O.E. reads them exactly like `@TR:32` — 16 pages, `@TR:33,<page>` —
+but with one byte per value instead of two. On the WiFi side
+(`CoffeeMachineAdapterWifi.readProductStatistics`) that is literally the
+same command class parameterised twice, and the overflow read happens
+only when the machine's XML declares the bank:
+
+```java
+new WifiCommandProductCounterStatistics(machine, 2, "@TR:32")  // base
+// then, iff a Bank with command "@TR:33" is present:
+new WifiCommandProductCounterStatistics(machine, 1, "@TR:33")  // overflow
+```
+
+Bluetooth does the same through `readOverFlowCounter` →
+`getStatisticsValues(15, "@TR:33", …, 1)`. Both flavours combine the two
+banks in `StatisticStateEmit` as
+
+```
+count = value + (overflow << 16)
+```
+
+skipping overflow bytes of `0x00` ("no overflow yet") and `0xFF` (the
+not-configured sentinel). Without the high byte a per-product count
+wraps at 65535.
+
+`jura_connect` reads `@TR:33` when — and only when — the machine's
+profile declares it, and folds it in
+(`ProductCounters.from_slots(..., overflow=…)`). A machine may also
+declare the bank and still answer a bare `@tr:00`; J.O.E.'s reply
+matcher accepts that shape (`((@tr:33,<page>,.*)|(@tr:00))`) and so does
+the client, falling back to the base table.
+
+Bank sizes are not uniform: J.O.E.'s WiFi composite asks for 16 pages
+of the product counter and its overflow, but only 4 pages of the
+special counter (`WifiCommandSpecialCounterStatistics.j()` →
+`IntRange(0, 3)`). The client therefore treats a `@tr:00` on a later
+page as "bank ends here" and keeps the slots it did read; only a
+`@tr:00` on the *first* page means "bank not implemented".
+
+> **Untested against hardware.** No machine available to this project
+> declares an overflow bank — EF545, EF1091 and EF1151 list `@TR:32`
+> alone — so the decoding above is derived from the app and exercised
+> against the simulator only. What the request looks like is settled (it
+> is J.O.E.'s own WiFi path, quoted above); what a real machine *answers*
+> is not, so the reply length is treated as advisory rather than
+> assumed. Anything unexpected on that read — a timeout, a
+> reply shape we don't know — is logged and degraded to base counts
+> rather than failing the whole read. The special (`@TR:52`) and barista
+> (`@TR:34`) banks, and their own overflow banks, are not read at all;
+> on the WiFi side J.O.E. collects them into a `StatisticsCollection`
+> alongside the maintenance banks
+> (`CoffeeMachineAdapterWifi.readStatistics`).
+
 ### 5.6 Programmable-recipe slots (`@TM:50` + `@TM:42,<slot>`)
 
 The dongle's "PMode" interface exposes a small table of user-editable
