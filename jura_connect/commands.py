@@ -20,8 +20,9 @@ The registry is split into two tiers:
   command reaches the wire.
 
 The ``raw`` command is a single escape hatch that sends an arbitrary
-``@…`` frame; it inspects its payload against
-:data:`DESTRUCTIVE_PREFIXES` and is subject to the same gate so the
+``@…`` frame; it inspects its payload with :func:`match_destructive`
+(:data:`DESTRUCTIVE_PREFIXES` plus the exact-match
+:data:`DESTRUCTIVE_EXACT`) and is subject to the same gate so the
 escape hatch can't be used as an accidental bypass.
 """
 
@@ -100,7 +101,43 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     b"@TT:08",  # transfer a language record (binary)
     b"@TV:81",  # overwrite display line 1
     b"@TV:82",  # overwrite display line 2
+    # Dongle firmware OTA (§5.15).
+    b"@HB",  # enter dongle bootloader (firmware OTA)
+    b"@HO:",  # OTA .dat init packet
+    b"@HD:",  # OTA .bin application chunk
+    # OTA end — makes the dongle apply the image. Note this is *not* how
+    # JuraClient.close() ends a session: that sends an empty frame, the
+    # way J.O.E.'s WifiCommandCloseConnection does. See §5.15.
+    b"@HE",
+    b"@HT:",  # restart the dongle
 )
+
+# Destructive wire commands that must be matched *exactly*, not as a
+# byte prefix. ``@HU`` starts a milk-cooler firmware update, but ``@HU?``
+# is the read-only status/nudge frame :meth:`JuraClient.read_status`
+# uses — prefix-matching ``@HU`` would gate that read too.
+DESTRUCTIVE_EXACT: tuple[bytes, ...] = (b"@HU",)
+
+
+def match_destructive(command: str | bytes) -> str | None:
+    """Return the destructive pattern ``command`` hits, else ``None``.
+
+    The single place prefix vs. exact matching is decided; the runtime
+    gate, the ``raw`` payload inspector and the simulator all go through
+    here so they can never disagree about what is dangerous.
+    """
+    b = (
+        command.encode("ascii", errors="replace")
+        if isinstance(command, str)
+        else command
+    )
+    for exact in DESTRUCTIVE_EXACT:
+        if b == exact:
+            return exact.decode("ascii")
+    for prefix in DESTRUCTIVE_PREFIXES:
+        if b.startswith(prefix):
+            return prefix.decode("ascii")
+    return None
 
 
 class CommandError(ValueError):
@@ -264,18 +301,17 @@ def _format_named_gate(spec: CommandSpec) -> str:
 
 
 def _ensure_raw_payload_is_safe(cmd: str) -> None:
-    b = cmd.encode("ascii", errors="replace")
-    for prefix in DESTRUCTIVE_PREFIXES:
-        if b.startswith(prefix):
-            raise DestructiveCommandError(
-                f"'raw' targets the destructive wire prefix "
-                f"{prefix.decode('ascii')!r}.\n"
-                "  This can consume cleaning/descaler supplies, lock the\n"
-                "  machine into a long-running cycle, or persist WiFi or PIN\n"
-                "  settings that may make the dongle unreachable until a\n"
-                "  factory reset on the machine itself.\n"
-                "Re-run with --allow-destructive-commands if you really mean it."
-            )
+    prefix = match_destructive(cmd)
+    if prefix is not None:
+        raise DestructiveCommandError(
+            f"'raw' targets the destructive wire prefix {prefix!r}.\n"
+            "  This can consume cleaning/descaler supplies, lock the\n"
+            "  machine into a long-running cycle, persist WiFi or PIN\n"
+            "  settings that may make the dongle unreachable until a\n"
+            "  factory reset on the machine itself, or overwrite the\n"
+            "  dongle's own firmware.\n"
+            "Re-run with --allow-destructive-commands if you really mean it."
+        )
 
 
 # --------------------------------------------------------------------- #
@@ -1316,6 +1352,29 @@ def _r_language_download(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Firmware / milk cooler runners
+# --------------------------------------------------------------------- #
+
+
+def _r_milk_cooler_status(_spec, client, _args, timeout):
+    return client.read_milk_cooler_status(timeout=timeout)
+
+
+def _r_milk_cooler_update(_spec, client, _args, timeout):
+    # Returns the raw reply (``@hu:ok`` / ``@hu:busy`` / ``@an:error``);
+    # the polling loop and the decoded result type live in
+    # :mod:`jura_connect.firmware` for library callers who want them.
+    return client.request("@HU", match=r"(?i)^(@hu:|@an:error)", timeout=timeout)
+
+
+def _r_restart_dongle(_spec, client, _args, timeout):
+    try:
+        return client.request("@HT:3", match=r"(?i)^(@ht|@an:error)", timeout=timeout)
+    except (ConnectionError, OSError):
+        return "(dongle restarting: connection closed by machine)"
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -2011,6 +2070,54 @@ _SPECS: tuple[CommandSpec, ...] = (
             "display stays locked until a power cycle. The wire format is "
             "derived from the J.O.E. APK and has never been run against "
             "real hardware."
+        ),
+    ),
+    # ---- firmware / milk cooler ----------------------------------------
+    #
+    # The firmware OTA sequence itself (@HB -> @HO: -> @HD: -> @HE) is
+    # deliberately NOT registered here: a named command can only perform
+    # one step, and a half-applied image leaves the dongle in bootloader
+    # mode with no remote recovery. It lives in jura_connect.firmware as
+    # a library-only sequencer. See docs/PROTOCOL.md §5.15.
+    CommandSpec(
+        name="milk-cooler-status",
+        description=(
+            "milk cooler (Cool Control) firmware-update state (@HU?); "
+            "'@hu:800' = no cooler connected"
+        ),
+        arguments=(),
+        runner=_r_milk_cooler_status,
+    ),
+    CommandSpec(
+        name="milk-cooler-update",
+        description="[destructive] start a milk-cooler firmware update (@HU)",
+        arguments=(),
+        runner=_r_milk_cooler_update,
+        destructive=True,
+        danger=(
+            "starts a firmware update of the connected milk cooler (Cool "
+            "Control). APK-derived and never tested on hardware by this "
+            "project. The cooler is unusable while the update runs and "
+            "cannot be aborted remotely; an interrupted update (cooler "
+            "unplugged, dongle rebooted, session lost) can leave it "
+            "needing a service visit. Poll 'milk-cooler-status' for "
+            "progress rather than re-issuing this."
+        ),
+    ),
+    CommandSpec(
+        name="restart-dongle",
+        description="[destructive] restart the WiFi dongle (@HT:3)",
+        arguments=(),
+        runner=_r_restart_dongle,
+        destructive=True,
+        danger=(
+            "reboots the WiFi dongle itself. The TCP session dies with it "
+            "and in-flight commands are lost — that part is recoverable by "
+            "reconnecting. What is NOT recoverable: issuing this while the "
+            "dongle sits in bootloader mode after a failed firmware "
+            "transfer, which can bring it back with no working firmware "
+            "and no way in except physical service. APK-derived, never "
+            "tested on hardware by this project."
         ),
     ),
 )

@@ -87,6 +87,7 @@ from .profile import (
 )
 from .commands import (
     COMMANDS,
+    DESTRUCTIVE_EXACT,
     DESTRUCTIVE_PREFIXES,
     CommandError,
     CommandResult,
@@ -94,6 +95,7 @@ from .commands import (
     DestructiveCommandError,
     get_command,
     list_commands,
+    match_destructive,
     run_named,
 )
 from .progress import (
@@ -127,6 +129,7 @@ __all__ = [
     "CommandResult",
     "CommandSpec",
     "CredentialStore",
+    "DESTRUCTIVE_EXACT",
     "DESTRUCTIVE_PREFIXES",
     "DestructiveCommandError",
     "HandshakeError",
@@ -183,6 +186,7 @@ __all__ = [
     "list_profile_codes",
     "load_profile",
     "lookup_by_article_number",
+    "match_destructive",
     "expand_blocked_kinds",
     "probe",
     "resolve_accept_command",

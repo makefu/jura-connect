@@ -19,8 +19,8 @@ The simulator models:
 * Read commands ``@TG:43`` (maintenance counters), ``@TG:C0``
   (maintenance percent), ``@TS:01``/``@TS:00`` (lock/unlock display),
   ``@TG:FF`` (cancel the running product step),
-  ``@HU?`` (milk-cooler update status — answered ``@hu:800``, *not* a
-  status query).
+  ``@HU?`` (status request that yields one ``@TF:`` frame, or the
+  milk-cooler update state when firmware modelling is enabled).
 * The programmable-recipe (PMode) interface — ``@TM:50`` slot count,
   ``@TM:41``/``@TM:42`` product and slot reads, and (opt-in, see
   ``SimulatorConfig.pmode_writable``) the matching writes, in both the
@@ -32,10 +32,15 @@ The simulator models:
   :class:`SimulatorConfig` table, and a table left at ``None`` models a
   machine without that bank: it answers the bare ``@tr:00``.
 * Session teardown: an **empty frame**, which is what J.O.E.'s
-  ``WifiCommandCloseConnection`` sends. ``@HE`` is accepted as a close
-  too because real dongles answer it and older jura-connect releases
-  used it, but it is really the OTA-end verb (``WifiCommandOTAEnd``,
-  ``@he:ok``) and no longer sent by this library.
+  ``WifiCommandCloseConnection`` sends and what
+  :meth:`jura_connect.client.JuraClient.close` emits. ``@HE`` is *not*
+  a close here: it is ``WifiCommandOTAEnd``, the verb that makes the
+  dongle apply a downloaded image, and it is modelled with the rest of
+  the firmware family below.
+* Optionally — behind ``SimulatorConfig.firmware_enabled`` — the
+  dongle-maintenance family: ``@HB`` bootloader, ``@HO:`` / ``@HD:``
+  OTA payloads, ``@HE`` OTA end, ``@HT:3`` restart and ``@HU``
+  milk-cooler update, including their failure modes.
 * Periodic unsolicited ``@TF:<hex>`` status broadcasts on the
   connection so reader code in the client can be exercised. This is the
   only way status reaches a client — nothing requests it.
@@ -77,7 +82,7 @@ from .client import (
     OVERFLOW_COUNTER_BANK,
     _settings_checksum,
 )
-from .commands import DESTRUCTIVE_PREFIXES
+from .commands import DESTRUCTIVE_EXACT, DESTRUCTIVE_PREFIXES, match_destructive
 from .process import ACCEPT_COMMANDS as _PROCESS_ACCEPT_COMMANDS
 from .process import NEXT_STEP_COMMAND as _NEXT_STEP_COMMAND
 from .profile import RECIPE_BLOB_BYTES
@@ -196,6 +201,13 @@ def _flip_checksum(csum: str) -> str:
     return f"{int(csum, 16) ^ 0xFF:02X}"
 
 
+def _next_reply(replies: list[str]) -> str:
+    """Pop the next scripted reply, repeating the last one forever."""
+    if not replies:
+        return "@an:error"
+    return replies.pop(0) if len(replies) > 1 else replies[0]
+
+
 def _default_product_counters() -> list[int]:
     """64-slot product counter table populated with Kaffeebert's numbers.
 
@@ -230,12 +242,20 @@ def _default_product_counters() -> list[int]:
 # :mod:`jura_connect.commands`. The simulator refuses-by-default for the
 # same prefixes the client gate refuses-by-default.
 __all__ = [
+    "DESTRUCTIVE_EXACT",
     "DESTRUCTIVE_PREFIXES",
     "LanguageDownloadState",
     "Simulator",
     "SimulatorConfig",
     "run_in_thread",
 ]
+
+
+# Wire patterns of the firmware / dongle-maintenance family. The
+# simulator only models these when ``SimulatorConfig.firmware_enabled``
+# is set; otherwise they fall through to the destructive refusal like
+# every other mutating command.
+_FIRMWARE_PATTERNS = frozenset({"@HB", "@HO:", "@HD:", "@HE", "@HT:", "@HU"})
 
 
 def _default_language_slots() -> dict[int, str]:
@@ -435,6 +455,32 @@ class SimulatorConfig:
     # Make @TT:03 fail with FE (CRC_NOT_MATCHING).
     language_finish_crc_error: bool = False
 
+    # -- firmware OTA / dongle restart / milk cooler --------------------
+    # Opt-in, exactly like the machine's own dangerous paths: with this
+    # left False every verb of the family (@HB, @HO:, @HD:, @HE, @HT:,
+    # @HU) is answered with "@an:error" so a test that stumbles into the
+    # OTA sequence fails loudly instead of silently "working".
+    firmware_enabled: bool = False
+    # Reply to @HB. "@hb:abort" models a dongle that declines to enter
+    # its bootloader; a bare "@hb" is the third form J.O.E.'s matcher
+    # accepts and also means "not ok".
+    bootloader_reply: str = "@hb:ok"
+    ota_dat_reply: str = "@ho:ok"  # answer to @HO: — "@ho:error" to refuse
+    ota_end_reply: str = "@he:ok"  # answer to @HE — "@he:error" to refuse
+    # 1-based index of the @HD: chunk that is answered "@hd:error";
+    # None means every chunk is accepted.
+    ota_error_chunk: int | None = None
+    # Replies handed out for successive @HU / @HU? requests. The list is
+    # consumed front-to-back and the last entry repeats, so a single
+    # element models a machine that always answers the same thing.
+    milk_cooler_start_replies: list[str] = dataclasses.field(
+        default_factory=lambda: ["@hu:ok"]
+    )
+    # "@hu:800" is what the S8 EB answers: state 8 = no milk cooler.
+    milk_cooler_status_replies: list[str] = dataclasses.field(
+        default_factory=lambda: ["@hu:800"]
+    )
+
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
     # so the test-suite can read/write the same arguments the J.O.E.
@@ -567,6 +613,13 @@ class Simulator:
         self._process_awaiting: str | None = None
         self.language = LanguageDownloadState()
         self._language_select_seen = False
+        # Firmware OTA state (only touched when firmware_enabled).
+        self.ota_bootloader = False  # @HB accepted
+        self.ota_dat: bytes | None = None  # payload of the last @HO:
+        self.ota_image = bytearray()  # concatenated @HD: chunks
+        self.ota_chunks = 0  # number of @HD: chunks accepted
+        self.ota_completed = False  # @HE acked
+        self.dongle_restarts = 0  # @HT:3 count
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -809,7 +862,6 @@ class Simulator:
             reply = self._handle_coffee_timer(cmd)
             if reply is not None:
                 return reply
-        b = cmd.encode("ascii")
         if cmd.startswith("@TP:") and self.config.allow_brew:
             # Opt-in only. An accepted blob is ACKed with a bare "@tp"
             # and followed by the frames the real dongle pushes: @TB,
@@ -845,27 +897,26 @@ class Simulator:
                 for index in range(language.LANGUAGE_SLOT_COUNT)
             )
             return f"@tt:00{slots}"
-        for prefix in DESTRUCTIVE_PREFIXES:
-            if b.startswith(prefix):
-                log.warning("simulator: refusing destructive command %r", cmd)
-                return "@an:error"
+        # One matcher for the whole guardrail: prefix patterns plus the
+        # exact-match ones (@HU, which must not swallow the @HU? read).
+        pattern = match_destructive(cmd)
+        if pattern is not None:
+            if pattern in _FIRMWARE_PATTERNS and self.config.firmware_enabled:
+                return self._handle_firmware(cmd)
+            log.warning("simulator: refusing destructive command %r", cmd)
+            return "@an:error"
 
         if cmd == "":
             # J.O.E.'s WifiCommandCloseConnection: an empty frame ends
-            # the session. This is what JuraClient.close() sends.
+            # the session. This is what JuraClient.close() sends — @HE
+            # is the OTA-end verb and is handled above, not here.
             return "@@CLOSE"
-        if cmd == "@HE":
-            # Really WifiCommandOTAEnd (firmware update), but dongles do
-            # answer it and pre-0.13 clients closed with it, so keep
-            # tearing the session down here.
-            return "@@CLOSE"
-        if cmd == "@HB":
-            return None
         if cmd == "@HU?":
             # WifiCommandMilkCoolerUpdateStatus — matcher @hu:[0-9a-fA-F]{3}.
-            # Kaffeebert answers @hu:800. Status is NOT part of this
-            # reply; it arrives with the next unsolicited @TF: frame.
-            return "@hu:800"
+            # Kaffeebert answers @hu:800 (the default reply script), which
+            # means "no cooler". Machine status is NOT part of this reply;
+            # it arrives with the next unsolicited @TF: frame.
+            return _next_reply(self.config.milk_cooler_status_replies)
         if cmd == "@TG:FF":
             # WifiCommandCancelProductStep — cancel the running step,
             # which also tears down a running maintenance process.
@@ -1244,6 +1295,85 @@ class Simulator:
             self.config.coffee_timer_clock = text
             return "@tv:84"
         return None
+
+    # -- firmware OTA / restart / milk cooler ---------------------------
+    def _handle_firmware(self, cmd: str) -> str | None:
+        """Model the dongle-maintenance family (opt-in, see the config).
+
+        The ordering rules mirror what `CoffeeMachineAdapterWifi
+        .sendFrogToBootloader` builds: bootloader first, then the `.dat`
+        init packet, then the `.bin` windows, then the end marker. A
+        payload that arrives out of order is refused, which is how the
+        test-suite proves the sequencer sends things in order.
+        """
+        if cmd == "@HB":
+            reply = self.config.bootloader_reply
+            self.ota_bootloader = reply.strip().lower() == "@hb:ok"
+            if self.ota_bootloader:
+                self.ota_dat = None
+                self.ota_image = bytearray()
+                self.ota_chunks = 0
+                self.ota_completed = False
+            return reply
+        if cmd.startswith("@HO:"):
+            if not self.ota_bootloader:
+                return "@ho:error"
+            try:
+                payload = bytes.fromhex(cmd[4:])
+            except ValueError:
+                return "@ho:error"
+            if not payload:
+                return "@ho:error"
+            self.ota_dat = payload
+            return self.config.ota_dat_reply
+        if cmd.startswith("@HD:"):
+            return self._handle_ota_chunk(cmd[4:])
+        if cmd == "@HE":
+            if not (self.ota_bootloader and self.ota_dat and self.ota_chunks):
+                return "@he:error"
+            reply = self.config.ota_end_reply
+            if reply.strip().lower() == "@he:ok":
+                self.ota_completed = True
+                self.ota_bootloader = False
+            return reply
+        if cmd == "@HT:3":
+            self.dongle_restarts += 1
+            # A real dongle drops the session here; the simulator keeps it
+            # so tests stay deterministic (the client tolerates both).
+            self.ota_bootloader = False
+            return "@ht"
+        if cmd == "@HU":
+            return _next_reply(self.config.milk_cooler_start_replies)
+        return "@an:error"
+
+    def _handle_ota_chunk(self, body: str) -> str:
+        """Validate one `@HD:<offset:08X><len:04X><hex>` window."""
+        if not (self.ota_bootloader and self.ota_dat is not None):
+            return "@hd:error"
+        if len(body) < 12:
+            return "@hd:error"
+        try:
+            offset = int(body[:8], 16)
+            length = int(body[8:12], 16)
+            data = bytes.fromhex(body[12:])
+        except ValueError:
+            return "@hd:error"
+        if length != len(data) or offset != len(self.ota_image):
+            log.warning(
+                "simulator: bad OTA chunk (offset %d, len %d, data %d, have %d)",
+                offset,
+                length,
+                len(data),
+                len(self.ota_image),
+            )
+            return "@hd:error"
+        if self.config.ota_error_chunk == self.ota_chunks + 1:
+            return "@hd:error"
+        self.ota_image += data
+        self.ota_chunks += 1
+        # The success body is undocumented — J.O.E. only ever compares it
+        # against the literal "error" — so echo the offset back.
+        return f"@hd:{offset:08X}"
 
     # -- status emission -----------------------------------------------
     def _emit_status(self, conn: socket.socket) -> None:

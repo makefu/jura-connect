@@ -2350,3 +2350,153 @@ may therefore hold the new image without switching to it.
 Fetching the language blobs. J.O.E. downloads them from Jura's CDN over
 HTTPS (`ServerDocumentsRepository`); `jura-connect` takes whatever bytes
 the caller supplies and pushes them. No network dependency was added.
+
+---
+
+### 5.15 Firmware OTA, dongle restart and the milk cooler
+
+> **⚠ Danger — this section describes the only commands in the protocol
+> that can permanently destroy the WiFi dongle.** The OTA verbs
+> overwrite the Smart Connect's own firmware. An interrupted transfer, a
+> mismatched image or a restart issued while the dongle sits in
+> bootloader mode leaves it with no working application firmware, and
+> there is **no remote recovery** — the machine's WiFi is gone until the
+> dongle is physically serviced or replaced.
+>
+> **Nothing in this section has ever been run against hardware by this
+> project.** Every byte below is read out of the J.O.E. Android APK
+> (`WifiCommandBootloaderMode`, `WifiCommandSendApplicationDat`,
+> `WifiCommandSendApplicationBin`, `WifiCommandOTAEnd`,
+> `WifiCommandRestartFrog`, `WifiCommandMilkCoolerUpdateStart` /
+> `…Status`, plus `CoffeeMachineAdapterWifi.sendFrogToBootloader` for
+> the ordering). **APK-derived, untested.** Do not probe it to find out.
+
+#### Wire forms
+
+| Send | Reply (J.O.E. matcher) | Meaning |
+| ---- | ---------------------- | ------- |
+| `@HB` | `@hb(:(abort\|ok))?` | enter bootloader; only `@hb:ok` is a go-ahead — `@hb:abort` and a bare `@hb` both mean "declined" |
+| `@HO:<hex>` | `@ho:((ok)\|(error))` | the DFU `.dat` init packet, hex-encoded ASCII |
+| `@HD:<offset:08X><len:04X><hex>` | `@hd:((error)\|(.*))` | one application-image window; anything that is not the literal `error` counts as an ack |
+| `@HE` | `@he:((ok)\|(error))` | end of transfer — this is what makes the dongle apply the image |
+| `@HT:3` | `((@ht))` | restart the dongle ("frog"); the session dies with it |
+| `@HU` | `@hu:((abort)\|(wait)\|(busy)\|(ok)\|(error))` | start a milk-cooler (Cool Control) firmware update |
+| `@HU?` | `@hu:[0-9a-fA-F]{3}` | milk-cooler update state — **read-only** |
+
+Offsets and lengths in `@HD:` are ASCII **text**, not packed bytes:
+`ByteOperations.h(value, width)` formats `%0<width>X` and then takes the
+characters' byte values. Both payload commands run through the plain
+(non-binary) `WifiCommand` path, so the whole frame is printable ASCII
+terminated by `\r\n` inside the cipher like every other command.
+
+#### Sequence
+
+`CoffeeMachineAdapterWifi.sendFrogToBootloader` builds the entire chain
+up front and links it through `WifiCommand.next`, then sends `@HB` and
+lets each reply pull the next command:
+
+```
+@HB                       -> @hb:ok
+@HO:<dat hex>             -> @ho:ok
+@HD:00000000 0200 <512 B> -> @hd:…      offset 0, first window
+@HD:00000200 0200 <512 B> -> @hd:…      offset += previous chunk length
+…
+@HE                       -> @he:ok
+(@HT:3                    -> @ht)       optional, only after a clean @he:ok
+```
+
+* Chunk size is **512 bytes** (`chunked(0x200)` in the app).
+* The offset is a running byte offset into the `.bin`, the packet
+  counter is 1-based, and the app derives its progress percentage from
+  `packetCounter / totalPackets`.
+* `.dat` always precedes the `.bin` windows: it is the head of the
+  command chain, the windows hang off it.
+* J.O.E. allows 30 s for `@HB` and each `@HD:`, 15 s for `@HO:`, and
+  its 5 s default for `@HE`; `@HD:` is the only command in the app sent
+  with `maxTries=1` (no retry — a repeated window would corrupt the
+  image).
+* The app fetches the image as a ZIP from
+  `https://digitalassets.jura.com/mobileapp/JOE/…` and splits it into
+  the `.dat` / `.bin` pair. **`jura-connect` never downloads firmware**;
+  the caller supplies both blobs.
+
+#### Milk-cooler status (`@HU?`)
+
+The three hex digits are a state nibble plus a progress byte
+(`MilkCoolerUpdateStatusParser`):
+
+| Digits | State | Meaning |
+| ------ | ----- | ------- |
+| `0<xx>` | `idle` | not running; `xx` ≥ `0x64` (100) means "finished" |
+| `1<xx>` | `updating` | in progress, `xx` is the percentage (hex) |
+| `8<xx>` | `no_cooler` | no milk cooler connected — **this is the `@hu:800` the S8 EB answers** |
+| other | `unknown` | firmware states we have no mapping for |
+
+This settles §9's old "`@HU?` returned `@hu:800` in some probes but
+`@TF:<hex>` in others": `@hu:800` *is* the answer to `@HU?` — "no milk
+cooler attached" — and the `@TF:` frame the client keys on is just the
+next unsolicited status broadcast arriving on the same socket. `@HU?`
+therefore doubles as a harmless nudge for firmwares that need traffic
+before they push a status frame.
+
+J.O.E.'s update loop (`h8.a`): send `@HU`; on `wait` / `busy` poll
+`@HU?` every 500 ms; a cooler that reports the `idle` state without
+having reached 100 % gets another `@HU`; `abort` / `error` /
+`no_cooler` stop the run.
+
+#### What this library exposes, and what it deliberately does not
+
+`jura_connect/firmware.py` implements the whole protocol layer: the
+wire builders, the `@HB → @HO: → @HD:… → @HE` sequencer with progress
+callbacks, the restart, and the milk-cooler start/status/poll loop.
+Every mutating entry point is keyword-gated on
+`acknowledge_bricking_risk=True` and raises `FirmwareSafetyError`
+*before* touching the socket without it.
+
+The **named-command registry only gains three entries**:
+
+| Command | Wire | Gate |
+| ------- | ---- | ---- |
+| `milk-cooler-status` | `@HU?` | none (read-only) |
+| `milk-cooler-update` | `@HU` | destructive |
+| `restart-dongle` | `@HT:3` | destructive |
+
+The OTA sequence itself is **library-only and has no CLI command** on
+purpose:
+
+* a named command can only ever perform *one* step, and a partially
+  transferred image is precisely the failure mode that bricks the
+  dongle — the sequence is only safe as an atomic operation;
+* there is no image we can obtain or validate. Jura ships signed blobs
+  from its CDN; this library has no network dependency, no signature
+  check and no version check, so a CLI flag would amount to "point this
+  at any file and hope";
+* the recovery path for a failure is physical service, which is not a
+  proportionate risk for a convenience wrapper.
+
+Callers who genuinely need it can reach `JuraClient.run_firmware_ota()`
+from Python, where supplying the two blobs and the acknowledgement flag
+is an explicit act.
+
+#### Destructive-prefix bookkeeping
+
+`@HB`, `@HO:`, `@HD:`, `@HE` and `@HT:` are byte prefixes in
+`commands.DESTRUCTIVE_PREFIXES`, so the `raw` escape hatch gates them
+too. `@HU` **cannot** be a prefix: it would swallow the read-only
+`@HU?`. It lives in `commands.DESTRUCTIVE_EXACT` instead, and
+`commands.match_destructive()` is the single matcher the runtime gate,
+the `raw` inspector and the simulator all share.
+
+`JuraClient.close()` does **not** send `@HE`. Earlier releases did,
+as a "polite close", which predated the discovery that `@HE` is the OTA
+end marker; it looked harmless only because a dongle outside an OTA
+session answers `@he:error`. `close()` now sends the empty frame
+J.O.E.'s `WifiCommandCloseConnection` sends (§5.1), which is why `@HE`
+can be gated here without breaking session teardown.
+
+The simulator models the whole family — including `@hb:abort`,
+`@ho:error`, `@hd:error` at a chosen chunk, `@he:error` and the
+`busy` / `wait` / `abort` milk-cooler tokens — only when
+`SimulatorConfig.firmware_enabled=True`. By default it answers
+`@an:error` to every verb of the family, so a test that stumbles into
+the sequence fails loudly.

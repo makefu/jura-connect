@@ -509,6 +509,10 @@ _DESTRUCTIVE_INVOCATIONS = [
     # in tests/test_language_download.py. (It also drives a multi-step
     # transfer that raises against a simulator with the download turned
     # off, instead of handing back the @an:error the wire test wants.)
+    # Firmware / dongle maintenance. The OTA sequence itself is not a
+    # named command by design (see docs/PROTOCOL.md §5.15); these two are.
+    ("milk-cooler-update", []),
+    ("restart-dongle", []),
 ]
 
 

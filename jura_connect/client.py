@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 
-from . import language, profile, protocol
+from . import firmware, language, profile, protocol
 from .language import LanguageDownloadResult, LanguageInventory, LanguagePayload
 from .process import (
     ProcessRun,
@@ -1859,6 +1859,100 @@ class JuraClient:
             time_command=time_command,
             time_reply=time_reply.strip() if time_reply is not None else None,
             accepted=accepted,
+        )
+
+    # -- firmware / dongle maintenance ---------------------------------
+    #
+    # Thin shells over :mod:`jura_connect.firmware`. Everything that
+    # writes takes ``acknowledge_bricking_risk`` and raises
+    # :class:`~jura_connect.firmware.FirmwareSafetyError` without it —
+    # these commands can leave the dongle without working firmware and
+    # there is no remote recovery. All APK-derived, untested on
+    # hardware; see docs/PROTOCOL.md §5.15.
+
+    def read_milk_cooler_status(
+        self, *, timeout: float = 6.0
+    ) -> firmware.MilkCoolerStatus:
+        """Read the milk cooler's update state (``@HU?``). Read-only."""
+        return firmware.read_milk_cooler_status(self, timeout=timeout)
+
+    def start_milk_cooler_update(
+        self,
+        *,
+        acknowledge_bricking_risk: bool = False,
+        timeout: float = 6.0,
+    ) -> firmware.MilkCoolerUpdate:
+        """Start a milk-cooler firmware update (``@HU``). **Destructive.**"""
+        return firmware.start_milk_cooler_update(
+            self,
+            acknowledge_bricking_risk=acknowledge_bricking_risk,
+            timeout=timeout,
+        )
+
+    def run_milk_cooler_update(
+        self,
+        *,
+        acknowledge_bricking_risk: bool = False,
+        timeout: float = 6.0,
+        poll_interval: float = 0.5,
+        max_wait: float = 300.0,
+        max_restarts: int = 3,
+        progress: Callable[[firmware.MilkCoolerStatus], None] | None = None,
+    ) -> firmware.MilkCoolerUpdateRun:
+        """Start a milk-cooler update and poll it to completion.
+
+        **Destructive.** Bounded by ``max_wait`` / ``max_restarts``.
+        """
+        return firmware.run_milk_cooler_update(
+            self,
+            acknowledge_bricking_risk=acknowledge_bricking_risk,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            max_wait=max_wait,
+            max_restarts=max_restarts,
+            progress=progress,
+        )
+
+    def restart_dongle(
+        self,
+        *,
+        acknowledge_bricking_risk: bool = False,
+        timeout: float = 6.0,
+    ) -> str:
+        """Reboot the WiFi dongle (``@HT:3``). **Destructive.**"""
+        return firmware.restart_dongle(
+            self,
+            acknowledge_bricking_risk=acknowledge_bricking_risk,
+            timeout=timeout,
+        )
+
+    def run_firmware_ota(
+        self,
+        *,
+        dat: bytes,
+        application: bytes,
+        acknowledge_bricking_risk: bool = False,
+        chunk_size: int = firmware.OTA_CHUNK_BYTES,
+        restart: bool = False,
+        progress: Callable[[firmware.OtaProgress], None] | None = None,
+        timeout: float = firmware.OTA_STEP_TIMEOUT,
+    ) -> firmware.OtaResult:
+        """Push a firmware image to the dongle: ``@HB`` → ``@HO:`` →
+        ``@HD:``… → ``@HE`` (→ optional ``@HT:3``). **Destructive.**
+
+        The caller supplies both blobs; this library never downloads,
+        signs or version-checks firmware. Deliberately not reachable
+        from the CLI command registry — see docs/PROTOCOL.md §5.15.
+        """
+        return firmware.run_ota(
+            self,
+            dat=dat,
+            application=application,
+            acknowledge_bricking_risk=acknowledge_bricking_risk,
+            chunk_size=chunk_size,
+            restart=restart,
+            progress=progress,
+            timeout=timeout,
         )
 
 
