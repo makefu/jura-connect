@@ -575,6 +575,96 @@ def test_cancel_prefix_is_not_in_the_destructive_set(sim) -> None:
     assert result.value.lower().startswith("@tg:ff")  # type: ignore[union-attr]
 
 
+# --------------------------------------------------------------------- #
+# The shared destructive matcher
+# --------------------------------------------------------------------- #
+#
+# Five command families landed independently, each adding wire verbs
+# that live in the same @-namespace as a *read*. match_destructive() is
+# the single arbiter for all of them (prefix patterns plus the
+# exact-match ones), so these two tests are the cross-family contract:
+# nothing read-only may be gated, and nothing that mutates may slip
+# through. Add to them, not around them.
+
+#: Reads that share a namespace with a gated verb. Every one of these
+#: would be swallowed by a naive byte-prefix match against the
+#: destructive tuple.
+_UNGATED_READS = [
+    "@TT:00",  # language slot inventory vs. the @TT:01/02/03/08 writes
+    "@TM:23",  # max languages vs. @TM:3C, (coffee-timer schedule)
+    "@TM:3C",  # bare register read vs. the "@TM:3C," write form
+    "@HU?",  # milk-cooler status vs. @HU (start an update)
+    "@TR:32",  # every counter bank is a read
+    "@TR:33",
+    "@TR:42",
+    "@TG:43",  # maintenance counters
+    "@TG:C0",  # maintenance percent
+    "@TG:FF",  # cancel the running step (§5.8) — reclassified, not a reset
+    "@TS:00",  # unlock the display
+    "@TM:41,02",  # PMode product *read*
+    "@TM:42,03",  # PMode slot *read*
+]
+
+#: One mutating verb per family, to prove the matcher did not lose any
+#: of them while the families were merged together.
+_GATED_WRITES = [
+    "@TG:24",  # cleaning
+    "@TG:01",  # process: next step
+    "@TG:10",  # process: accept
+    "@TG:04",  # process: accept (the other spelling)
+    "@TP:0200",  # brew
+    "@TM:3C,00",  # coffee-timer schedule
+    "@TS:F1",  # language-download keypad lock
+    "@TT:01",  # language block select
+    "@TT:08",  # language chunk (binary)
+    "@TV:81",  # language display line
+    "@HB",  # firmware: enter bootloader
+    "@HE",  # firmware: OTA end
+    "@HU",  # milk-cooler update start
+    "@HW:82,x",  # dongle write
+]
+
+
+@pytest.mark.parametrize("cmd", _UNGATED_READS)
+def test_reads_are_not_matched_as_destructive(cmd) -> None:
+    assert commands.match_destructive(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("cmd", _GATED_WRITES)
+def test_writes_from_every_family_are_matched_as_destructive(cmd) -> None:
+    assert commands.match_destructive(cmd) is not None, cmd
+
+
+#: The subset of _UNGATED_READS a *default* simulator answers. @TT:00 is
+#: left out only because the simulator models a machine that does not
+#: know the language verbs unless allow_language_download is set, and
+#: stays silent — the read would time out, not be refused. Its gating is
+#: covered by the matcher test above and by
+#: tests/test_language_download.py.
+_UNGATED_READS_ON_THE_WIRE = [cmd for cmd in _UNGATED_READS if cmd != "@TT:00"]
+
+
+@pytest.mark.parametrize("cmd", _UNGATED_READS_ON_THE_WIRE)
+def test_raw_accepts_every_ungated_read_without_the_flag(sim, cmd) -> None:
+    """The `raw` escape hatch shares the matcher, so a read that the
+    matcher clears must also survive the CLI gate."""
+    c = _paired(sim)
+    try:
+        run_named(c, "raw", [cmd], timeout=2.0)
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("cmd", _GATED_WRITES)
+def test_raw_refuses_every_gated_write_without_the_flag(sim, cmd) -> None:
+    c = _paired(sim)
+    try:
+        with pytest.raises(DestructiveCommandError):
+            run_named(c, "raw", [cmd], timeout=2.0)
+    finally:
+        c.close()
+
+
 def test_skip_quality_step_sends_both_wire_forms(sim) -> None:
     """Bare ``@TG:7E`` skips one quality-assistant step, the 32×F
     argument skips all of them. Both must reach the wire only with the

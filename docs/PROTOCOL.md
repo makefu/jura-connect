@@ -1600,386 +1600,6 @@ uses. The simulator models the whole walk behind
 
 ---
 
-## 6. Machine variants (`MachineProfile`)
-
-The 88 machine XML files extracted from the J.O.E. APK
-(`assets/documents/xml/<EF_code>/<version>.xml`) are vendored under
-`jura_connect/data/xml/` and loaded on demand by
-`jura_connect.profile.load_profile(code)`. They provide:
-
-* the **alert bitmap** — bit index → name → severity
-  (`block`/`info`/`ip` in the XML, mapped to `error`/`info`/`process`
-  in Python);
-* the **product code → name** map for the brew-counter table;
-* (where present) the `<PROGRAMMODE>` section, currently exposed only
-  as the kind-count vector consumed by `@TM:50`.
-
-### 6.1 EF code lookup
-
-`jura_connect/data/JOE_MACHINES.TXT` (vendored verbatim from the APK)
-is a `;`-separated table of
-``<article_number>;<friendly_name>;<EF_code>;<type>`` rows. Example
-rows around the S8 EB:
-
-```
-15480;S8 (EB);EF1091;tt237w
-15533;S8 (EB);EF1151;tt237w
-```
-
-The CLI's pair flow reads the article number from a UDP discovery
-reply (offset 68..70, BE u16) and looks the EF code up in this table.
-On firmwares that don't answer unicast UDP (notably TT237W) the
-lookup fails — pass `--machine-type EF1091` explicitly, or retro-fit
-later with ``jura-connect set-machine-type --name … EF1091``.
-
-`jura_connect.profile.iter_profiles()` parses every bundled XML once
-and caches the result via `lru_cache`. Loading a single profile is
-roughly an `ElementTree.parse` + a couple of `findall(".//{*}TAG")`
-sweeps — wildcard namespace traversal is used because each XML
-declares the same `xmlns="http://www.top-tronic.com"` default
-namespace.
-
-### 6.2 EF536 fallback
-
-Credentials without a `machine_type` field fall through to the
-synthetic ``EF536`` baseline (the only profile the codebase hard-coded
-before v0.8.0). The fallback covers the alert names and the
-common product codes for the S8 / ENA8 / Z8 lineage; it doesn't know
-about the S8 EB's `cortado` (`0x2B`) and friends. That's why
-EF1091-paired machines should explicitly carry `machine_type = EF1091`
-in their credential.
-
----
-
-## 7. Credential persistence
-
-### 7.1 File location
-
-Default: `$XDG_DATA_HOME/jura-connect/credentials.json`
-(fall-back `~/.local/share/jura-connect/credentials.json`).
-
-Override with the global CLI flag `--store /path/to.json` or the
-`CredentialStore(path=...)` constructor argument.
-
-### 7.2 On-disk format
-
-```json
-{
-  "version": 1,
-  "machines": {
-    "Kaffeebert": {
-      "address": "192.168.1.42",
-      "conn_id": "jura-connect-7f31a8c2",
-      "auth_hash": "13908FE4D3EB986B2465ACDB50398D4C1622836A5A1632257FF065C13156C052",
-      "pin": "1234",
-      "machine_type": "EF1091",
-      "paired_at": "2026-05-11T08:42:00Z"
-    }
-  }
-}
-```
-
-`pin` is optional — present only for machines that require a setup PIN
-on every reconnect (see §4.4). It is stored verbatim so reconnects
-replay it, but `creds --json` redacts it to `pin_stored: true`.
-
-`machine_type` is optional — omitted entries silently fall through to
-the EF536 baseline. `CredentialStore.set_machine_type(name, code)`
-retro-fits the field onto an existing entry without forcing a re-pair.
-
-Writes go through a `mkstemp(dir=…)` + `os.replace` rename, so
-mid-write power loss leaves the previous file intact. The file is
-`chmod 0600`'d on write since the hash grants full control over the
-machine.
-
-### 7.3 End-to-end workflow
-
-```text
-┌──────────┐  jura-connect discover           ┌────────────────┐
-│          │ ─────────────────────────────►│  finds machine │
-│  user    │                               │  at 192.168.…  │
-│          │  jura-connect pair <ip>          └────────────────┘
-│          │ ──────────────────┐
-│          │                   │   open TCP/51515
-│          │                   ▼
-│          │           ┌─────────────┐ @HP:<pin>,<conn_id>, ┌───────────────┐
-│          │           │ JuraClient  │ ───────────────────►│  dongle       │
-│          │           │             │  (pin empty if none)│  "Connect?"   │
-│          │ ◄────────────────── waiting up to 60 s … ─────│  dialog       │
-│  presses │                                               └───────┬───────┘
-│  OK on   │                   "Connect" prompt shown              │
-│  machine │ ────────────────────────────────────────────────► OK pressed
-│          │           ┌─────────────┐  @hp4:<64-char hash> ┌───────────────┐
-│          │           │ JuraClient  │ ◄────────────────────│  dongle       │
-│          │           └──────┬──────┘                      └───────────────┘
-│          │                  │ CredentialStore.put(...)
-│          │                  ▼
-│          │           ┌─────────────────────────┐
-│          │           │ credentials.json (0600) │
-│          │           └─────────────────────────┘
-│          │
-│          │  jura-connect connect --name Kaffeebert --read-info
-│          │ ──────────────────┐
-│          │                   ▼
-│          │   CredentialStore.get("Kaffeebert")
-│          │           ┌─────────────┐@HP:<pin>,<conn_id>,<hash>┌───────────┐
-│          │           │ JuraClient  │ ───────────────────► │  dongle       │
-│          │           │             │ ◄─── @hp4 ──────────│               │
-│          │           │             │ @TG:43, @TG:C0       │               │
-│          │           │             │ ◄─ @tg:43…, @tg:C0…, pushed @TF:… ───│
-│          │           └─────────────┘                      └───────────────┘
-│          │
-│ <- output formatted MachineInfo
-└──────────┘
-```
-
----
-
-## 8. Code map
-
-| Module                       | Responsibility |
-| ---------------------------- | -------------- |
-| `jura_connect/crypto.py`        | per-nibble permutation, escape handling |
-| `jura_connect/protocol.py`      | frame writer/reader on top of `crypto` |
-| `jura_connect/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
-| `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 88 bundled XMLs + `JOE_MACHINES.TXT` |
-| `jura_connect/data/`            | vendored XMLs + `JOE_MACHINES.TXT`; shipped as `package-data` so installed wheels load profiles via `importlib.resources` |
-| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers |
-| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / `progress` / …) used by CLI and library |
-| `jura_connect/progress.py`      | `@TV:` product-progress decoder — `ProgressState` / `ProgressType` / `ProductProgress` (§5.10) |
-| `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600); `machine_type` field |
-| `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
-| `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds` / `machine-types` / `set-machine-type`) |
-| `tests/`                     | pytest suite — driven through the simulator end-to-end |
-| `flake.nix`                  | dev shell + package + checks (passthrough pytest) |
-
-Both the client and the simulator depend on the same two modules
-(`crypto`, `protocol`) for framing, so a regression on either side
-breaks both halves of the test-suite simultaneously.
-
----
-
-## 9. Known unknowns / next steps
-
-* `@TG:7E` means "skip a quality-assistant step" in the APK but zeroed
-  the maintenance counters on a TT237W S8 EB. Whether that is a
-  firmware difference or a side effect of the skip is unresolved, and
-  **must not** be resolved by probing hardware — the counters cannot be
-  restored. See §5.8.
-* Locked-screen behaviour: `@TS:01` followed by `@TS:00` works
-  cleanly, but issuing `@TS:01` and then disconnecting leaves the
-  display locked until power cycle.
-* `@TM:42` returning data on a machine that *does* expose programmable
-  slots has still not been observed live — the S8 EB / EF1091 reports
-  a slot count via `@TM:50` but answers `@tm:C2` for every index. The
-  configured-slot decode path is now **covered by simulation** (the
-  simulator serves populated slots with real checksums, and
-  `tests/test_pmode.py` round-trips a slot write through it), but it
-  remains unobserved on hardware. Same for the `@TM:41` / `@TM:42`
-  **writes** in §5.6.3 / §5.6.4: APK-derived, simulator-verified,
-  never sent to a machine. A machine whose XML carries
-  `Productprogramming="true"` (20 of the 89 bundled profiles, e.g.
-  EF1143 / EF529) is what's needed to confirm them.
-* `@TV:` decoding (§5.10) is APK-derived and verified only against the
-  simulator plus the two live observations recorded in §5.9. Wanted
-  from real hardware: a full raw capture of a brew (to pin the frame
-  *length* and confirm the percentage really sits at window slot 12
-  rather than 11), a milk drink (states `31`–`37`), a `41` frame from
-  a recipe with bypass (to confirm the `BYPASS_WATER_VOLUME` branch),
-  and any `8F` extended-window frame — we have never seen one.
-
----
-
-## 5.13 Preselections (`<PRESELECTION>` / `<COMBINATION>`) — **APK-derived, unverified**
-
-> **Nothing in this section has been seen on a wire.** It is a
-> transcription of the J.O.E. Android APK, cross-checked between jadx
-> output and smali, plus what the machine XMLs declare. No hardware was
-> available when it was written. Treat every byte as a hypothesis:
-> a wrong one misbrews. Verify before trusting.
-
-### What the XML declares
-
-Each `<PRODUCT>` carries a `<PRESELECTION>` child listing the toggles
-that product supports, and the machine as a whole carries an optional
-`<MULTIPLE_PRESELECTS>` block listing which toggles may be active *at
-the same time*:
-
-```xml
-<PRESELECTION xtrashot="false" double="31" powder="true" coldbrew="false" sweetfoam="false"/>
-...
-<MULTIPLE_PRESELECTS>
-  <COMBINATION powder="true" sweetfoam="true"/>
-  <COMBINATION xtrashot="true" sweetfoam="true"/>
-</MULTIPLE_PRESELECTS>
-```
-
-Every attribute is a plain `"true"`/`"false"` flag **except `double`**,
-which carries the **product code of the double product** (or `"00"`).
-Jura's own comment in the documented template profile
-(`data/xml/EF0000/3.8.xml`) says so:
-
-> All preselections are either true or false - except the double. The
-> double preselect contains the Product Code of the Double Product (old
-> T-Protocol) or just 00 for the new T-Protocol with F18 support
-> (`<CAPABILITIES IntakeF18="true"/>` in the MACHINEMANIFEST). If the
-> double contains a Product Code other than 00, the Product should
-> exist in this List of Products too […]
-
-Observed across the 89 bundled profiles:
-
-* attribute names: `xtrashot`, `double`, `powder`, `coldbrew`,
-  `strongcoldbrew`, `lightbrew`, `sweetfoam`, `fakesweetfoam`,
-  `chocolate`, `XL`, `PModeAdjust`. The last is never `"true"`
-  anywhere;
-* `double` values: `00` plus the codes `11`–`1D`, `29`, `31`, `36`,
-  `38`, `39`, `3B`, `3E`, `3F`. All resolve to a product in the same
-  catalogue **except** EF1143's Espresso Doppio (`0x30` → `0x31`,
-  which that XML never defines);
-* `double="00"` is read here as **"no double"**. Jura's comment allows
-  it to also mean "double via F18" on new-protocol machines, but every
-  bundled XML that writes `00` does so for products that cannot
-  sensibly be doubled (milk foam, hot water, pot) — *including*
-  `IntakeF18` machines, which also still write real double codes. So
-  `00` is not treated as an F18 opt-in;
-* 17 profiles declare `<COMBINATION>` rows; the other 72 allow no
-  simultaneous preselections at all. Two rows are written with a
-  `"false"` attribute (`<COMBINATION powder="false" sweetfoam="true"/>`
-  in EF1123) — only the `"true"` attributes are read as members, which
-  degenerates those rows to a single preselection, i.e. no information.
-
-### How the app encodes them
-
-Single encoder for both WiFi and BLE:
-`ch.toptronic.joe.model.product.AppProduct.c(ProductStartData)`
-(jadx lines 151-184; smali `AppProduct.smali:400-806` agrees).
-`WifiCommandStartProduct` builds `"@TP:" + AppProduct.c(startData)`.
-Paraphrased:
-
-```java
-ArrayList blob = chunk(2, d());        // d() = 17 entries of "00",
-blob.set(8, "01");                     //   each recipe param at F-1
-blob.set(0, doubleCode-or-productCode);
-blob.set(15, grinderInstructions ? "04" : "00");
-if (product.hasAnyPreselection() && !startData.f18Enabled)
-    for (PreselectArgument p : selected)
-        if (p.index != null) blob.set(p.index, p.value);   // legacy overwrite
-boolean hasF17 = params.containsKey("F17") || params.containsKey("F17_H");
-String s = join(blob).substring(0, (hasF17 ? 17 : 16) * 2);
-if (!startData.f18Enabled) return s;                       // 16 or 17 bytes
-int mask = Σ bit(p) for p in selected;
-return hasF17 ? s + "0000" + hex(mask) : s + "000000" + hex(mask);  // 20 bytes
-```
-
-`f18Enabled` is `CMCapabilities.intakeF18Enabled`, parsed from
-`<CAPABILITIES IntakeF18="…"/>` (`XMLParser.smali:1132`). It defaults
-to **false**, and 23 of the 89 bundled profiles set it. **EF1091 (the
-S8 EB) has no manifest at all**, so the maintainer's machine is on the
-legacy path and *cannot* exercise the mask path.
-
-#### Old T-protocol: product-code swap + byte overwrites
-
-`AppProduct.c` lines 156-161 substitute the double product's code into
-blob byte 0 — only when `double` is selected, the XML gives a non-empty
-code, **and** the machine is not `IntakeF18`. The remaining
-preselections come from the `(index, value)` payloads of the
-`PreselectArgument` enum
-(`shared_model/interfaces/PreselectArgument.java:76-96`) and are written
-**after** the recipe parameters, overwriting them:
-
-| preselection | blob offset | value | note |
-| ------------ | ----------- | ----- | ---- |
-| `powder`    | 2 (F3)  | `00` | blanks coffee strength — the grinder is skipped |
-| `coldbrew`  | 6 (F7)  | `80` | out-of-band temperature value |
-| `lightbrew` | 6 (F7)  | `81` | out-of-band temperature value |
-| `xtrashot`  | 7 (F8)  | `02` | stroke byte |
-| `double`    | 0       | double product code | from the XML |
-| `sweetfoam`, `fakesweetfoam`, `strongcoldbrew` | — | — | **no payload: J.O.E. sends nothing for these on such a machine** |
-
-That last row is not an omission on our side: those enum entries carry
-`null` for both index and value, and there is no other code path. The
-app will happily show a sweet-foam toggle on an S8 EB and then start a
-plain cappuccino. `jura-connect` refuses them instead.
-
-Note the collisions that follow: `powder` contradicts an explicit
-strength, `coldbrew`/`lightbrew` contradict an explicit temperature.
-`build_recipe_hex` raises rather than silently dropping the caller's
-value.
-
-#### `IntakeF18`: one appended mask byte
-
-When `f18Enabled` is set, the legacy overwrites **and** the double
-product-code swap are both skipped, and a single mask byte is appended.
-The bits are a hardcoded table in `AppProduct.c`:
-
-| preselection | bit |
-| ------------ | --- |
-| `powder`          | `0x01` |
-| `xtrashot`        | `0x02` |
-| `sweetfoam`       | `0x04` |
-| `lightbrew`       | `0x08` |
-| `coldbrew`        | `0x10` |
-| `double`          | `0x40` |
-| `strongcoldbrew`  | `0x80` |
-| `fakesweetfoam`   | *(none — absent from the table)* |
-
-`0x20` is unused. The blob is padded so the mask is always the **20th
-byte, offset 19** — `"0000"` of padding when the product has an F17
-grinder-freeness parameter (which occupies offset 16), `"000000"`
-otherwise.
-
-Beware two decoy bitmasks in the same APK:
-`ch/toptronic/joe/model/enums/PreselectType` has a *different* mask
-(powder 8, double 4, extra-shot 2, light-brew 128, sweet-foam 16,
-fake-sweet-foam 32, cold-brew 1, strong-cold-brew 256) used for UI /
-stored state, and the `PreselectArgument` enum's own ordinals are not a
-mask at all.
-
-### Open questions
-
-* **Why "F18" when the byte lands at offset 19 (i.e. F20)?** No XML
-  declares `Argument="F18"`, `F19` or `F20`, and the string `"F18"`
-  appears nowhere in the smali outside the capability name. Either the
-  name is historical or the machine numbers this blob differently.
-  Unresolved.
-* Whether the pad bytes must be `00` — the app never varies them.
-* Whether an `IntakeF18` machine also **requires** the 20-byte form for
-  a plain, preselection-free brew. J.O.E. always sends 20 bytes to such
-  a machine; `jura-connect` keeps sending the verified 16-byte blob
-  unless a preselection is requested, because no 20-byte blob has ever
-  been confirmed to brew. If a preselection-free `@TP:` is ACKed
-  `@tp:00` on an `IntakeF18` machine, the 20-byte form is the first
-  thing to try.
-* Whether `sweetfoam` really is a no-op on old machines, or reaches
-  them by some path outside `AppProduct.c` (a separate product code —
-  EF1091 does carry a distinct "Sweet Latte" at `0x2C` — or a machine
-  setting).
-* Nothing here says what the *machine* does with an unknown
-  preselection bit. Assume the worst.
-
-### What `jura-connect` does with it
-
-`brew <product> <preselection>…` (bare words, e.g.
-`brew espresso double`, `brew cappuccino extra_shot`) validates in this
-order, all before anything reaches the wire:
-
-1. the name is a known preselection (aliases: `extra_shot`,
-   `cold_brew`, `light_brew`, `sweet_foam`, …);
-2. the product's `<PRESELECTION>` element declares it;
-3. the requested set fits inside one `<COMBINATION>` row (a subset of a
-   legal row is legal; a single preselection always is);
-4. this machine generation can actually express it — otherwise it is
-   refused, never silently dropped.
-
-`products` lists each product's preselections and flags the ones the
-connected machine cannot send, so it never advertises something `brew`
-will reject. `MachineProfile.plan_preselections()` is the library entry
-point and returns a `PreselectionPlan` (which product to brew, the mask
-byte, the byte overwrites). `brew … mask=<hex>` forces the mask byte
-verbatim for firmware that numbers the bits differently.
-
----
-
 ### 5.12 Coffee timer (`@TM:3C` + `@TV:84`) — APK-derived, untested
 
 **Nothing in this section has been seen on a real machine.** It is
@@ -2166,6 +1786,196 @@ deliberately *not* in `DESTRUCTIVE_PREFIXES` (see §5.8: it aborts a
 step rather than resetting anything), so `cancel` reaches it without
 the gate. Whether it actually clears a *pending* timer (as opposed to
 aborting a running brew) is untested.
+
+---
+
+### 5.13 Preselections (`<PRESELECTION>` / `<COMBINATION>`) — **APK-derived, unverified**
+
+> **Nothing in this section has been seen on a wire.** It is a
+> transcription of the J.O.E. Android APK, cross-checked between jadx
+> output and smali, plus what the machine XMLs declare. No hardware was
+> available when it was written. Treat every byte as a hypothesis:
+> a wrong one misbrews. Verify before trusting.
+
+#### What the XML declares
+
+Each `<PRODUCT>` carries a `<PRESELECTION>` child listing the toggles
+that product supports, and the machine as a whole carries an optional
+`<MULTIPLE_PRESELECTS>` block listing which toggles may be active *at
+the same time*:
+
+```xml
+<PRESELECTION xtrashot="false" double="31" powder="true" coldbrew="false" sweetfoam="false"/>
+...
+<MULTIPLE_PRESELECTS>
+  <COMBINATION powder="true" sweetfoam="true"/>
+  <COMBINATION xtrashot="true" sweetfoam="true"/>
+</MULTIPLE_PRESELECTS>
+```
+
+Every attribute is a plain `"true"`/`"false"` flag **except `double`**,
+which carries the **product code of the double product** (or `"00"`).
+Jura's own comment in the documented template profile
+(`data/xml/EF0000/3.8.xml`) says so:
+
+> All preselections are either true or false - except the double. The
+> double preselect contains the Product Code of the Double Product (old
+> T-Protocol) or just 00 for the new T-Protocol with F18 support
+> (`<CAPABILITIES IntakeF18="true"/>` in the MACHINEMANIFEST). If the
+> double contains a Product Code other than 00, the Product should
+> exist in this List of Products too […]
+
+Observed across the 89 bundled profiles:
+
+* attribute names: `xtrashot`, `double`, `powder`, `coldbrew`,
+  `strongcoldbrew`, `lightbrew`, `sweetfoam`, `fakesweetfoam`,
+  `chocolate`, `XL`, `PModeAdjust`. The last is never `"true"`
+  anywhere;
+* `double` values: `00` plus the codes `11`–`1D`, `29`, `31`, `36`,
+  `38`, `39`, `3B`, `3E`, `3F`. All resolve to a product in the same
+  catalogue **except** EF1143's Espresso Doppio (`0x30` → `0x31`,
+  which that XML never defines);
+* `double="00"` is read here as **"no double"**. Jura's comment allows
+  it to also mean "double via F18" on new-protocol machines, but every
+  bundled XML that writes `00` does so for products that cannot
+  sensibly be doubled (milk foam, hot water, pot) — *including*
+  `IntakeF18` machines, which also still write real double codes. So
+  `00` is not treated as an F18 opt-in;
+* 17 profiles declare `<COMBINATION>` rows; the other 72 allow no
+  simultaneous preselections at all. Two rows are written with a
+  `"false"` attribute (`<COMBINATION powder="false" sweetfoam="true"/>`
+  in EF1123) — only the `"true"` attributes are read as members, which
+  degenerates those rows to a single preselection, i.e. no information.
+
+#### How the app encodes them
+
+Single encoder for both WiFi and BLE:
+`ch.toptronic.joe.model.product.AppProduct.c(ProductStartData)`
+(jadx lines 151-184; smali `AppProduct.smali:400-806` agrees).
+`WifiCommandStartProduct` builds `"@TP:" + AppProduct.c(startData)`.
+Paraphrased:
+
+```java
+ArrayList blob = chunk(2, d());        // d() = 17 entries of "00",
+blob.set(8, "01");                     //   each recipe param at F-1
+blob.set(0, doubleCode-or-productCode);
+blob.set(15, grinderInstructions ? "04" : "00");
+if (product.hasAnyPreselection() && !startData.f18Enabled)
+    for (PreselectArgument p : selected)
+        if (p.index != null) blob.set(p.index, p.value);   // legacy overwrite
+boolean hasF17 = params.containsKey("F17") || params.containsKey("F17_H");
+String s = join(blob).substring(0, (hasF17 ? 17 : 16) * 2);
+if (!startData.f18Enabled) return s;                       // 16 or 17 bytes
+int mask = Σ bit(p) for p in selected;
+return hasF17 ? s + "0000" + hex(mask) : s + "000000" + hex(mask);  // 20 bytes
+```
+
+`f18Enabled` is `CMCapabilities.intakeF18Enabled`, parsed from
+`<CAPABILITIES IntakeF18="…"/>` (`XMLParser.smali:1132`). It defaults
+to **false**, and 23 of the 89 bundled profiles set it. **EF1091 (the
+S8 EB) has no manifest at all**, so the maintainer's machine is on the
+legacy path and *cannot* exercise the mask path.
+
+##### Old T-protocol: product-code swap + byte overwrites
+
+`AppProduct.c` lines 156-161 substitute the double product's code into
+blob byte 0 — only when `double` is selected, the XML gives a non-empty
+code, **and** the machine is not `IntakeF18`. The remaining
+preselections come from the `(index, value)` payloads of the
+`PreselectArgument` enum
+(`shared_model/interfaces/PreselectArgument.java:76-96`) and are written
+**after** the recipe parameters, overwriting them:
+
+| preselection | blob offset | value | note |
+| ------------ | ----------- | ----- | ---- |
+| `powder`    | 2 (F3)  | `00` | blanks coffee strength — the grinder is skipped |
+| `coldbrew`  | 6 (F7)  | `80` | out-of-band temperature value |
+| `lightbrew` | 6 (F7)  | `81` | out-of-band temperature value |
+| `xtrashot`  | 7 (F8)  | `02` | stroke byte |
+| `double`    | 0       | double product code | from the XML |
+| `sweetfoam`, `fakesweetfoam`, `strongcoldbrew` | — | — | **no payload: J.O.E. sends nothing for these on such a machine** |
+
+That last row is not an omission on our side: those enum entries carry
+`null` for both index and value, and there is no other code path. The
+app will happily show a sweet-foam toggle on an S8 EB and then start a
+plain cappuccino. `jura-connect` refuses them instead.
+
+Note the collisions that follow: `powder` contradicts an explicit
+strength, `coldbrew`/`lightbrew` contradict an explicit temperature.
+`build_recipe_hex` raises rather than silently dropping the caller's
+value.
+
+##### `IntakeF18`: one appended mask byte
+
+When `f18Enabled` is set, the legacy overwrites **and** the double
+product-code swap are both skipped, and a single mask byte is appended.
+The bits are a hardcoded table in `AppProduct.c`:
+
+| preselection | bit |
+| ------------ | --- |
+| `powder`          | `0x01` |
+| `xtrashot`        | `0x02` |
+| `sweetfoam`       | `0x04` |
+| `lightbrew`       | `0x08` |
+| `coldbrew`        | `0x10` |
+| `double`          | `0x40` |
+| `strongcoldbrew`  | `0x80` |
+| `fakesweetfoam`   | *(none — absent from the table)* |
+
+`0x20` is unused. The blob is padded so the mask is always the **20th
+byte, offset 19** — `"0000"` of padding when the product has an F17
+grinder-freeness parameter (which occupies offset 16), `"000000"`
+otherwise.
+
+Beware two decoy bitmasks in the same APK:
+`ch/toptronic/joe/model/enums/PreselectType` has a *different* mask
+(powder 8, double 4, extra-shot 2, light-brew 128, sweet-foam 16,
+fake-sweet-foam 32, cold-brew 1, strong-cold-brew 256) used for UI /
+stored state, and the `PreselectArgument` enum's own ordinals are not a
+mask at all.
+
+#### Open questions
+
+* **Why "F18" when the byte lands at offset 19 (i.e. F20)?** No XML
+  declares `Argument="F18"`, `F19` or `F20`, and the string `"F18"`
+  appears nowhere in the smali outside the capability name. Either the
+  name is historical or the machine numbers this blob differently.
+  Unresolved.
+* Whether the pad bytes must be `00` — the app never varies them.
+* Whether an `IntakeF18` machine also **requires** the 20-byte form for
+  a plain, preselection-free brew. J.O.E. always sends 20 bytes to such
+  a machine; `jura-connect` keeps sending the verified 16-byte blob
+  unless a preselection is requested, because no 20-byte blob has ever
+  been confirmed to brew. If a preselection-free `@TP:` is ACKed
+  `@tp:00` on an `IntakeF18` machine, the 20-byte form is the first
+  thing to try.
+* Whether `sweetfoam` really is a no-op on old machines, or reaches
+  them by some path outside `AppProduct.c` (a separate product code —
+  EF1091 does carry a distinct "Sweet Latte" at `0x2C` — or a machine
+  setting).
+* Nothing here says what the *machine* does with an unknown
+  preselection bit. Assume the worst.
+
+#### What `jura-connect` does with it
+
+`brew <product> <preselection>…` (bare words, e.g.
+`brew espresso double`, `brew cappuccino extra_shot`) validates in this
+order, all before anything reaches the wire:
+
+1. the name is a known preselection (aliases: `extra_shot`,
+   `cold_brew`, `light_brew`, `sweet_foam`, …);
+2. the product's `<PRESELECTION>` element declares it;
+3. the requested set fits inside one `<COMBINATION>` row (a subset of a
+   legal row is legal; a single preselection always is);
+4. this machine generation can actually express it — otherwise it is
+   refused, never silently dropped.
+
+`products` lists each product's preselections and flags the ones the
+connected machine cannot send, so it never advertises something `brew`
+will reject. `MachineProfile.plan_preselections()` is the library entry
+point and returns a `PreselectionPlan` (which product to brew, the mask
+byte, the byte overwrites). `brew … mask=<hex>` forces the mask byte
+verbatim for firmware that numbers the bits differently.
 
 ---
 
@@ -2500,3 +2310,193 @@ The simulator models the whole family — including `@hb:abort`,
 `SimulatorConfig.firmware_enabled=True`. By default it answers
 `@an:error` to every verb of the family, so a test that stumbles into
 the sequence fails loudly.
+
+---
+
+## 6. Machine variants (`MachineProfile`)
+
+The 88 machine XML files extracted from the J.O.E. APK
+(`assets/documents/xml/<EF_code>/<version>.xml`) are vendored under
+`jura_connect/data/xml/` and loaded on demand by
+`jura_connect.profile.load_profile(code)`. They provide:
+
+* the **alert bitmap** — bit index → name → severity
+  (`block`/`info`/`ip` in the XML, mapped to `error`/`info`/`process`
+  in Python);
+* the **product code → name** map for the brew-counter table;
+* (where present) the `<PROGRAMMODE>` section, currently exposed only
+  as the kind-count vector consumed by `@TM:50`.
+
+### 6.1 EF code lookup
+
+`jura_connect/data/JOE_MACHINES.TXT` (vendored verbatim from the APK)
+is a `;`-separated table of
+``<article_number>;<friendly_name>;<EF_code>;<type>`` rows. Example
+rows around the S8 EB:
+
+```
+15480;S8 (EB);EF1091;tt237w
+15533;S8 (EB);EF1151;tt237w
+```
+
+The CLI's pair flow reads the article number from a UDP discovery
+reply (offset 68..70, BE u16) and looks the EF code up in this table.
+On firmwares that don't answer unicast UDP (notably TT237W) the
+lookup fails — pass `--machine-type EF1091` explicitly, or retro-fit
+later with ``jura-connect set-machine-type --name … EF1091``.
+
+`jura_connect.profile.iter_profiles()` parses every bundled XML once
+and caches the result via `lru_cache`. Loading a single profile is
+roughly an `ElementTree.parse` + a couple of `findall(".//{*}TAG")`
+sweeps — wildcard namespace traversal is used because each XML
+declares the same `xmlns="http://www.top-tronic.com"` default
+namespace.
+
+### 6.2 EF536 fallback
+
+Credentials without a `machine_type` field fall through to the
+synthetic ``EF536`` baseline (the only profile the codebase hard-coded
+before v0.8.0). The fallback covers the alert names and the
+common product codes for the S8 / ENA8 / Z8 lineage; it doesn't know
+about the S8 EB's `cortado` (`0x2B`) and friends. That's why
+EF1091-paired machines should explicitly carry `machine_type = EF1091`
+in their credential.
+
+---
+
+## 7. Credential persistence
+
+### 7.1 File location
+
+Default: `$XDG_DATA_HOME/jura-connect/credentials.json`
+(fall-back `~/.local/share/jura-connect/credentials.json`).
+
+Override with the global CLI flag `--store /path/to.json` or the
+`CredentialStore(path=...)` constructor argument.
+
+### 7.2 On-disk format
+
+```json
+{
+  "version": 1,
+  "machines": {
+    "Kaffeebert": {
+      "address": "192.168.1.42",
+      "conn_id": "jura-connect-7f31a8c2",
+      "auth_hash": "13908FE4D3EB986B2465ACDB50398D4C1622836A5A1632257FF065C13156C052",
+      "pin": "1234",
+      "machine_type": "EF1091",
+      "paired_at": "2026-05-11T08:42:00Z"
+    }
+  }
+}
+```
+
+`pin` is optional — present only for machines that require a setup PIN
+on every reconnect (see §4.4). It is stored verbatim so reconnects
+replay it, but `creds --json` redacts it to `pin_stored: true`.
+
+`machine_type` is optional — omitted entries silently fall through to
+the EF536 baseline. `CredentialStore.set_machine_type(name, code)`
+retro-fits the field onto an existing entry without forcing a re-pair.
+
+Writes go through a `mkstemp(dir=…)` + `os.replace` rename, so
+mid-write power loss leaves the previous file intact. The file is
+`chmod 0600`'d on write since the hash grants full control over the
+machine.
+
+### 7.3 End-to-end workflow
+
+```text
+┌──────────┐  jura-connect discover           ┌────────────────┐
+│          │ ─────────────────────────────►│  finds machine │
+│  user    │                               │  at 192.168.…  │
+│          │  jura-connect pair <ip>          └────────────────┘
+│          │ ──────────────────┐
+│          │                   │   open TCP/51515
+│          │                   ▼
+│          │           ┌─────────────┐ @HP:<pin>,<conn_id>, ┌───────────────┐
+│          │           │ JuraClient  │ ───────────────────►│  dongle       │
+│          │           │             │  (pin empty if none)│  "Connect?"   │
+│          │ ◄────────────────── waiting up to 60 s … ─────│  dialog       │
+│  presses │                                               └───────┬───────┘
+│  OK on   │                   "Connect" prompt shown              │
+│  machine │ ────────────────────────────────────────────────► OK pressed
+│          │           ┌─────────────┐  @hp4:<64-char hash> ┌───────────────┐
+│          │           │ JuraClient  │ ◄────────────────────│  dongle       │
+│          │           └──────┬──────┘                      └───────────────┘
+│          │                  │ CredentialStore.put(...)
+│          │                  ▼
+│          │           ┌─────────────────────────┐
+│          │           │ credentials.json (0600) │
+│          │           └─────────────────────────┘
+│          │
+│          │  jura-connect connect --name Kaffeebert --read-info
+│          │ ──────────────────┐
+│          │                   ▼
+│          │   CredentialStore.get("Kaffeebert")
+│          │           ┌─────────────┐@HP:<pin>,<conn_id>,<hash>┌───────────┐
+│          │           │ JuraClient  │ ───────────────────► │  dongle       │
+│          │           │             │ ◄─── @hp4 ──────────│               │
+│          │           │             │ @TG:43, @TG:C0       │               │
+│          │           │             │ ◄─ @tg:43…, @tg:C0…, pushed @TF:… ───│
+│          │           └─────────────┘                      └───────────────┘
+│          │
+│ <- output formatted MachineInfo
+└──────────┘
+```
+
+---
+
+## 8. Code map
+
+| Module                       | Responsibility |
+| ---------------------------- | -------------- |
+| `jura_connect/crypto.py`        | per-nibble permutation, escape handling |
+| `jura_connect/protocol.py`      | frame writer/reader on top of `crypto` |
+| `jura_connect/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
+| `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 88 bundled XMLs + `JOE_MACHINES.TXT` |
+| `jura_connect/data/`            | vendored XMLs + `JOE_MACHINES.TXT`; shipped as `package-data` so installed wheels load profiles via `importlib.resources` |
+| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers |
+| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / `progress` / …) used by CLI and library |
+| `jura_connect/progress.py`      | `@TV:` product-progress decoder — `ProgressState` / `ProgressType` / `ProductProgress` (§5.10) |
+| `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600); `machine_type` field |
+| `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
+| `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds` / `machine-types` / `set-machine-type`) |
+| `tests/`                     | pytest suite — driven through the simulator end-to-end |
+| `flake.nix`                  | dev shell + package + checks (passthrough pytest) |
+
+Both the client and the simulator depend on the same two modules
+(`crypto`, `protocol`) for framing, so a regression on either side
+breaks both halves of the test-suite simultaneously.
+
+---
+
+## 9. Known unknowns / next steps
+
+* `@TG:7E` means "skip a quality-assistant step" in the APK but zeroed
+  the maintenance counters on a TT237W S8 EB. Whether that is a
+  firmware difference or a side effect of the skip is unresolved, and
+  **must not** be resolved by probing hardware — the counters cannot be
+  restored. See §5.8.
+* Locked-screen behaviour: `@TS:01` followed by `@TS:00` works
+  cleanly, but issuing `@TS:01` and then disconnecting leaves the
+  display locked until power cycle.
+* `@TM:42` returning data on a machine that *does* expose programmable
+  slots has still not been observed live — the S8 EB / EF1091 reports
+  a slot count via `@TM:50` but answers `@tm:C2` for every index. The
+  configured-slot decode path is now **covered by simulation** (the
+  simulator serves populated slots with real checksums, and
+  `tests/test_pmode.py` round-trips a slot write through it), but it
+  remains unobserved on hardware. Same for the `@TM:41` / `@TM:42`
+  **writes** in §5.6.3 / §5.6.4: APK-derived, simulator-verified,
+  never sent to a machine. A machine whose XML carries
+  `Productprogramming="true"` (20 of the 89 bundled profiles, e.g.
+  EF1143 / EF529) is what's needed to confirm them.
+* `@TV:` decoding (§5.10) is APK-derived and verified only against the
+  simulator plus the two live observations recorded in §5.9. Wanted
+  from real hardware: a full raw capture of a brew (to pin the frame
+  *length* and confirm the percentage really sits at window slot 12
+  rather than 11), a milk drink (states `31`–`37`), a `41` frame from
+  a recipe with bypass (to confirm the `BYPASS_WATER_VOLUME` branch),
+  and any `8F` extended-window frame — we have never seen one.
