@@ -294,6 +294,7 @@ def _r_cancel(_spec, client, _args, timeout):
     """
     return client.request("@TG:FF", match=r"(?i)^@tg", timeout=timeout)
 
+
 def _r_progress(_spec, client, args, timeout):
     """Watch the unsolicited ``@TV:`` stream and decode every frame.
 

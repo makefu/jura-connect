@@ -83,6 +83,12 @@ def test_status_nudge_sends_the_milk_cooler_probe(sim) -> None:
     finally:
         c.close()
     assert "no_beans" in st.active_alerts
+    # The nudge and the pushed @TF: race each other: read_status can
+    # return on a frame the dongle had already queued before @HU? landed,
+    # so poll for the command instead of asserting on the first look.
+    deadline = time.monotonic() + 2.0
+    while b"@HU?" not in sim.sent_commands and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert b"@HU?" in sim.sent_commands
 
 
