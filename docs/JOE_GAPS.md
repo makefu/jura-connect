@@ -25,7 +25,8 @@ for what is *implemented*. This file is the to-do list.
 | Status alerts (`@TF:`) | yes, + product/process/progress context | bit decode only |
 | Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
-| Special / barista counter banks | yes | no |
+| Special / barista counter banks | yes (special only) | yes |
+| Daily counter banks + `@TF:05` reset | no | yes |
 | Machine settings read/write | yes (+ batch read) | yes (single) |
 | PMode slot read | yes | yes |
 | PMode slot/product **write** | yes | no |
@@ -85,8 +86,11 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | `@TP:<blob>` → `@tp` | `WifiCommandStartProduct` | ✅ `brew` |
 | `@TR:32,<page>` ×16 | `WifiCommandProductCounterStatistics` | ✅ `brews` |
 | `@TR:33,<page>` ×16 | same class, 1 byte/value | ✅ (overflow fold-in) |
-| `@TR:52,<page>` ×4 | `WifiCommandSpecialCounterStatistics` | ❌ |
-| `@TR:34/35` | (declared in XML, read by the BLE2 adapter) | ❌ |
+| `@TR:52,<page>` ×4 | `WifiCommandSpecialCounterStatistics` | ✅ `special-counters` |
+| `@TR:53,<page>` ×4 | same class, 1 byte/value | ✅ (overflow fold-in) |
+| `@TR:34/35` | *(declared in XML; no APK code path — BLE2 reads only 32/33/52/53)* | ✅ `barista-counters` |
+| `@TR:42..45` | *(declared in XML under `<DAILYCOUNTER>`; no APK code path)* | ✅ `daily-brews` / `daily-barista-counters` |
+| `@TF:05` | *(XML `<DAILYCOUNTER Reset=…>`; no APK code path)* | ✅ `reset-daily-counters` (gated) |
 | `@TS:01` / `@TS:00` | `WifiCommandLock` / `WifiCommandUnlock` | ✅ `lock` / `unlock` |
 | `@TS:F1` | `WifiCommandLanguageDownloadLock` | ❌ |
 | `@TT:00/01,<n>/02,<data>/03/08,<data>` | language download suite | ❌ |
@@ -155,20 +159,41 @@ report "brewing, 60 %" or "waiting for you to empty the grounds".
 
 ## 4. Statistics
 
+**Done.** All ten banks are read (`JuraClient.read_counter_bank`,
+`COUNTER_BANK_SPECS`), each only when the machine's profile declares
+it. Page counts marked "assumed" use the product counter's 16 pages and
+stop early on `@tr:00`.
+
 | Bank | Pages | Bytes/val | Profiles declaring it | Lib |
 | ---- | ----- | --------- | --------------------- | --- |
 | `@TR:32` product counter | 16 | 2 | 89/89 | ✅ |
 | `@TR:33` product overflow | 16 | 1 | 34 | ✅ |
-| `@TR:52` special counter | 4 | 2 | 14 | ❌ |
-| `@TR:53` special overflow | 4 | 1 | 4 | ❌ |
-| `@TR:34` barista counter | ? | 2 | 4 | ❌ |
-| `@TR:35` barista overflow | ? | 1 | 3 | ❌ |
+| `@TR:52` special counter | 4 | 2 | 14 | ✅ |
+| `@TR:53` special overflow | 4 | 1 | 4 | ✅ |
+| `@TR:34` barista counter | 16 (assumed) | 2 | 4 | ✅ |
+| `@TR:35` barista overflow | 16 (assumed) | 1 | 3 | ✅ |
+| `@TR:42` daily product counter | 16 (assumed) | 2 | 37 | ✅ |
+| `@TR:43` daily product overflow | 16 (assumed) | 1 | 4 | ✅ |
+| `@TR:44` daily barista counter | 16 (assumed) | 2 | 4 | ✅ |
+| `@TR:45` daily barista overflow | 16 (assumed) | 1 | 4 | ✅ |
 
-`MachineProfile.counter_banks` already parses the declarations — only
-the read path is missing. J.O.E. merges all of them into one
-`StatisticsCollection` alongside the maintenance banks; the overflow
-fold (`count = value + (overflow << 16)`) is identical to the one we
-already implement for `@TR:32`/`@TR:33`.
+J.O.E. merges the banks it reads into one `StatisticsCollection`
+alongside the maintenance banks; the overflow fold
+(`count = value + (overflow << 16)`) is identical for every pair.
+
+**Where we now go past J.O.E.:** the `<DAILYCOUNTER Reset="@TF:05">`
+banks (`@TR:42`..`@TR:45`) appear in no APK code path — the XML's own
+`<!-- Not available in JOE -->` comment is accurate, and grepping the
+decompiled app for `@TR:4[2-5]` or `@TF:05` returns nothing. They are a
+real machine capability the app ignores, and they are what a "brews
+today" sensor wants, so the library reads them
+(`daily-brews`, `daily-barista-counters`) and exposes the reset verb as
+the gated `reset-daily-counters`. Untested against hardware.
+
+Also unlike J.O.E.: the special bank's named slots
+(`SPECIAL_COUNTER_SLOTS`) drop the app's `hotBrew`, which reads slot 0 —
+the same slot as the total — and looks like a copy/paste bug in
+`SpecialCounterStatisticsParser`.
 
 The XML also declares `<TOTALCOUNTER Code="00" Name="Total Products">`
 and a `<LIFETIME>` block that we ignore.
@@ -359,8 +384,10 @@ with their resolution because the reasoning is the interesting part.
    `clean` / `descale` into a real state machine that can report and
    confirm. Highest user value, most testing effort (each confirmation
    consumes supplies on a real machine — extend the simulator first).
-5. **Special / barista counter banks** — mechanical, the bank reader is
-   already generic; only 14 of 89 profiles benefit.
+5. ~~**Special / barista counter banks**~~ — **done**: all ten banks
+   read through one generic, profile-gated reader, plus the daily banks
+   J.O.E. never touches and their gated `@TF:05` reset. Simulator-only
+   verification; no machine here declares anything past `@TR:32`.
 6. **Preselections in `@TP:`** — needs the argument byte reverse
    engineered (`ProductStartData.f18Enabled` suggests `F18`); verify on
    hardware before shipping, a wrong byte misbrews.

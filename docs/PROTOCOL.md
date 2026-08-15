@@ -489,14 +489,64 @@ slots equals the number of double brews. Z10: 5945 − 5804 = 141 = the
 under `<PRODUCTCOUNTER>` (parsed into
 `MachineProfile.counter_banks`):
 
-| Bank | Name | Profiles |
-|---|---|---|
-| `@TR:32` | Product counter | 89 / 89 |
-| `@TR:33` | Overflow product counter | 34 |
-| `@TR:52` | Special counter | 14 |
-| `@TR:34` | Barista counter | 4 |
-| `@TR:53` | Overflow special counter | 4 |
-| `@TR:35` | Overflow barista counter | 3 |
+…and, in a second section, under `<DAILYCOUNTER Reset="@TF:05">`
+(`MachineProfile.daily_counter_banks` /
+`MachineProfile.daily_counter_reset`). The full table, with the page
+count and value width the client uses for each
+(`jura_connect.client.COUNTER_BANK_SPECS`):
+
+| Bank | Name | Section | Pages | Bytes/value | Profiles | Page count from |
+|---|---|---|---|---|---|---|
+| `@TR:32` | Product counter | PRODUCTCOUNTER | 16 | 2 | 89 / 89 | APK |
+| `@TR:33` | Overflow product counter | PRODUCTCOUNTER | 16 | 1 | 34 | APK |
+| `@TR:34` | Barista counter | PRODUCTCOUNTER | 16 | 2 | 4 | assumed |
+| `@TR:35` | Overflow barista counter | PRODUCTCOUNTER | 16 | 1 | 3 | assumed |
+| `@TR:42` | Daily product counter | DAILYCOUNTER | 16 | 2 | 37 | assumed |
+| `@TR:43` | Overflow daily product counter | DAILYCOUNTER | 16 | 1 | 4 | assumed |
+| `@TR:44` | Daily barista counter | DAILYCOUNTER | 16 | 2 | 4 | assumed |
+| `@TR:45` | Overflow daily barista counter | DAILYCOUNTER | 16 | 1 | 4 | assumed |
+| `@TR:52` | Special counter | PRODUCTCOUNTER | 4 | 2 | 14 | APK |
+| `@TR:53` | Overflow special counter | PRODUCTCOUNTER | 4 | 1 | 4 | APK (WiFi) |
+
+"APK" means J.O.E. issues exactly that many pages on the WiFi path;
+"assumed" means no code path in the app touches the bank at all and the
+client uses the product counter's 16 pages because the bank indexes the
+same 64-slot product-code space. A machine that serves fewer pages
+answers `@tr:00` early, which the reader honours (see below), so the
+assumption costs at most one extra round trip.
+
+The two flavours of the app disagree about `@TR:53`: the WiFi adapter
+reads it with the 4-page `WifiCommandSpecialCounterStatistics`, the
+Bluetooth one with `getStatisticsValues(15, "@TR:53", …, 1)` — 16
+pages. This client follows the WiFi side, which is the transport it
+speaks.
+
+Only `@TR:32` has a dedicated result type (`ProductCounters`, whose
+shape downstream consumers depend on). Every other bank decodes into
+`CounterBank`, which carries the bank command alongside the same
+`total` / `by_name` / `by_code` / `raw_slots` view. Slot 0 is the
+bank's own total everywhere.
+
+Slot naming differs by bank. The product, barista and daily banks index
+the catalogue by product code, so profile product names apply (and so do
+the `COUNTER_SLOT_OVERRIDES` above). The **special counter** does not:
+its slots are fixed functions, per J.O.E.'s
+`SpecialCounterStatisticsParser`, which builds a `SpecialCounterEmit`
+out of
+
+```
+totalCounter    = slot 0
+sweetFoam       = slot 3
+coldBrew        = slot 4 + slot 5 + slot 6
+strongColdBrew  = slot 9
+lightBrew       = slot 12 + slot 13 + slot 14
+```
+
+(the app also reports `hotBrew` — reading slot 0, i.e. the same value
+as the total, which looks like a copy/paste bug and is not reproduced
+here). Slots outside that map still surface under `by_code`, so nothing
+is dropped. `0xFFFF` counts as "not configured" and is skipped from the
+sums, matching the app's `h()` helper.
 
 The overflow banks carry **one byte per slot** holding the high word.
 J.O.E. reads them exactly like `@TR:32` — 16 pages, `@TR:33,<page>` —
@@ -523,12 +573,23 @@ skipping overflow bytes of `0x00` ("no overflow yet") and `0xFF` (the
 not-configured sentinel). Without the high byte a per-product count
 wraps at 65535.
 
-`jura_connect` reads `@TR:33` when — and only when — the machine's
-profile declares it, and folds it in
-(`ProductCounters.from_slots(..., overflow=…)`). A machine may also
-declare the bank and still answer a bare `@tr:00`; J.O.E.'s reply
-matcher accepts that shape (`((@tr:33,<page>,.*)|(@tr:00))`) and so does
-the client, falling back to the base table.
+`jura_connect` reads an overflow bank when — and only when — the
+machine's profile declares it, and folds it into its base bank
+(`ProductCounters.from_slots(..., overflow=…)`,
+`CounterBank.from_slots(...)`). An overflow bank is never readable on
+its own: `JuraClient.read_counter_bank("@TR:33")` raises and points at
+`@TR:32`. A machine may also declare the bank and still answer a bare
+`@tr:00`; J.O.E.'s reply matcher accepts that shape
+(`((@tr:33,<page>,.*)|(@tr:00))`) and so does the client, falling back
+to the base table.
+
+The same rule governs the base banks: `JuraClient.read_counter_bank`
+sends nothing at all when the profile does not declare the bank, and
+returns `None` — not an exception — for both "not declared" and "the
+dongle answered `@tr:00` on page 0". Named commands
+`special-counters`, `barista-counters`, `daily-brews` and
+`daily-barista-counters` wrap the four base banks; `@TR:32` keeps its
+own `brews`.
 
 Bank sizes are not uniform: J.O.E.'s WiFi composite asks for 16 pages
 of the product counter and its overflow, but only 4 pages of the
@@ -537,18 +598,51 @@ special counter (`WifiCommandSpecialCounterStatistics.j()` →
 page as "bank ends here" and keeps the slots it did read; only a
 `@tr:00` on the *first* page means "bank not implemented".
 
+#### The daily banks are a machine capability the app ignores
+
+37 of the 89 profiles carry
+
+```xml
+<DAILYCOUNTER Reset="@TF:05">
+    <!-- Not available in JOE -->
+    <BANK Command="@TR:42" Name="Daily Product counter"/>
+    <BANK Command="@TR:43" Name="Daily Product counter overvlow" />
+    <BANK Command="@TR:44" Name="Barista Counter Dayli"/>
+    <BANK Command="@TR:45" Name="Overflow Barista counter Dayli"/>
+</DAILYCOUNTER>
+```
+
+The `<!-- Not available in JOE -->` comment is Jura's own, and it holds
+up: grepping the decompiled APK for `@TR:4[2-5]` returns nothing —
+neither the WiFi nor either Bluetooth adapter ever asks for these
+banks, and there is no parser for them. The machine keeps them anyway.
+They are the per-product brew counts since the last reset, which is
+exactly what a "coffees today" sensor wants, so this client reads them.
+
+`@TF:05` is the XML's own `Reset` verb for the section — all 37
+profiles spell it identically. It zeroes the daily banks irreversibly,
+so it is in `DESTRUCTIVE_PREFIXES` and exposed only as the gated
+`reset-daily-counters` command. Nothing in the app sends it either.
+
 > **Untested against hardware.** No machine available to this project
-> declares an overflow bank — EF545, EF1091 and EF1151 list `@TR:32`
-> alone — so the decoding above is derived from the app and exercised
-> against the simulator only. What the request looks like is settled (it
-> is J.O.E.'s own WiFi path, quoted above); what a real machine *answers*
-> is not, so the reply length is treated as advisory rather than
-> assumed. Anything unexpected on that read — a timeout, a
-> reply shape we don't know — is logged and degraded to base counts
-> rather than failing the whole read. The special (`@TR:52`) and barista
-> (`@TR:34`) banks, and their own overflow banks, are not read at all;
-> on the WiFi side J.O.E. collects them into a `StatisticsCollection`
-> alongside the maintenance banks
+> declares any bank beyond `@TR:32` — EF545, EF1091 and EF1151 list it
+> alone — so all of the decoding above is derived from the app (special
+> banks) or from the machine XMLs (barista and daily banks) and
+> exercised against the simulator only. For `@TR:33`/`@TR:52`/`@TR:53`
+> what the request looks like is settled: it is J.O.E.'s own WiFi path,
+> quoted above. For `@TR:34`/`@TR:35` and the four daily banks not even
+> that is confirmed — the command form follows the shared
+> `@TR:<bank>,<page>` grammar every other bank uses, but no
+> implementation has ever been observed sending them, and `@TF:05` has
+> never been observed being answered. Treat all of it as APK/XML-derived
+> and unverified.
+>
+> What a real machine *answers* is unknown in every case, so reply
+> length is treated as advisory rather than assumed. Anything unexpected
+> on an overflow read — a timeout, a reply shape we don't know — is
+> logged and degraded to base counts rather than failing the whole read.
+> On the WiFi side J.O.E. collects the banks it does read into a
+> `StatisticsCollection` alongside the maintenance banks
 > (`CoffeeMachineAdapterWifi.readStatistics`).
 
 ### 5.6 Programmable-recipe slots (`@TM:50` + `@TM:42,<slot>`)
@@ -721,6 +815,7 @@ the same prefix check.
 | `@TG:26` | start `FilterChange` |
 | `@TG:7E` | skip a quality-assistant step (`WifiCommandCancelQualityAssistantStep`); bare = one step, `@TG:7E,FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF` = all. **Also observed zeroing every maintenance counter on TT237W** — see below |
 | `@TF:02` | restart machine |
+| `@TF:05` | zero the `<DAILYCOUNTER>` banks (`reset-daily-counters`); XML-declared `Reset` verb, irreversible, never sent by J.O.E. — see §5.5 |
 | `@AN:02` | power off |
 | `@TP:<recipe blob>` | start brewing a product — see §5.9 |
 | `@HW:01,<pin>` | set machine PIN |
