@@ -6,7 +6,84 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-16
+
+Closes the gap against the official J.O.E. Android app
+(`ch.toptronic.joe` 4.6.10). The app's WiFi adapter implements every
+method of its own transport interface; this library implemented the
+read paths and single-shot writes. Everything stateful — anything where
+the machine talks back mid-operation — was missing, and four commands
+carried the wrong meaning. `docs/JOE_GAPS.md` records the full
+comparison.
+
+Unless a bullet says otherwise, the new work is derived from the
+decompiled app and verified against the simulator only: no coffee
+machine was available while it was written. The wire formats that *are*
+hardware-verified (the `@TP:` recipe blob, the `@TV:` value window) say
+so in `docs/PROTOCOL.md`.
+
 ### Added
+- **Product progress (`@TV:`) is decoded** —
+  `jura_connect/progress.py`. 87 `ProgressState` codes, seven frame
+  types, the `8F` extended value window and the `41` hot-water/bypass
+  split. `ProductProgress` carries state, product or process, actual,
+  maximum and percent, with `format()` and `to_dict()`;
+  `JuraClient.iter_progress()`, `follow_progress()`,
+  `brew(follow=True)` and the `progress` command consume it, and the
+  simulator plays a whole brew. These frames used to be discarded, so a
+  consumer could see the machine's alerts but never what it was doing —
+  the reason the Home Assistant integration could not report "brewing,
+  60 %". The value window and the completion frame match the live S8 EB
+  brew recorded in `PROTOCOL.md` §5.9.
+- **Maintenance processes are drivable** — `jura_connect/process.py`.
+  `<PROCESS>` and `<STATE>` are parsed (83 states on the S8 EB), a run
+  reports every step and whether it needs confirmation, and the client
+  can accept (`@TG:04` / `@TG:10`, whichever the machine's XML
+  declares), advance (`@TG:01`) or cancel (`@TG:FF`). `clean` and
+  friends were fire-and-forget and stalled at the first state that
+  wanted a confirmation.
+- **`MachineStatus` answers "can I brew right now?"** The `<ALERT>`
+  element's `Blocked` and `Process` attributes are parsed, so
+  `blocked_kinds`, `blocking_alerts`, `alert_processes`,
+  `can_brew_kind()` and `can_brew()` are available. Purely additive:
+  every existing field and `to_dict()` key is unchanged.
+- **Every counter bank a machine declares is read** — `@TR:52`/`@TR:53`
+  special, `@TR:34`/`@TR:35` barista, and the four `@TR:42`–`@TR:45`
+  **daily** banks with the gated `@TF:05` reset. Jura's own XML comments
+  mark the daily banks "Not available in JOE": a real machine capability
+  the official app never reads.
+- **PMode writes** — `@TM:41` product read/write and `@TM:42` slot
+  write, built from the machine profile and validated before anything
+  reaches the wire. Gated.
+- **Machine settings in one round trip** — the XML's
+  `<BANK Name="Setting" Command="@TM:00,FC">`, with automatic fallback
+  to one `@TM:<arg>` per setting. The app *declares* this bank and never
+  sends it (`Bank.java` discards the argument list), so the reply layout
+  is a documented guess and the fallback is the safety net.
+- **Live parameter limits** — `@TM:60` returns the ranges the machine
+  allows right now, as opposed to the XML's static ones.
+- **Brew preselections** — extra shot, double, powder, cold brew, light
+  brew, sweet foam. Two mechanisms: pre-`IntakeF18` machines (the S8 EB
+  among them) swap in the double's own product code and overwrite
+  specific blob bytes, while `IntakeF18` machines carry a preselection
+  mask in a 20-byte blob. `products` lists what each product supports
+  and flags what the connected machine cannot send.
+- **Coffee timer** — `@TM:3C` schedules a brew (the trailing field is
+  seconds until the pour) and `@TV:84` carries the target time of day.
+  Gated: the machine pours with nobody present.
+- **Language download** — the whole `@TS:F1` / `@TT:00`–`@TT:08` /
+  `@TV:81`/`@TV:82` sequence with Motorola S-record payloads,
+  capability-gated (6 of the 89 profiles declare it) and with the keypad
+  unlock in a `finally` so a failed transfer cannot leave the display
+  locked.
+- **Firmware and milk cooler** — `@HB`, `@HO:`, `@HD:`, `@HE`, `@HT:3`,
+  `@HU`, `@HU?`. The OTA sequencer is **library-only and deliberately
+  not a named command**: it is only safe atomically, there is no image
+  this library can obtain or verify, and a partial transfer is recovered
+  by a service visit. Its entry points require
+  `acknowledge_bricking_risk=True` and raise before any socket write.
+  The exposed commands are `milk-cooler-status`, `milk-cooler-update`
+  and `restart-dongle`.
 - **Brew counts past 65535 survive on machines with an overflow bank.**
   34 of the 89 bundled profiles declare an `@TR:33` "Overflow Product
   Counter" alongside `@TR:32`; it carries the high byte of each slot,
@@ -19,7 +96,65 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   machine available to the project declares the bank, so this path is
   covered by the simulator and by the decompiled app only.
 
+### Changed
+- **Breaking:** `MaintenanceCounters` and `MaintenancePercent` hold
+  ordered name/value pairs. The named attributes remain as `int | None`
+  properties, and `to_dict()` omits counters a machine does not report —
+  a four-counter machine has no `cappu_rinse` key.
+- **Breaking:** `reset-counters` is now `skip-quality-step [one|all]`.
+  `@TG:7E` is the app's `WifiCommandCancelQualityAssistantStep`, but it
+  was also observed zeroing the maintenance counters on TT237W, so it
+  stays gated and its danger string states both readings.
+- **Breaking:** `read_status()` no longer sends `@HU?`. It waits for the
+  `@TF:` frame the dongle pushes on its own, the way the app does;
+  `read_status(nudge=True)` keeps the old send for firmwares that want
+  traffic on the socket first.
+- Destructive gating grew an exact-match tier. `@HU` cannot be a prefix
+  because it would swallow the `@HU?` read, so `match_destructive()` is
+  now the single matcher shared by the runtime gate, the `raw` payload
+  inspector and the simulator.
+- The simulator models brewing and its progress stream, maintenance
+  processes, PMode slots, the coffee timer, language download and the
+  firmware family — each behind an explicit opt-in flag, and it still
+  refuses destructive frames with `@an:error` by default.
+
 ### Fixed
+- **Maintenance counters were labelled wrong on 21 of the 89 known
+  machines.** The `@TG:43` / `@TG:C0` field order is declared per
+  machine by the XML's `<BANK>` `<TEXTITEM Type=…>` children, not fixed:
+  13 profiles report only four counters, 7 order the tail
+  `CoffeeRinse, CappuRinse, CappuClean`, and EF567_C has no
+  `FilterChange` at all. On any of them the hard-coded order silently
+  mislabelled every value. `MachineProfile.maintenance_counter_fields` /
+  `.maintenance_percent_fields` now drive the decode, with the old order
+  kept as the no-profile fallback. The S8 EB and the EF536 baseline
+  match that fallback, which is why this went unnoticed.
+- **`@TG:FF` is not a reset.** It is the app's
+  `WifiCommandCancelProductStep` — "abort the running step". It was
+  gated as a destructive broad reset and is now the ungated `cancel`
+  command.
+- **`@HE` is not a polite close.** It is `WifiCommandOTAEnd`. The app
+  closes a session with an *empty* frame, and `JuraClient.close()` now
+  does the same.
+- **`@HU?` is not a status request.** It is
+  `WifiCommandMilkCoolerUpdateStatus`, which is why probing it returned
+  `@hu:800` rather than a status frame: the first hex digit is the state
+  (`0` idle, `1` updating with the low byte as percent, `8` no milk
+  cooler connected), so `800` is exactly what an S8 EB should answer.
+  This closes the open question in `PROTOCOL.md` §9.
+- **Products with a grinder-freeness parameter could not be brewed at
+  all.** `Argument="F17"` lands at blob offset 16 and raised on the
+  16-byte path; the app builds a 17-byte blob for those products. Six
+  profiles declare it, and on those machines neither `brew`, nor the
+  library, nor the coffee timer could start anything.
+- **`MachineProfile.has_pmode` was permanently `False`.** It probed for
+  a `<PROGRAMMODE>` element that exists in no bundled XML and in neither
+  documented template profile. The real declarations are
+  `<MACHINESETTINGS Productprogramming=…>` (57 profiles, 20 of them
+  true) and `NumberOfSlotsForProductProgramming` (5 profiles).
+- **`flake.nix` was left at 0.11.0 by the v0.12.0 release.** The three
+  version locations `AGENTS.md` requires to move in lockstep are back in
+  step.
 - **A Z10's double products are counted under their catalogue names
   again.** The Z10 (EF545) counts "2 Espressi" and "2 Coffee" at slots
   `0x12`/`0x13` rather than at their catalogue codes `0x31`/`0x36`, so
