@@ -480,6 +480,12 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("set-ssid", ["mywifi"]),
     ("set-password", ["s3cret"]),
     ("set-name", ["Kaffeebert"]),
+    ("language-lock", []),
+    ("language-display", ["Updating", "language"]),
+    # 'language-download' is gated the same way but returns a structured
+    # LanguageDownloadResult rather than the raw reply string these two
+    # parametrised tests assert on; its own both-paths gating tests live
+    # in tests/test_language_download.py.
 ]
 
 

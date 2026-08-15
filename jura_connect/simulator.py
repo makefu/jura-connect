@@ -18,6 +18,11 @@ The simulator models:
   ``@HE`` (graceful close).
 * Periodic unsolicited ``@TF:<hex>`` status broadcasts on the
   connection so reader code in the client can be exercised.
+* The full language-download sequence (``@TS:F1`` lock, ``@TT:00``
+  inventory, ``@TT:01`` block select, ``@TT:02`` / ``@TT:08`` chunk
+  transfers, ``@TT:03`` finish, ``@TV:81`` / ``@TV:82`` display lines)
+  — but only when :attr:`SimulatorConfig.allow_language_download` is
+  set, since every mutating step of it is a destructive prefix.
 
 It deliberately refuses to model write/process commands (``@TG:24``
 cleaning, ``@TG:25`` descale, etc.) -- it answers ``@an:error`` so
@@ -36,7 +41,7 @@ import threading
 import time
 from collections.abc import Iterator
 
-from . import protocol
+from . import language, protocol
 from .client import _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
 
@@ -94,7 +99,47 @@ def _default_product_counters() -> list[int]:
 # tests that still import it from this module; the canonical home is
 # :mod:`jura_connect.commands`. The simulator refuses-by-default for the
 # same prefixes the client gate refuses-by-default.
-__all__ = ["DESTRUCTIVE_PREFIXES", "Simulator", "SimulatorConfig", "run_in_thread"]
+__all__ = [
+    "DESTRUCTIVE_PREFIXES",
+    "LanguageDownloadState",
+    "Simulator",
+    "SimulatorConfig",
+    "run_in_thread",
+]
+
+
+def _default_language_slots() -> dict[int, str]:
+    """Slot table a European machine might ship with (slots 0..13)."""
+    return {0: "DE", 1: "EN", 2: "FR", 3: "IT", 4: "ES", 5: "PT"}
+
+
+@dataclasses.dataclass(slots=True)
+class LanguageDownloadState:
+    """Live state of a language download; tests assert against it."""
+
+    locked: bool = False
+    block: str | None = None
+    chunks: list[tuple[int, bytes]] = dataclasses.field(default_factory=list)
+    finished: bool = False
+    display: list[str] = dataclasses.field(default_factory=lambda: ["", ""])
+
+    @property
+    def crc(self) -> int:
+        """CRC-16/CCITT-FALSE over everything received for this block.
+
+        The 16-bit field a successful ``@tt:0x`` reply carries is
+        **not** understood (see PROTOCOL.md §5.14); a running CRC is the
+        reading that fits ``@tt:03,FE = CRC_NOT_MATCHING``, so the
+        simulator answers one. Nothing in the client interprets it.
+        """
+        crc = 0xFFFF
+        for _addr, data in self.chunks:
+            for byte in data:
+                crc ^= byte << 8
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else crc << 1
+                    crc &= 0xFFFF
+        return crc
 
 
 @dataclasses.dataclass(slots=True)
@@ -143,6 +188,32 @@ class SimulatorConfig:
     # them over WiFi.
     pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
 
+    # -- language download (PROTOCOL.md §5.14) -------------------------
+    # Off by default: every mutating step (@TS:F1, @TT:01/02/03/08,
+    # @TV:81/82) is in DESTRUCTIVE_PREFIXES, so a default simulator
+    # answers @an:error exactly like it does for a cleaning cycle. Set
+    # this to model a machine that actually supports the feature.
+    allow_language_download: bool = False
+    # Slot index -> two-letter code for the @TT:00 inventory. Slots not
+    # listed (up to LANGUAGE_SLOT_COUNT) report the empty marker FFFF.
+    language_slots: dict[int, str] = dataclasses.field(
+        default_factory=_default_language_slots
+    )
+    # The only block @TT:01 accepts; anything else answers FE
+    # (COMMON_ERROR_BLOCK_NOT_AVAILABLE).
+    language_download_block: str = "0B"
+    # Reply to @TM:23. "@tm:23" = supported; "@tm:A3" = not supported;
+    # "@tm:00" = checksum false; "@tm:23,0C01" = a language is set.
+    max_languages_reply: str = "@tm:23"
+    # Answer the first @TT:01 with FC (EXECUTION_IN_PROGRESS) to
+    # exercise the finish-and-retry path.
+    language_select_busy_once: bool = False
+    # 0-based index of a chunk the machine refuses, and with which code.
+    language_reject_chunk: int | None = None
+    language_reject_code: str = "FE"
+    # Make @TT:03 fail with FE (CRC_NOT_MATCHING).
+    language_finish_crc_error: bool = False
+
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
     # so the test-suite can read/write the same arguments the J.O.E.
@@ -179,6 +250,8 @@ class Simulator:
         # Public for tests to inspect:
         self.sent_commands: list[bytes] = []
         self.handshakes: list[tuple[str, str, str]] = []  # (pin, conn_id, hash)
+        self.language = LanguageDownloadState()
+        self._language_select_seen = False
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -272,7 +345,12 @@ class Simulator:
             if not authenticated:
                 # Real dongle drops unauthenticated commands silently.
                 continue
-            reply = self._handle_command(text)
+            if frame.startswith(b"@TT:08,"):
+                # Binary language transfer: the body is raw escaped bytes,
+                # so it must be handled before the ASCII decode mangles it.
+                reply = self._handle_binary_language_transfer(frame)
+            else:
+                reply = self._handle_command(text)
             if reply is None:
                 continue  # mimic dongle's silent ignore for unknown commands
             if reply == "@@CLOSE":
@@ -313,9 +391,120 @@ class Simulator:
             return "@hp5:01"
         return "@hp4"
 
+    # -- language download ----------------------------------------------
+    def _handle_language_command(self, cmd: str) -> str | None:
+        """Model the language-download sequence (PROTOCOL.md §5.14).
+
+        Only reached when ``allow_language_download`` is set; otherwise
+        every mutating verb here falls through to the destructive guard.
+        The ordering rules (lock before select, select before transfer)
+        are the simulator's own invariants — the real machine's reaction
+        to an out-of-order sequence has never been observed.
+        """
+        state = self.language
+        if cmd == language.LOCK_COMMAND:
+            state.locked = True
+            state.chunks.clear()
+            state.block = None
+            state.finished = False
+            self._language_select_seen = False
+            return "@ts"
+        if cmd.startswith(language.SELECT_BLOCK_COMMAND + ","):
+            block = cmd.split(",", 1)[1].strip().upper()
+            if not state.locked:
+                return "@tt:01,FB"  # WRONG_CONTENT: not in download mode
+            if self.config.language_select_busy_once and not self._language_select_seen:
+                self._language_select_seen = True
+                return "@tt:01,FC"  # EXECUTION_IN_PROGRESS
+            if block != self.config.language_download_block.upper():
+                return "@tt:01,FE"  # BLOCK_NOT_AVAILABLE
+            state.block = block
+            state.chunks.clear()
+            state.finished = False
+            return "@tt:01,FF"
+        if cmd.startswith(language.TRANSFER_ASCII_COMMAND + ","):
+            body = cmd.split(",", 1)[1].strip()
+            if len(body) < 10 or len(body) % 2:
+                return "@tt:02,FD"  # WRONG_SYNTAX
+            try:
+                address = int(body[:8], 16)
+                data = bytes.fromhex(body[8:])
+            except ValueError:
+                return "@tt:02,FD"
+            return self._accept_language_chunk("02", address, data)
+        if cmd == language.FINISH_COMMAND:
+            if state.block is None:
+                return "@tt:03,FE"
+            if self.config.language_finish_crc_error:
+                return "@tt:03,FE"
+            state.finished = True
+            return f"@tt:03,FF,{state.crc:04X}"
+        for index, verb in enumerate(
+            (language.DISPLAY_LINE1_COMMAND, language.DISPLAY_LINE2_COMMAND)
+        ):
+            if cmd.startswith(verb + ","):
+                body = cmd[len(verb) + 1 :]
+                text, csum = body[:-2], body[-2:].upper()
+                if csum != language.display_checksum(text):
+                    log.warning("simulator: bad display checksum for %r", cmd)
+                    return "@an:error"
+                state.display[index] = text
+                return f"@tv:{verb[-2:].lower()}"
+        return None
+
+    def _accept_language_chunk(self, verb: str, address: int, data: bytes) -> str:
+        state = self.language
+        if state.block is None:
+            return f"@tt:{verb},FA"  # WRONG_LOGIC: no block selected
+        if not data:
+            return f"@tt:{verb},FC"  # WRONG_LENGTH
+        index = len(state.chunks)
+        if index == self.config.language_reject_chunk:
+            return f"@tt:{verb},{self.config.language_reject_code.upper()}"
+        state.chunks.append((address, data))
+        return f"@tt:{verb},FF,{state.crc:04X}"
+
+    def _handle_binary_language_transfer(self, frame: bytes) -> str | None:
+        """``@TT:08,<escaped addr><escaped len><escaped data>``."""
+        if not self.config.allow_language_download:
+            log.warning("simulator: refusing destructive command %r", frame[:16])
+            return "@an:error"
+        body = frame[len(b"@TT:08,") :]
+        try:
+            plain = language.unescape_binary(body)
+        except ValueError:
+            return "@tt:08,FD"  # WRONG_SYNTAX
+        if len(plain) < 6:
+            return "@tt:08,FD"
+        address = int.from_bytes(plain[:4], "big")
+        declared = int.from_bytes(plain[4:6], "big")
+        data = plain[6:]
+        if declared != len(data):
+            return "@tt:08,FC"  # WRONG_LENGTH
+        return self._accept_language_chunk("08", address, data)
+
     # -- read commands -------------------------------------------------
     def _handle_command(self, cmd: str) -> str | None:
         b = cmd.encode("ascii")
+        if self.config.allow_language_download:
+            reply = self._handle_language_command(cmd)
+            if reply is not None:
+                return reply
+        if cmd == language.MAX_LANGUAGES_COMMAND:
+            return self.config.max_languages_reply
+        if cmd == language.LIST_COMMAND:
+            if not self.config.allow_language_download:
+                return None  # machine doesn't know the verb: stays silent
+            slots = "".join(
+                f",{index:02X}"
+                + (
+                    self.config.language_slots[index].encode("ascii").hex().upper()
+                    if index in self.config.language_slots
+                    else "FFFF"
+                )
+                for index in range(language.LANGUAGE_SLOT_COUNT)
+            )
+            return f"@tt:00{slots}"
         for prefix in DESTRUCTIVE_PREFIXES:
             if b.startswith(prefix):
                 log.warning("simulator: refusing destructive command %r", cmd)
@@ -336,6 +525,8 @@ class Simulator:
             return "@ts"
         if cmd == "@TS:00":
             self.config.screen_locked = False
+            # Same verb releases a language-download lock (@TS:F1).
+            self.language.locked = False
             return "@ts"
         if cmd == "@TM:50":
             # Per-kind slot counts. Append a fake checksum byte so the

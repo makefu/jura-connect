@@ -39,9 +39,10 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 
-from . import profile, protocol
+from . import language, profile, protocol
+from .language import LanguageDownloadResult, LanguageInventory, LanguagePayload
 from .profile import MachineProfile, ProductDef, SettingDef
 
 log = logging.getLogger(__name__)
@@ -944,6 +945,109 @@ class JuraClient:
             # resend now that it is awake.
             reply = self.request(f"@TP:{recipe}", timeout=timeout)
         return reply
+
+    # -- language download ---------------------------------------------
+    # Thin entry points over :mod:`jura_connect.language`; the sequencing,
+    # capability gating and result types live there. See PROTOCOL.md §5.14.
+
+    def request_raw(
+        self,
+        payload: bytes,
+        *,
+        match: str | re.Pattern[str] | None = None,
+        timeout: float = 6.0,
+    ) -> str:
+        """Like :meth:`request` but for a command body that isn't ASCII.
+
+        The binary language transfer (``@TT:08``) carries escaped raw
+        bytes after its verb, so it cannot go through the ``str`` API.
+        Replies are ASCII as usual. Deliberately a sibling of
+        :meth:`request` rather than its implementation: the ASCII path's
+        timeout messages quote the command verbatim, which a byte
+        payload cannot.
+        """
+        if isinstance(match, str):
+            pattern: re.Pattern[str] | None = re.compile(match)
+        else:
+            pattern = match
+        self.conn.send(payload)
+        label = payload[:16]
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"no reply to {label!r}… within {timeout}s")
+            try:
+                reply = self.conn.recv_str(timeout=remaining)
+            except (TimeoutError, socket.timeout) as exc:
+                raise TimeoutError(f"no reply to {label!r}… within {timeout}s") from exc
+            if reply.startswith(("@TF:", "@TV:")):
+                self.status_history.append(reply)
+                if pattern is None or not pattern.search(reply):
+                    continue
+                return reply
+            if pattern is None or pattern.search(reply):
+                return reply
+
+    def read_language_inventory(self, *, timeout: float = 6.0) -> LanguageInventory:
+        """Read the machine's language slots (``@TT:00`` + ``@TM:23``).
+
+        Read-only. The download block and transfer form reported
+        alongside come from the loaded :class:`MachineProfile`.
+        """
+        return language.read_inventory(self, timeout=timeout)
+
+    def set_language_display(
+        self, line1: str, line2: str = "", *, timeout: float = 6.0
+    ) -> tuple[str, str]:
+        """Paint two lines on the machine display (``@TV:81`` / ``@TV:82``).
+
+        **Destructive**: overwrites whatever the machine is showing.
+        Both lines are truncated to 19 characters.
+        """
+        return language.set_display_lines(self, line1, line2, timeout=timeout)
+
+    def language_lock(self, *, timeout: float = 6.0) -> str:
+        """Lock the keypad for a language download (``@TS:F1``).
+
+        **Destructive**: the machine ignores its front panel until
+        ``@TS:00`` arrives — a leaked lock survives until a power cycle.
+        """
+        return language.lock(self, timeout=timeout)
+
+    def language_unlock(self, *, timeout: float = 6.0) -> str:
+        """Release the keypad after a language download (``@TS:00``)."""
+        return language.unlock(self, timeout=timeout)
+
+    def download_language(
+        self,
+        payload: LanguagePayload,
+        *,
+        block: str | None = None,
+        binary: bool | None = None,
+        message: Sequence[str] | None = None,
+        progress: language.ProgressCallback | None = None,
+        timeout: float = 6.0,
+        chunk_delay: float = language.INTER_CHUNK_DELAY,
+    ) -> LanguageDownloadResult:
+        """Push a language image into the machine. **Destructive.**
+
+        Rewrites one language slot and locks the keypad for the whole
+        transfer; an aborted run leaves that slot half-written. Refuses
+        outright (:class:`~jura_connect.language.LanguageDownloadError`)
+        unless the loaded profile declares the ``LanguageDownload``
+        capability. See :func:`jura_connect.language.download_language`.
+        """
+        return language.download_language(
+            self,
+            payload,
+            block=block,
+            binary=binary,
+            message=message,
+            progress=progress,
+            timeout=timeout,
+            chunk_delay=chunk_delay,
+        )
 
     @staticmethod
     def random_conn_id() -> str:
