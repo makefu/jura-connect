@@ -482,6 +482,44 @@ class ProductDef:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
+class MachineCapabilities:
+    """``<MACHINEMANIFEST><CAPABILITIES …/>`` flags.
+
+    Only 23 of the 89 bundled XMLs carry a ``<MACHINEMANIFEST>`` at all;
+    the older "T-protocol" machines (EF1091 / the maintainer's S8 EB
+    among them) have none, in which case every flag stays at its
+    J.O.E. default and :attr:`declared` is ``False``.
+
+    Defaults mirror the APK's ``CMCapabilities`` constructor, including
+    the counter-intuitive one: when the element exists but omits
+    ``BinaryLanguageDownload``, J.O.E. assumes **binary** transfers.
+    """
+
+    intake_f18: bool = False
+    language_download: bool = False
+    # NB: defaults to True when the attribute is absent (CMCapabilities).
+    binary_language_download: bool = True
+    # Slot index (hex, 2 chars) that a downloaded language occupies —
+    # the argument of @TT:01 and the index into the @TT:00 list.
+    language_download_block: str = "0B"
+    coffee_timer_grinder_freeness_setting: bool = False
+    # False when the XML carried no <CAPABILITIES> element at all.
+    declared: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "declared": self.declared,
+            "intake_f18": self.intake_f18,
+            "language_download": self.language_download,
+            "binary_language_download": self.binary_language_download,
+            "language_download_block": self.language_download_block,
+            "coffee_timer_grinder_freeness_setting": (
+                self.coffee_timer_grinder_freeness_setting
+            ),
+        }
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
 class MachineProfile:
     """Static description of one machine variant.
 
@@ -500,6 +538,10 @@ class MachineProfile:
     # declares "@TR:32"; a subset also declares overflow / special /
     # barista banks. See docs/PROTOCOL.md §5.5.
     counter_banks: tuple[str, ...] = ()
+    # <MACHINEMANIFEST><CAPABILITIES/> flags; see docs/PROTOCOL.md §5.14.
+    capabilities: MachineCapabilities = dataclasses.field(
+        default_factory=MachineCapabilities
+    )
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -614,6 +656,37 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         settings=settings,
         has_pmode=has_pmode,
         counter_banks=counter_banks,
+        capabilities=_parse_capabilities(root),
+    )
+
+
+def _bool_attr(el: ET.Element, name: str, default: bool) -> bool:
+    """Read an XML ``"true"``/``"false"`` attribute, J.O.E. style."""
+    raw = el.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() == "true"
+
+
+def _parse_capabilities(root: ET.Element) -> MachineCapabilities:
+    """Parse ``<MACHINEMANIFEST><CAPABILITIES/>`` into flags.
+
+    Scoped to the manifest on purpose: the documented template profile
+    (EF0000) mentions the element in prose elsewhere in the file.
+    """
+    el = root.find(".//{*}MACHINEMANIFEST/{*}CAPABILITIES")
+    if el is None:
+        return MachineCapabilities()
+    block = (el.get("LanguageDownloadBlock") or "").strip().upper()
+    return MachineCapabilities(
+        intake_f18=_bool_attr(el, "IntakeF18", False),
+        language_download=_bool_attr(el, "LanguageDownload", False),
+        binary_language_download=_bool_attr(el, "BinaryLanguageDownload", True),
+        language_download_block=block or "0B",
+        coffee_timer_grinder_freeness_setting=_bool_attr(
+            el, "CoffeeTimerGrinderFreenessSetting", False
+        ),
+        declared=True,
     )
 
 
