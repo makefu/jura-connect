@@ -505,6 +505,16 @@ class MachineProfile:
     # declares "@TR:32"; a subset also declares overflow / special /
     # barista banks. See docs/PROTOCOL.md §5.5.
     counter_banks: tuple[str, ...] = ()
+    # Bank commands the XML declares under <STATISTIC><DAILYCOUNTER>,
+    # in document order, e.g. ("@TR:42", "@TR:43"). Kept apart from
+    # ``counter_banks`` because the two sections mean different things:
+    # the daily banks count since the last reset and are zeroed with
+    # ``daily_counter_reset``. 37 of the 89 bundled profiles declare at
+    # least one. See docs/PROTOCOL.md §5.5.
+    daily_counter_banks: tuple[str, ...] = ()
+    # <DAILYCOUNTER Reset="@TF:05"> — the command that zeroes the daily
+    # banks. ``None`` when the machine declares no daily section.
+    daily_counter_reset: str | None = None
     # Field names of the maintenance banks, in the order the machine
     # answers them — the <TEXTITEM Type=…> children of
     # <BANK Command="@TG:43"> and <BANK Command="@TG:C0">. Per-machine:
@@ -531,6 +541,17 @@ class MachineProfile:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
         object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
+
+    def declares_counter_bank(self, command: str) -> bool:
+        """Whether the XML declares ``command`` as a counter bank.
+
+        Covers both the ``<PRODUCTCOUNTER>`` and the ``<DAILYCOUNTER>``
+        sections — a caller asking "may I read ``@TR:42`` here?" does
+        not care which section it came from. Reading a bank the machine
+        never declared is what the check exists to prevent.
+        """
+        target = command.strip().upper()
+        return target in self.counter_banks or target in self.daily_counter_banks
 
     def setting_by_arg(self, p_argument: str) -> SettingDef | None:
         """Find the :class:`SettingDef` for a ``P_Argument`` hex code
@@ -617,6 +638,16 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         if (command := (bank.get("Command") or "").strip())
     )
 
+    daily = root.find(".//{*}DAILYCOUNTER")
+    daily_counter_banks = tuple(
+        command
+        for bank in root.findall(".//{*}DAILYCOUNTER/{*}BANK")
+        if (command := (bank.get("Command") or "").strip())
+    )
+    daily_counter_reset = (
+        (daily.get("Reset") or "").strip() or None if daily is not None else None
+    )
+
     settings = _parse_machine_settings(root)
 
     return MachineProfile(
@@ -627,6 +658,8 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         settings=settings,
         has_pmode=has_pmode,
         counter_banks=counter_banks,
+        daily_counter_banks=daily_counter_banks,
+        daily_counter_reset=daily_counter_reset,
         maintenance_counter_fields=_bank_fields(root, MAINTENANCE_COUNTER_BANK),
         maintenance_percent_fields=_bank_fields(root, MAINTENANCE_PERCENT_BANK),
     )
