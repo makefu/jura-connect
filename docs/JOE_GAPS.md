@@ -23,7 +23,7 @@ for what is *implemented*. This file is the to-do list.
 | ---- | ----------- | -------------- |
 | Handshake, pairing, credential store | yes | **yes** |
 | Status alerts (`@TF:`) | yes, + product/process/progress context | bit decode only |
-| Maintenance counters / percent | yes, XML-ordered | yes, **hard-coded order** |
+| Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
 | Special / barista counter banks | yes | no |
 | Machine settings read/write | yes (+ batch read) | yes (single) |
@@ -288,28 +288,32 @@ hardware (and two of them must not be).
    on is just the next unsolicited status frame arriving. J.O.E. never
    polls for status — `TCPReceiveHandler` routes pushed `@TF:` frames.
    Our `read_status` works by accident.
-5. **`@TG:43` field order is per-machine.** We hard-code
-   `cleaning, filter_change, descale, cappu_rinse, coffee_rinse,
-   cappu_clean`. J.O.E. reads the order from the XML's
-   `<BANK Command="@TG:43">` `<TEXTITEM Type=…>` children. **21 of 89
-   profiles differ**:
+5. ~~**`@TG:43` field order is per-machine.**~~ **Fixed** — both banks
+   now decode against the XML's `<BANK Command="@TG:43">` /
+   `<BANK Command="@TG:C0">` `<TEXTITEM Type=…>` children via
+   `MachineProfile.maintenance_counter_fields` /
+   `.maintenance_percent_fields`, exactly as J.O.E. does; the old
+   hard-coded order survives only as the no-profile fallback (see
+   `PROTOCOL.md` §5.3). Kept here for the record — **21 of 89
+   profiles differ** from that fallback, so those machines still need
+   `--machine-type` to be labelled correctly:
    * 13 profiles have only 4 fields (`Cleaning, FilterChange, Decalc,
      CoffeeRinse`) — EF1013, EF1031, EF1089, EF1105(V2), EF1115(V2),
      EF1124, EF1125, EF1128, EF529, EF532COFFEEONLY, EF534;
    * 7 swap the last three to `CoffeeRinse, CappuRinse, CappuClean` —
      EF0000, EF1090, EF1123, EF1143, EF1148, EF1171, EF_MASTER;
    * EF567_C has no `FilterChange` at all.
-   On any of those machines our labels are silently wrong. EF1091/EF536
-   match the hard-coded order, which is why this never showed up.
-   `@TG:C0` is uniform (`Cleaning, FilterChange, Decalc`) except EF567_C.
+   EF1091/EF536 match the fallback order, which is why the bug went
+   unnoticed for so long. `@TG:C0` is uniform
+   (`Cleaning, FilterChange, Decalc`) except EF567_C.
 
 ---
 
 ## 9. Profile / XML parsing gaps
 
 `MachineProfile` parses `ALERT`, `PRODUCT` (+ `F<n>` params),
-`PRODUCTCOUNTER/BANK`, `MACHINESETTINGS`. Unparsed sections that carry
-protocol meaning:
+`PRODUCTCOUNTER/BANK`, the `@TG:43` / `@TG:C0` maintenance banks, and
+`MACHINESETTINGS`. Unparsed sections that carry protocol meaning:
 
 | Section | Carries | Blocks |
 | ------- | ------- | ------ |
@@ -317,7 +321,7 @@ protocol meaning:
 | `<STATE>` (83 on EF1091) | state code → name, `AcceptCommand` | §2, §3 |
 | `<PRESELECTION>` | extra-shot / double / powder / cold-brew flags | §6 |
 | `<COMBINATION>` | legal preselection combinations | §6 |
-| `<BANK Command="@TG:43"/"@TG:C0">` `<TEXTITEM>` | per-machine counter field order | §8.5 |
+| ~~`<BANK Command="@TG:43"/"@TG:C0">` `<TEXTITEM>`~~ | ~~per-machine counter field order~~ | done (§8.5) |
 | `<BANK Name="Setting">` | batch settings read | §5 |
 | `<TOTALCOUNTER>`, `<LIFETIME>` | totals metadata | §4 |
 | `<BUTTON>`, `<PREDICTIVEBUTTON>` | machine-side favourites | UI only |
@@ -328,9 +332,9 @@ protocol meaning:
 
 ## 10. Suggested order of work
 
-1. **Fix §8.5** (XML-driven `@TG:43` field order). Pure parsing, no
-   hardware, fixes 21 machine families, testable against the bundled
-   XMLs.
+1. ~~**Fix §8.5** (XML-driven `@TG:43` field order).~~ **Done** — the
+   maintenance banks decode against the profile; 21 machine families
+   fixed, pinned by tests over all 89 bundled XMLs.
 2. **Re-label §8.1–8.4** in `commands.py` / `PROTOCOL.md`. Move
    `@TG:FF` out of the destructive list (it is a cancel), keep `@TG:7E`
    gated but document both readings, stop calling `@HE` a close, note
