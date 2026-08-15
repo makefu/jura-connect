@@ -25,17 +25,12 @@ for what is *implemented*. This file is the to-do list.
 | Status alerts (`@TF:`) | yes, + product/process/progress context | bit decode only |
 | Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
-<<<<<<< HEAD
 | Special / barista counter banks | yes (special only) | yes |
 | Daily counter banks + `@TF:05` reset | no | yes |
-| Machine settings read/write | yes (+ batch read) | yes (single) |
-=======
-| Special / barista counter banks | yes | no |
 | Machine settings read/write | yes (+ batch read) | yes; batch read implemented (guessed reply, falls back) |
 | Per-product live limits (`@TM:60`) | yes | yes (APK-derived, untested) |
->>>>>>> wt/settings-batch
 | PMode slot read | yes | yes |
-| PMode slot/product **write** | yes | no |
+| PMode slot/product **write** | yes | yes (APK-derived, hardware-untested) |
 | Start product (`@TP:`) | yes, + preselections | yes, no preselections |
 | Product progress state machine (`@TV:`) | yes, ~50 states | no |
 | Maintenance processes with user interaction | yes | fire-and-forget only |
@@ -84,9 +79,10 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | `@TM:<arg>,<val><csum>` | `WifiCommandWritePMode` | ✅ `write_setting` |
 | `@TM:23` | `WifiCommandReadMaxLanguages` | ❌ |
 | `@TM:3C,<40 hex><time><csum>` | `WifiCommandStartCoffeeTimer` | ❌ |
-| `@TM:41,<…>` → `@tm:(41,.*\|C1)` | `WifiCommandPModeProductRead` / `…Write` | ❌ |
+| `@TM:41,<code>` → `@tm:(41,.*\|C1)` | `WifiCommandPModeProductRead` | ✅ `pmode-product` (untested) |
+| `@TM:41,<blob><csum>` → `@tm:41` | `WifiCommandPModeProductWrite` | ✅ `pmode-set-product` (untested) |
 | `@TM:42,<slot>` → `@tm:(42,.*\|C2)` | `WifiCommandPModeSlotProductRead` | ✅ `pmode` |
-| `@TM:42,<slot>,<blob>` | `WifiCommandPModeSlotProductWrite` | ❌ |
+| `@TM:42,<slot>,<blob>` | `WifiCommandPModeSlotProductWrite` | ✅ `pmode-set-slot` (untested) |
 | `@TM:50` → `@tm:(50,.*\|D0)` | `WifiCommandPModeNumSlotsRead` | ✅ |
 | `@TM:60,<…>` → `@tm:60,…` | `WifiCommandReadLimitLoad` | ✅ `limits` (untested on hardware) |
 | `@TM:00,FC` (XML `<BANK Name="Setting">`) | *declared, never sent* | ✅ `settings` (guessed reply, falls back) |
@@ -107,7 +103,7 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | UDP `0010A5F3…` broadcast | `UDPCommandScan` | ✅ `discover` |
 | UDP unicast status probe | `UDPCommandStatus` | ✅ (`probe`; TT237W ignores it) |
 
-Count: 51 J.O.E. WiFi command classes vs. 27 named commands in
+Count: 51 J.O.E. WiFi command classes vs. 38 named commands in
 `jura_connect.commands`.
 
 ---
@@ -401,7 +397,20 @@ with their resolution because the reasoning is the interesting part.
 | `<TOTALCOUNTER>`, `<LIFETIME>` | totals metadata | §4 |
 | `<BUTTON>`, `<PREDICTIVEBUTTON>` | machine-side favourites | UI only |
 | `<ENJOYSCREEN>`, `<TEXTITEM>`, `<LINK>` | display strings, manual URLs | UI only |
-| `<PROGRAMMODE>` | kind-count vector | partially (`@TM:50` only) |
+| ~~`<PROGRAMMODE>`~~ | ~~kind-count vector~~ | **there is no such element** — see below |
+
+`<PROGRAMMODE>` was a phantom: no bundled XML, and neither documented
+template (`EF0000` / `EF_MASTER`), has one, so `MachineProfile.has_pmode`
+was always `False`. The real declarations are now parsed
+(`PROTOCOL.md` §5.6.1):
+
+| Section / attribute | Carries | `MachineProfile` |
+| ------------------- | ------- | ---------------- |
+| `<MACHINESETTINGS Productprogramming>` | machine supports PMode writes (20/89 true) | `.product_programming`, `.has_pmode` |
+| `<MACHINESETTINGS NumberOfSlotsForProductProgramming>` | declared slot count (5 profiles) | `.pmode_slot_count` |
+| `<PRODUCT ProductSettings>` | product is programmable | `ProductDef.product_settings` |
+| `PModeAdjust="false"` on a parameter | parameter is not PMode-adjustable | `ProductParam.pmode_adjust` |
+| `<MACHINEMANIFEST><CAPABILITIES IntakeF18>` | changes the `@TM:42` blob tail | `.intake_f18` |
 
 ---
 
@@ -428,11 +437,14 @@ with their resolution because the reasoning is the interesting part.
 6. **Preselections in `@TP:`** — needs the argument byte reverse
    engineered (`ProductStartData.f18Enabled` suggests `F18`); verify on
    hardware before shipping, a wrong byte misbrews.
-7. **PMode writes (`@TM:41`/`@TM:42` write)** — blocked on finding a
-   machine that answers `@TM:42` with data at all; EF1091 answers
-   `@tm:C2` for every slot. `@TM:60` (limit load) is no longer part of
-   this item: it is implemented, and it is the cheapest of the three to
-   confirm on hardware since it only reads.
+7. ~~**PMode writes (`@TM:41`/`@TM:42` write)**~~ — **done**, with the
+   caveat that nothing is hardware-verified: `pmode-product`,
+   `pmode-set-product` and `pmode-set-slot` implement the APK's blob
+   layout and checksums, the simulator models both a machine that
+   exposes slots and the EF1091-style `@tm:C2` machine, and the
+   `<MACHINESETTINGS>` PMode declarations are parsed. Still blocked on
+   finding a machine that answers `@TM:42` with data (EF1091 answers
+   `@tm:C2` for every slot) before any of it can be called verified.
 8. **Confirm the two new read paths on a machine** (§5). Both are
    read-only, so this costs nothing but a session: compare
    `@TM:00,FC` against four single reads (and retry with the

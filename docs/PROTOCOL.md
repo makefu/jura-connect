@@ -287,7 +287,8 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | `@TR:<bank>`     | `@tr:<bank>...`   | str | bank-register read |
 | `@TR:32,<page>`  | `@tr:32,<page>,<8 bytes hex>` | `ProductCounters` (composite) | paginated brew counters — see §5.5 |
 | `@TM:50`         | `@tm:50,<num_slots><checksum>` | `int`        | programmable-recipe slot count — see §5.6 |
-| `@TM:42,<slot>`  | `@tm:42,<slot>,<product_code>...` | `PModeSlot` | per-slot product code; `@tm:C2` = not supported on this machine — see §5.6 |
+| `@TM:42,<slot>`  | `@tm:42,<slot><product_code>…<checksum>` | `PModeSlot` | per-slot product code; `@tm:C2` = not supported on this machine — see §5.6 |
+| `@TM:41,<code>`  | `@tm:41,<F1..Fn hex><checksum>` | `PModeProduct` | one product's stored PMode settings; `@tm:C1` = not supported — see §5.6 |
 
 #### There is no "read status" command
 
@@ -666,22 +667,141 @@ and rejects the reply when the checksum doesn't match. The total
 number of slots is `sum(per_kind_counts)`.
 
 ```
-client → @TM:42,<slot_dec>
-dongle → @tm:42,<slot_dec>,<product_code_hex>...   (slot is configured)
-dongle → @tm:C2                                    (slot not exposed on this machine)
+client → @TM:42,<slot_hex>
+dongle → @tm:42,<slot_hex><product_code><F2..Fn><checksum>  (configured)
+dongle → @tm:C2                                  (slot not exposed here)
 ```
+
+The reply's trailing byte is the same `ByteOperations.d` checksum the
+settings write uses (§5.7), computed over `"42,<slot_hex><payload>"`.
+`PModeSlotProductReadParser` verifies it and then indexes the payload
+*after* the slot byte as `F1, F2, F3 …` — `F1` is the product code, so
+argument `F<n>` lives at payload byte `n-1`, the same offset rule the
+`@TP:` recipe blob uses (§5.9).
 
 The S8 EB / EF1091 reports 20 slots via `@TM:50` (`@tm:50,0404040404` +
 checksum `7A`) but answers every `@TM:42,<n>` with `@tm:C2`. That is
 the "machine reports a PMode table but doesn't make any of it
-addressable" branch — the EF1091 XML omits the `<PROGRAMMODE>` section
-entirely. `ProgramModeSlots.supported_by_machine` flips to `False` in
-that case, and the CLI prints ``not supported by machine``.
+addressable" branch, and the machine's own XML agrees: EF1091 carries
+`<MACHINESETTINGS Productprogramming="false">`.
+`ProgramModeSlots.supported_by_machine` flips to `False` in that case,
+and the CLI prints ``not supported by machine``.
 
 The real machine also resets the TCP connection on some slot indices
 mid-table; the client catches `(ConnectionError, OSError)` and marks
 the remaining slots as unsupported rather than blowing up the whole
 ``pmode`` command.
+
+#### 5.6.1 Where the XML declares PMode
+
+There is **no `<PROGRAMMODE>` element** in Jura's schema. None of the
+89 bundled XMLs has one, nor do the documented `EF0000` / `EF_MASTER`
+templates. `MachineProfile.has_pmode` used to test for it and was
+therefore always `False`. The machine declares product programming on
+`<MACHINESETTINGS>` instead — the two attributes the APK's `XMLParser`
+reads into `MachineSettings.productProgramming` / `.numberOfSlots`:
+
+```xml
+<MACHINESETTINGS Productprogramming="true"
+                 NumberOfSlotsForProductProgramming="6">
+```
+
+| Declaration | Where | Count | `MachineProfile` |
+| ----------- | ----- | ----- | ---------------- |
+| `Productprogramming="true\|false"` | `<MACHINESETTINGS>` | 57 profiles (20 true) | `.product_programming`, `.has_pmode` |
+| `NumberOfSlotsForProductProgramming` | `<MACHINESETTINGS>` | 5 profiles (all `6`) | `.pmode_slot_count` |
+| `ProductSettings="true\|false"` | `<PRODUCT>` | 1679 products | `ProductDef.product_settings` |
+| `PModeAdjust="false"` | recipe parameter | 5 profiles | `ProductParam.pmode_adjust` |
+| `IntakeF18="true"` | `<MACHINEMANIFEST><CAPABILITIES>` | 23 profiles | `.intake_f18` |
+
+`PModeAdjust="false"` marks a parameter the product-programming UI
+hides (EF529 does this for `COFFEE_STRENGTH`); `build_pmode_hex`
+refuses to *override* such a parameter but still emits its XML
+default. `ProductSettings="false"` marks a product that is not
+programmable at all.
+
+#### 5.6.2 The 17-byte PMode product blob
+
+**APK-derived, never sent to a real machine.** From
+`ch.toptronic.joe.model.product.AppProduct.d()`:
+
+* 17 bytes pre-filled with `0x00`;
+* byte `n-1` for every `Argument="F<n>"` parameter, in the same units
+  and 5 ml tick encoding as the `@TP:` blob (§5.9) — the APK's
+  `ProductArgument.b()` selects exactly `F4` / `F10` / `Text="94"`,
+  which is our `_ML_TICK_KINDS`;
+* byte 0 overwritten with the product code, last.
+
+Two differences from the `@TP:` start blob, both deliberate:
+
+* it is 17 bytes, not 16 — `F17` (grinder freeness) needs byte 16, and
+  `d()` always allocates it. `@TP:` is this blob truncated to 16 bytes
+  (17 when the product has `F17`), which is why §5.9's blob is shorter;
+* **byte 8 is not forced to `0x01`.** That "recipe valid" byte belongs
+  to `AppProduct.c()`, the `@TP:` path; the PMode write sends the raw
+  parameter blob.
+
+#### 5.6.3 Product settings write (`@TM:41`) — APK-derived, untested
+
+`WifiCommandPModeProductWrite` builds `"41," + AppProduct.d()` and
+appends `ByteOperations.d` over that same string:
+
+```
+client → @TS:01                              (lock, PMODE priority)
+client → @TM:41,<34 hex blob><checksum>
+dongle → @tm:41                              (stored)
+dongle → @tm:C1                              (product programming unsupported)
+dongle → @tm:00                              (write rejected)
+client → @TS:00                              (unlock)
+```
+
+`JuraClient.write_pmode_product` sends this, returns `@an:error`
+verbatim (as `write_setting` does) and raises `ValueError` for `C1` /
+`00` — a rejection token is never success.
+
+#### 5.6.4 Slot assignment write (`@TM:42`) — APK-derived, untested
+
+From `CoffeeMachineAdapterBle2.sendPmodeProductCommandSlot` plus
+`WifiCommandPModeSlotProductWrite.Companion.a`:
+
+```
+body = "42," + <slot hex> + <first 14 bytes of the blob> + <tail>
+wire = "@TM:" + body + ByteOperations.d(body)
+reply matcher: @tm:42,<slot hex>.*      (@tm:C2 = not supported)
+```
+
+The tail is where it gets strange:
+
+| Condition | Tail | Body length |
+| --------- | ---- | ----------- |
+| product has `F17` (grinder freeness) | `00 <F17> 00 00 00 00` | 20 bytes |
+| no `F17`, but machine declares `IntakeF18` | `00 00 00 00 00 00` | 20 bytes |
+| neither | *(nothing)* | 14 bytes |
+
+Note the asymmetry: `F17` lands at blob index **15** here, not 16 as
+in the full 17-byte blob, and the APK splices in the *unscaled*
+`getValue("F17")` rather than the scaled byte `d()` computed. That may
+well be a bug in J.O.E., but it is what the app puts on the wire, so
+`JuraClient.write_pmode_slot` copies it.
+
+#### 5.6.5 Rejection tokens
+
+| Token | Command | APK source | Meaning |
+| ----- | ------- | ---------- | ------- |
+| `@tm:C1` | `@TM:41` | `PModeProductReadParser` | "Machine does not support Product Programming" |
+| `@tm:C2` | `@TM:42` | `PModeSlotProductReadParser` | "Product code, slot, or function is not supported by machine" |
+| `@tm:D0` | `@TM:50` | `PModeNumSlotReadParser` | no programmable slots |
+| `@tm:00` | either write | dongle generic | write rejected |
+
+None of these is a success reply. Reads map them to `None`; writes
+raise. `jura_connect.client._PMODE_NOT_SUPPORTED` is the single table
+both paths consult.
+
+> **Nothing in §5.6.2 – §5.6.5 has been observed on hardware.** The
+> only PMode traffic ever seen on a real machine is `@TM:50` and the
+> `@tm:C2` answers from the S8 EB. The write formats come from the
+> decompiled J.O.E. APK; the simulator models both branches so the
+> decode path has coverage, but a machine could still disagree.
 
 ### 5.7 Machine settings (`@TM:<arg>` read / write)
 
@@ -973,6 +1093,21 @@ still gated, with a danger string that states both readings.
 (something)"; the APK shows `WifiCommandCancelProductStep`, i.e. cancel
 whatever product step is running. It moved to §5.1 and to the
 non-gated `cancel` command.
+
+Two more writes are destructive but are **not** in
+`DESTRUCTIVE_PREFIXES`, because the list is matched as a byte prefix
+and the same prefixes carry the corresponding *reads*; only the
+payload length distinguishes them. They are gated on the
+`CommandSpec` instead, exactly like the settings write:
+
+| Wire | Command | Gate |
+| ---- | ------- | ---- |
+| `@TM:<arg>,<val><csum>` | `setting <name> <value>` | `dynamic_danger` |
+| `@TM:41,<blob><csum>` | `pmode-set-product` | `destructive=True` — §5.6.3 |
+| `@TM:42,<slot><blob><csum>` | `pmode-set-slot` | `destructive=True` — §5.6.4 |
+
+The simulator applies the same refuse-by-default guardrail to the two
+PMode writes via `SimulatorConfig.pmode_writable`.
 
 ### 5.9 Product start (`@TP:`) — the recipe blob (verified live)
 
@@ -1418,10 +1553,16 @@ breaks both halves of the test-suite simultaneously.
   cleanly, but issuing `@TS:01` and then disconnecting leaves the
   display locked until power cycle.
 * `@TM:42` returning data on a machine that *does* expose programmable
-  slots has not been observed live — the S8 EB / EF1091 reports a
-  slot count via `@TM:50` but answers `@tm:C2` for every index. A
-  TT237W variant with a populated `<PROGRAMMODE>` XML section is
-  needed to validate the configured-slot decode path.
+  slots has still not been observed live — the S8 EB / EF1091 reports
+  a slot count via `@TM:50` but answers `@tm:C2` for every index. The
+  configured-slot decode path is now **covered by simulation** (the
+  simulator serves populated slots with real checksums, and
+  `tests/test_pmode.py` round-trips a slot write through it), but it
+  remains unobserved on hardware. Same for the `@TM:41` / `@TM:42`
+  **writes** in §5.6.3 / §5.6.4: APK-derived, simulator-verified,
+  never sent to a machine. A machine whose XML carries
+  `Productprogramming="true"` (20 of the 89 bundled profiles, e.g.
+  EF1143 / EF529) is what's needed to confirm them.
 * `@TV:` decoding (§5.10) is APK-derived and verified only against the
   simulator plus the two live observations recorded in §5.9. Wanted
   from real hardware: a full raw capture of a brew (to pin the frame

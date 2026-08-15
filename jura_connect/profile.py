@@ -9,7 +9,7 @@ differ meaningfully across machines — e.g. on the EF536 (legacy S8)
 lives at ``0x31``. Hard-coding any single map is wrong.
 
 This module loads the XMLs lazily, parses the relevant sections
-(``ALERTS``, ``PRODUCTS``, optional ``PROGRAMMODE``) into a
+(``ALERTS``, ``PRODUCTS``, ``MACHINESETTINGS``) into a
 :class:`MachineProfile`, and offers lookup helpers — including a
 mapping from a machine's article-number (read from the discovery
 reply) to the matching EF code via the bundled ``JOE_MACHINES.TXT``.
@@ -281,6 +281,15 @@ class SettingsBank:
 #: silently ignored.
 RECIPE_BLOB_BYTES = 16
 
+#: Total length of the PMode (programmable-recipe) product blob in
+#: bytes. Derived from the J.O.E. APK's ``AppProduct.d()``, which
+#: allocates exactly 17 slots and fills byte ``F-1`` for every
+#: ``Argument="F<n>"`` — so ``F17`` (grinder freeness) lands on the
+#: last byte. The ``@TP:`` start blob is the same layout truncated to
+#: 16 (or 17, on machines with F17) bytes. **APK-derived, never sent
+#: to a real machine.**
+PMODE_BLOB_BYTES = 17
+
 #: Blob byte index that must always be ``0x01`` for the machine to
 #: accept and brew the recipe. Observed constant across every
 #: hardware-verified vector (S8 EB cafe_barista, E6 espresso, E6
@@ -353,6 +362,12 @@ class ProductParam:
     maximum: int | None
     step: int | None
     items: tuple[SettingItem, ...]  # TEMPERATURE only
+    # The XML ``PModeAdjust`` attribute: False marks a parameter the
+    # machine will not let you change through the programmable-recipe
+    # interface (J.O.E. hides the slider). ``None`` means the attribute
+    # is absent, i.e. unconstrained. Only five bundled profiles set it.
+    # See :meth:`ProductDef.build_pmode_hex`.
+    pmode_adjust: bool | None = None
 
     @property
     def offset(self) -> int:
@@ -428,6 +443,10 @@ class ProductDef:
     # in the catalogue (the machine still reports counters for them) but
     # a UI should not offer them as brewable.
     active: bool = True
+    # The XML ``ProductSettings`` attribute. False means the machine
+    # does not expose this product in the product-programming (PMode)
+    # UI at all — J.O.E. never sends a ``@TM:41`` for it.
+    product_settings: bool = True
 
     def param(self, kind: str) -> ProductParam | None:
         """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
@@ -512,6 +531,69 @@ class ProductDef:
             )
         return "".join(blob)
 
+    def build_pmode_hex(self, overrides: dict[str, int | str] | None = None) -> str:
+        """Build the 17-byte PMode product blob for this product.
+
+        **APK-derived, hardware-untested.** Ported from the J.O.E.
+        app's ``ch.toptronic.joe.model.product.AppProduct.d()``:
+
+        * a 17-byte array pre-filled with ``0x00``;
+        * byte ``F-1`` for every ``Argument="F<n>"`` parameter, using
+          the same units and 5 ml tick encoding as
+          :meth:`build_recipe_hex` (``ProductArgument.b()`` in the APK
+          selects exactly the F4 / F10 / ``Text="94"`` parameters our
+          ``_ML_TICK_KINDS`` covers);
+        * byte 0 overwritten with the product code, last.
+
+        Two deliberate differences from :meth:`build_recipe_hex`:
+
+        * the blob is 17 bytes, not 16 — ``F17`` (grinder freeness)
+          needs byte 16, and ``AppProduct.d()`` always allocates it;
+        * byte 8 is **not** forced to ``0x01``. That "recipe valid"
+          byte belongs to the ``@TP:`` start command (``AppProduct.c()``
+          sets it after calling ``d()``); the PMode write sends the
+          raw parameter blob.
+
+        ``overrides`` works exactly as for :meth:`build_recipe_hex`.
+        A parameter the XML marks ``PModeAdjust="false"`` cannot be
+        overridden — J.O.E. hides its slider in the product-programming
+        UI, so a value written there would at best be ignored. Its XML
+        default still occupies its byte.
+        """
+        overrides = dict(overrides or {})
+        blob = ["00"] * PMODE_BLOB_BYTES
+        for p in self.params:
+            if not 0 < p.offset < PMODE_BLOB_BYTES:
+                raise ValueError(
+                    f"{self.name}: parameter {p.kind} has offset {p.offset} "
+                    f"outside the {PMODE_BLOB_BYTES}-byte pmode blob"
+                )
+            if p.kind in overrides and p.pmode_adjust is False:
+                raise ValueError(
+                    f"{self.name}: parameter {p.kind!r} is marked "
+                    f'PModeAdjust="false" in this machine\'s XML and cannot '
+                    f"be changed through the programmable-recipe interface."
+                )
+            value = overrides.pop(p.kind, p.default)
+            if value is None:
+                if p.kind in _ML_TICK_KINDS:
+                    raise ValueError(
+                        f"{self.name}: water-amount parameter {p.kind!r} has no "
+                        f"value and no XML default; refusing to store a recipe "
+                        f"whose byte would be 0x00 (= no water). Pass an "
+                        f"explicit amount."
+                    )
+                continue
+            blob[p.offset] = f"{p.encode(value):02X}"
+        if overrides:
+            known = ", ".join(p.kind for p in self.params) or "(none)"
+            raise ValueError(
+                f"{self.name}: unknown recipe parameter(s) "
+                f"{', '.join(sorted(overrides))}. This product accepts: {known}"
+            )
+        blob[0] = f"{self.code:02X}"
+        return "".join(blob)
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MachineProfile:
@@ -526,7 +608,11 @@ class MachineProfile:
     alerts: tuple[AlertDef, ...]
     products: tuple[ProductDef, ...]
     settings: tuple[SettingDef, ...]
-    has_pmode: bool  # whether the XML carries a PROGRAMMODE section
+    # Whether this machine exposes the programmable-recipe ("PMode")
+    # interface at all. See :func:`_parse_programmode` — the XML says
+    # so on <MACHINESETTINGS Productprogramming="…">, not via a
+    # <PROGRAMMODE> element (no bundled XML has one).
+    has_pmode: bool
     # Bank commands the XML declares under <STATISTIC><PRODUCTCOUNTER>,
     # in document order, e.g. ("@TR:32", "@TR:33"). Every machine
     # declares "@TR:32"; a subset also declares overflow / special /
@@ -554,6 +640,21 @@ class MachineProfile:
     # XML carries one (57 of the 89 bundled profiles). See
     # :class:`SettingsBank` and docs/PROTOCOL.md §5.7.
     settings_bank: SettingsBank | None = None
+
+    # --- programmable-recipe (PMode) declarations ---------------------
+    # ``<MACHINESETTINGS Productprogramming="true|false">``: the
+    # machine's own statement about whether it accepts ``@TM:41`` /
+    # ``@TM:42`` writes. 20 of the 89 bundled profiles say true;
+    # EF1091 (S8 EB) says false, which is why it answers ``@tm:C2``.
+    product_programming: bool = False
+    # ``<MACHINESETTINGS NumberOfSlotsForProductProgramming="6">``, when
+    # declared (5 profiles). ``None`` = not declared; ask the machine
+    # via ``@TM:50`` instead.
+    pmode_slot_count: int | None = None
+    # ``<MACHINEMANIFEST><CAPABILITIES IntakeF18="true"/>``. Needed by
+    # the ``@TM:42`` slot write: J.O.E. appends six zero bytes to the
+    # blob on IntakeF18 machines even when the product has no F17.
+    intake_f18: bool = False
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -658,10 +759,17 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 raw_name=raw_name,
                 params=_parse_product_params(product),
                 active=active,
+                product_settings=_xml_bool(
+                    product.get("ProductSettings"), default=True
+                ),
             )
         )
 
-    has_pmode = root.find(".//{*}PROGRAMMODE") is not None
+    product_programming, pmode_slot_count = _parse_programmode(root)
+    capabilities = root.find(".//{*}MACHINEMANIFEST/{*}CAPABILITIES")
+    intake_f18 = capabilities is not None and _xml_bool(
+        capabilities.get("IntakeF18"), default=False
+    )
 
     counter_banks = tuple(
         command
@@ -688,13 +796,16 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         alerts=tuple(alerts),
         products=tuple(products),
         settings=settings,
-        has_pmode=has_pmode,
+        has_pmode=product_programming,
         counter_banks=counter_banks,
         daily_counter_banks=daily_counter_banks,
         daily_counter_reset=daily_counter_reset,
         maintenance_counter_fields=_bank_fields(root, MAINTENANCE_COUNTER_BANK),
         maintenance_percent_fields=_bank_fields(root, MAINTENANCE_PERCENT_BANK),
         settings_bank=settings_bank,
+        product_programming=product_programming,
+        pmode_slot_count=pmode_slot_count,
+        intake_f18=intake_f18,
     )
 
 
@@ -717,6 +828,49 @@ def _bank_fields(root: ET.Element, command: str) -> tuple[str, ...]:
             if (kind := (item.get("Type") or "").strip())
         )
     return ()
+
+
+def _xml_bool(raw: str | None, *, default: bool) -> bool:
+    """XML boolean attribute, parsed the way ``Boolean.parseBoolean``
+    does in the APK: only the literal string ``"true"`` (any case) is
+    true, anything else — including garbage — is false."""
+    if raw is None:
+        return default
+    return raw.strip().lower() == "true"
+
+
+def _parse_programmode(root: ET.Element) -> tuple[bool, int | None]:
+    """Parse the machine's programmable-recipe (PMode) declarations.
+
+    There is **no ``<PROGRAMMODE>`` element** in Jura's schema — none
+    of the 89 bundled XMLs (nor the documented ``EF_MASTER`` /
+    ``EF0000`` templates) has one. The machine declares product
+    programming on ``<MACHINESETTINGS>`` instead, exactly the two
+    attributes the APK's ``XMLParser`` reads into
+    ``MachineSettings.productProgramming`` / ``.numberOfSlots``:
+
+    ```xml
+    <MACHINESETTINGS Productprogramming="false"
+                     NumberOfSlotsForProductProgramming="6">
+    ```
+
+    ``Productprogramming`` appears on 57 profiles (20 true), the slot
+    count on 5. A ``<PROGRAMMODE>`` element is still honoured as
+    "supports pmode" so a future firmware XML that grows one does not
+    silently regress.
+
+    Returns ``(product_programming, declared_slot_count)``.
+    """
+    supported = root.find(".//{*}PROGRAMMODE") is not None
+    slot_count: int | None = None
+    for el in root.findall(".//{*}MACHINESETTINGS"):
+        raw = el.get("Productprogramming")
+        if raw is not None:
+            supported = supported or _xml_bool(raw, default=False)
+        declared = _int_attr(el, "NumberOfSlotsForProductProgramming")
+        if declared is not None:
+            slot_count = declared
+    return supported, slot_count
 
 
 def _int_attr(el: ET.Element, name: str) -> int | None:
@@ -784,6 +938,11 @@ def _parse_product_params(product: ET.Element) -> tuple[ProductParam, ...]:
                 maximum=_int_attr(el, "Max"),
                 step=_int_attr(el, "Step"),
                 items=tuple(items),
+                pmode_adjust=(
+                    None
+                    if el.get("PModeAdjust") is None
+                    else _xml_bool(el.get("PModeAdjust"), default=False)
+                ),
             )
         )
     return tuple(params)

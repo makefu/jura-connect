@@ -42,7 +42,7 @@ import uuid
 from collections.abc import Callable, Iterator
 
 from . import profile, protocol
-from .profile import MachineProfile, ProductDef, SettingDef
+from .profile import PMODE_BLOB_BYTES, MachineProfile, ProductDef, SettingDef
 from .progress import ProductProgress, is_progress_frame
 
 log = logging.getLogger(__name__)
@@ -718,7 +718,10 @@ class JuraClient:
         resulting :class:`ProgramModeSlots` carries an empty
         ``slots`` tuple in that case.
         """
-        num_slots_reply = self.request("@TM:50", match=r"^@tm:50", timeout=timeout)
+        # Matched loosely: the machine may answer the ``D0`` rejection
+        # token instead of ``50,<counts>`` (``PModeNumSlotReadParser``),
+        # and a strict ``^@tm:50`` matcher would time out on it.
+        num_slots_reply = self.request("@TM:50", match=r"(?i)^@tm", timeout=timeout)
         num_slots = _parse_pmode_num_slots(num_slots_reply)
         entries: list[PModeSlot] = []
         unsupported: list[int] = []
@@ -753,6 +756,200 @@ class JuraClient:
             slots=tuple(entries),
             unsupported=tuple(unsupported),
         )
+
+    # -- PMode product / slot writes (APK-derived, hardware-untested) --
+    #
+    # Everything below mirrors the J.O.E. APK; no Jura machine that
+    # actually exposes PMode was available while it was written, so
+    # treat the wire formats as unverified. See docs/PROTOCOL.md §5.6.
+
+    def read_pmode_product(
+        self, product: "str | int", *, timeout: float = 6.0
+    ) -> "PModeProduct | None":
+        """Read one product's stored PMode settings (``@TM:41,<code>``).
+
+        Mirrors ``WifiCommandPModeProductRead`` +
+        ``PModeProductReadParser``:
+
+        ```
+        client → @TM:41,<product code hex>
+        dongle → @tm:41,<F1..Fn hex><checksum>     (settings follow)
+        dongle → @tm:C1                            (product programming
+                                                    not supported)
+        ```
+
+        Returns ``None`` for the ``C1`` rejection token — the APK logs
+        "Machine does not support Product Programming" and yields null
+        there — and raises :class:`ValueError` when the checksum or the
+        echoed product code doesn't match, so a corrupt reply can never
+        pass for a stored recipe.
+        """
+        definition = self._pmode_product_def(product)
+        code = definition.code if definition is not None else _pmode_code(product)
+        reply = self.request(f"@TM:41,{code:02X}", match=r"(?i)^@tm", timeout=timeout)
+        return _parse_pmode_product(code, reply, definition)
+
+    def write_pmode_product(
+        self,
+        product: "str | int",
+        overrides: "dict[str, int | str] | None" = None,
+        *,
+        timeout: float = 6.0,
+    ) -> str:
+        """Overwrite a product's stored PMode settings (``@TM:41``).
+
+        **Destructive and APK-derived.** Mirrors
+        ``WifiCommandPModeProductWrite``, whose body is
+        ``"41," + AppProduct.d()`` followed by the same
+        ``ByteOperations.d`` checksum the settings write uses::
+
+            client → @TS:01
+            client → @TM:41,<34 hex blob><checksum>
+            dongle → @tm:41            (accepted)
+            dongle → @tm:C1 / @tm:00   (not supported / rejected)
+            client → @TS:00
+
+        ``product`` is a profile product name, a 2-hex product code, or
+        — the escape hatch, mirroring :meth:`~jura_connect.commands`'
+        ``brew`` — a full 34-hex blob sent verbatim, which needs no
+        profile. ``overrides`` are validated against the machine XML
+        by :meth:`~jura_connect.profile.ProductDef.build_pmode_hex`
+        before anything reaches the wire.
+
+        Returns the dongle's reply. Raises :class:`ValueError` on the
+        ``C1`` / ``00`` rejection tokens; ``@an:error`` is returned
+        verbatim (matching :meth:`write_setting`).
+        """
+        blob = self._pmode_blob(product, overrides)
+        return self._pmode_write(f"41,{blob}", timeout=timeout)
+
+    def write_pmode_slot(
+        self,
+        slot: int,
+        product: "str | int",
+        overrides: "dict[str, int | str] | None" = None,
+        *,
+        timeout: float = 6.0,
+    ) -> str:
+        """Assign a product (with settings) to a PMode slot (``@TM:42``).
+
+        **Destructive and APK-derived.** Mirrors
+        ``CoffeeMachineAdapterBle2.sendPmodeProductCommandSlot``:
+
+        * the body is ``"42," + <slot hex> + <first 14 bytes of the
+          product blob> + <tail>``, plus the ``ByteOperations.d``
+          checksum;
+        * the tail comes from
+          ``WifiCommandPModeSlotProductWrite.Companion.a``: six bytes
+          ``00 <F17> 00 00 00 00`` when the product has a grinder-
+          freeness parameter, six zero bytes when it does not but the
+          machine declares ``IntakeF18``, and **nothing at all**
+          otherwise (a 14-byte body);
+        * the reply matcher is ``@tm:42,<slot>.*``, with ``@tm:C2``
+          meaning "product code, slot, or function is not supported by
+          machine".
+
+        Note the F17 byte lands at blob index 15 here, not 16 as in
+        :meth:`~jura_connect.profile.ProductDef.build_pmode_hex` — the
+        APK splices ``getValue("F17")`` into the truncated head rather
+        than sending the full 17-byte blob. That asymmetry is copied
+        deliberately; it is what J.O.E. puts on the wire.
+        """
+        if not 0 <= slot <= 0xFF:
+            raise ValueError(f"pmode slot {slot} outside 0..255")
+        blob = self._pmode_blob(product, overrides)
+        tail = self._pmode_tail(blob, self._pmode_product_def(product))
+        body = f"42,{slot:02X}{blob[:_PMODE_SLOT_HEAD_HEX]}{tail}"
+        return self._pmode_write(body, timeout=timeout)
+
+    # -- PMode helpers -------------------------------------------------
+
+    def _pmode_product_def(self, product: "str | int") -> "ProductDef | None":
+        """Resolve ``product`` against the profile, or ``None`` when it
+        is a verbatim blob / there is no profile to resolve against."""
+        if isinstance(product, str) and _is_pmode_blob(product):
+            return None
+        if self.profile is None:
+            if isinstance(product, int):
+                return None
+            raise ValueError(
+                "pmode: product names and codes need a machine profile. "
+                "Pair with --machine-type <EF_code>, or pass a full "
+                f"{PMODE_BLOB_BYTES * 2}-hex blob as an escape hatch."
+            )
+        return self.resolve_product(product)
+
+    def _pmode_blob(
+        self, product: "str | int", overrides: "dict[str, int | str] | None"
+    ) -> str:
+        """Build (or accept verbatim) the 17-byte PMode product blob."""
+        if isinstance(product, str) and _is_pmode_blob(product):
+            if overrides:
+                raise ValueError(
+                    "pmode: parameter overrides cannot be combined with a "
+                    "verbatim blob — bake the values into the blob instead."
+                )
+            return product.upper()
+        definition = self._pmode_product_def(product)
+        if definition is None:
+            raise ValueError(
+                "pmode: a machine profile is required to build the blob for "
+                f"{product!r}; pass a full {PMODE_BLOB_BYTES * 2}-hex blob "
+                "instead."
+            )
+        if not definition.product_settings:
+            raise ValueError(
+                f'pmode: {definition.name!r} is marked ProductSettings="false" '
+                "in this machine's XML — it is not programmable."
+            )
+        return definition.build_pmode_hex(overrides)
+
+    def _pmode_tail(self, blob: str, definition: "ProductDef | None") -> str:
+        """The six-byte tail (or nothing) the slot write appends.
+
+        ``WifiCommandPModeSlotProductWrite.Companion.a`` branches on
+        ``AppProduct.e()`` — "does this product *declare* an F17
+        parameter" — not on the value. With a verbatim blob there is no
+        product definition to ask, so a non-zero byte 16 stands in
+        (grinder-freeness catalogues start at ``01``).
+        """
+        freeness = blob[_PMODE_FREENESS_OFFSET * 2 :][:2]
+        has_f17 = (
+            freeness != "00"
+            if definition is None
+            else definition.param(_KIND_GRINDER_FREENESS) is not None
+        )
+        if has_f17:
+            return f"00{freeness}00000000"
+        if self.profile is not None and self.profile.intake_f18:
+            return "000000000000"
+        return ""
+
+    def _pmode_write(self, body: str, *, timeout: float) -> str:
+        """Send one checksummed PMode write inside the @TS lock wrapper."""
+        cmd = f"@TM:{body}{_settings_checksum(body)}"
+        self.lock_screen()
+        try:
+            reply = self.request(cmd, match=r"(?i)^@(tm|an)", timeout=timeout)
+        finally:
+            try:
+                self.unlock_screen()
+            except Exception:  # noqa: BLE001
+                # Best-effort unlock; a failure here must not mask the
+                # original write error.
+                pass
+        if reply.lower().startswith("@an:error"):
+            return reply
+        token = ""
+        if reply.lower().startswith("@tm:"):
+            token = reply[len("@tm:") :].split(",", 1)[0].strip().upper()
+        if token in _PMODE_NOT_SUPPORTED:
+            raise ValueError(
+                f"pmode write {body.split(',', 1)[0]}: machine answered "
+                f"{reply!r} — {_PMODE_NOT_SUPPORTED[token]}. Nothing was "
+                "stored."
+            )
+        return reply
 
     def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:
         """Read one machine setting via ``@TM:<p_argument>``.
@@ -2249,6 +2446,150 @@ def counter_bank_spec(bank: str) -> CounterBankSpec:
 # and "pmode present but slot N is empty".
 
 
+#: Rejection tokens the PMode commands answer with instead of data.
+#: Straight out of the APK's parsers: ``C1`` =
+#: ``PModeProductReadParser`` "Machine does not support Product
+#: Programming", ``C2`` = ``PModeSlotProductReadParser`` "Product code,
+#: slot, or function is not supported by machine", ``D0`` =
+#: ``PModeNumSlotReadParser``'s no-slots answer. ``00`` is the dongle's
+#: generic "write rejected" echo — the same one a settings write with a
+#: missing CRLF gets. None of these is a success.
+_PMODE_NOT_SUPPORTED: dict[str, str] = {
+    "C1": "product programming is not supported by this machine",
+    "C2": "the product code, slot, or function is not supported by this machine",
+    "D0": "the machine reports no programmable-recipe slots",
+    "00": "the write was rejected",
+}
+
+#: Number of hex chars of the product blob the ``@TM:42`` slot write
+#: keeps: ``AppProduct.d().substring(0, 28)`` = the first 14 bytes.
+_PMODE_SLOT_HEAD_HEX = 28
+
+#: Blob byte holding grinder freeness (``Argument="F17"`` → byte 16).
+_PMODE_FREENESS_OFFSET = PMODE_BLOB_BYTES - 1
+
+#: :attr:`~jura_connect.profile.ProductParam.kind` of the F17 parameter
+#: (the XML element is ``<GRINDER_FREENESS Argument="F17" …>``).
+_KIND_GRINDER_FREENESS = "grinder_freeness"
+
+
+def _is_pmode_blob(value: str) -> bool:
+    """True for a verbatim 17-byte PMode blob (the escape hatch)."""
+    return len(value) == PMODE_BLOB_BYTES * 2 and _HEX_ONLY.fullmatch(value) is not None
+
+
+_HEX_ONLY = re.compile(r"[0-9A-Fa-f]+")
+
+
+def _pmode_code(product: str | int) -> int:
+    """Product code from an int, a 2-hex string, or a verbatim blob.
+
+    Used when there is no profile to resolve a name against; byte 0 of
+    a blob *is* the product code (``AppProduct.d()`` writes it last).
+    """
+    if isinstance(product, int):
+        return product
+    if _is_pmode_blob(product):
+        product = product[:2]
+    try:
+        return int(product, 16)
+    except ValueError as exc:
+        raise ValueError(
+            f"pmode: {product!r} is not a 2-hex product code and no machine "
+            "profile is loaded to resolve it by name."
+        ) from exc
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PModeProduct:
+    """One product's stored PMode settings, from ``@TM:41,<code>``.
+
+    ``arguments`` is the APK's view of the payload: byte *i* becomes
+    ``F<i+1>``, so ``F1`` is the product code, ``F4`` the water amount
+    and ``F17`` the grinder freeness. ``blob`` is the same payload as
+    one hex string, directly comparable with
+    :meth:`~jura_connect.profile.ProductDef.build_pmode_hex`.
+    """
+
+    product_code: int
+    blob: str
+    arguments: dict[str, str]
+    name: str | None = None  # profile product name, when one is loaded
+
+    def format(self) -> str:
+        label = self.name or f"0x{self.product_code:02X}"
+        lines = [f"pmode settings for {label}:", f"  blob: {self.blob}"]
+        for key, value in self.arguments.items():
+            if key == "F1":
+                continue
+            lines.append(f"  {key}: {value}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "product_code": f"{self.product_code:02X}",
+            "name": self.name,
+            "blob": self.blob,
+            "arguments": dict(self.arguments),
+        }
+
+
+def _pmode_arguments(payload: str) -> dict[str, str]:
+    """Split a PMode payload into the APK's ``F<n>`` argument map."""
+    return {
+        f"F{i + 1}": payload[i * 2 : i * 2 + 2].upper()
+        for i in range(len(payload) // 2)
+    }
+
+
+def _pmode_strip_checksum(head: str, body: str) -> str | None:
+    """Drop ``body``'s trailing checksum byte if it verifies.
+
+    ``head`` is the command echo the checksum covers together with the
+    payload (``"41"`` or ``"42"``); the APK checksums
+    ``"<head>,<payload>"``. Returns ``None`` when the checksum does not
+    match, so callers can refuse the reply rather than decode noise.
+    """
+    if len(body) < 4 or len(body) % 2:
+        return None
+    payload, csum = body[:-2], body[-2:]
+    if _settings_checksum(f"{head},{payload}") != csum.upper():
+        return None
+    return payload.upper()
+
+
+def _parse_pmode_product(
+    code: int, reply: str, definition: ProductDef | None
+) -> PModeProduct | None:
+    """Parse the reply to ``@TM:41,<code>`` (``PModeProductReadParser``)."""
+    text = reply.strip()
+    if text.lower().startswith("@tm:"):
+        text = text[4:]
+    head = text[:2].upper()
+    if head in _PMODE_NOT_SUPPORTED:
+        return None
+    if head != "41":
+        return None
+    payload = _pmode_strip_checksum("41", text[2:].lstrip(","))
+    if payload is None:
+        raise ValueError(
+            f"pmode product read for 0x{code:02X}: checksum mismatch in {reply!r}"
+        )
+    arguments = _pmode_arguments(payload)
+    if arguments.get("F1") != f"{code:02X}":
+        raise ValueError(
+            f"pmode product read for 0x{code:02X}: reply carries product "
+            f"code {arguments.get('F1')!r}; refusing to attribute another "
+            f"product's recipe to it (reply was {reply!r})"
+        )
+    return PModeProduct(
+        product_code=code,
+        blob=payload,
+        arguments=arguments,
+        name=None if definition is None else definition.name,
+    )
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class PModeSlot:
     """One configured slot from ``@TM:42,<slot>``."""
@@ -2314,6 +2655,9 @@ def _parse_pmode_num_slots(reply: str) -> int:
     we don't currently verify (the APK does but the algorithm is opaque
     and not needed for correctness — wrong counts surface as
     unsupported-slot replies below).
+
+    ``@tm:D0`` is the parser's "no slots" rejection token and decodes
+    to zero, as does any other head we don't recognise.
     """
     text = reply.strip()
     if text.lower().startswith("@tm:"):
@@ -2342,15 +2686,19 @@ def _parse_pmode_num_slots(reply: str) -> int:
 def _parse_pmode_slot(slot: int, reply: str) -> PModeSlot | None:
     """Parse the reply to ``@TM:42,<slot>``.
 
-    Wire format (success path): ``@tm:42,<slot_hex>,<product_code_hex>
-    [<per-product arguments>]<checksum>``. We strip ``@tm:``, the
-    ``42`` prefix, and the echoed slot byte, then read the next byte
-    as the configured product code.
+    Wire format (success path, per ``PModeSlotProductReadParser``):
+    ``@tm:42,<slot_hex><product_code_hex><arguments><checksum>``. We
+    strip ``@tm:``, the ``42`` prefix and the echoed slot byte; the
+    remainder is the product code followed by the ``F2..Fn`` argument
+    bytes. The trailing checksum byte covers ``"42,<slot><payload>"``
+    and is dropped from :attr:`PModeSlot.raw_payload` once verified.
 
-    Returns ``None`` when the machine answered with the ``C2`` magic
-    prefix that the APK's ``PModeSlotProductReadParser`` flags as
-    "product code, slot, or function is not supported by machine",
-    or when the reply is otherwise malformed.
+    Returns ``None`` when the machine answered with a rejection token
+    (``C2`` — "product code, slot, or function is not supported by
+    machine" in the APK — or one of its siblings), and when the reply
+    is otherwise malformed. A reply whose checksum does not verify
+    keeps its trailing bytes rather than being silently truncated;
+    :attr:`ProgramModeSlots` callers see the raw hex either way.
     """
     text = reply.strip()
     if text.lower().startswith("@tm:"):
@@ -2358,23 +2706,31 @@ def _parse_pmode_slot(slot: int, reply: str) -> PModeSlot | None:
     if not text:
         return None
     head = text[:2].upper()
-    if head == "C2":
+    if head in _PMODE_NOT_SUPPORTED:
         return None
     if head != "42":
         return None
     # Drop the "42" prefix and any leading comma.
     body = text[2:].lstrip(",")
-    # Body starts with the slot byte (echoed back). Strip it.
-    if len(body) < 2:
+    # Body starts with the slot byte (echoed back). Strip it, but keep
+    # it for the checksum, which the APK computes over "42,<body>".
+    if len(body) < 4:
         return None
-    body = body[2:].lstrip(",")
-    if len(body) < 2:
+    verified = _pmode_strip_checksum("42", body)
+    payload = (verified or body)[2:].lstrip(",")
+    if len(payload) < 2:
         return None
     try:
-        product_code = int(body[:2], 16)
+        product_code = int(payload[:2], 16)
     except ValueError:
         return None
-    return PModeSlot(index=slot, product_code=product_code, raw_payload=body)
+    if verified is None:
+        log.warning(
+            "pmode slot %02X: checksum mismatch in %r; payload kept verbatim",
+            slot,
+            reply,
+        )
+    return PModeSlot(index=slot, product_code=product_code, raw_payload=payload)
 
 
 # --------------------------------------------------------------------- #
