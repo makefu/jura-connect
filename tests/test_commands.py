@@ -480,6 +480,11 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("set-ssid", ["mywifi"]),
     ("set-password", ["s3cret"]),
     ("set-name", ["Kaffeebert"]),
+    # A full 34-hex PMode blob reaches the wire without a profile, the
+    # same escape hatch `brew` has. See tests/test_pmode.py for the
+    # profile-driven paths.
+    ("pmode-set-product", ["0202080900000200000000000000000004"]),
+    ("pmode-set-slot", ["3", "0202080900000200000000000000000004"]),
 ]
 
 
