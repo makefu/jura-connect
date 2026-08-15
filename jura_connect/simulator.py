@@ -29,7 +29,10 @@ The simulator models:
 It deliberately refuses to model write/process commands (``@TG:24``
 cleaning, ``@TG:25`` descale, etc.) -- it answers ``@an:error`` so
 tests that accidentally trigger those during development surface a
-clear failure instead of silently "working".
+clear failure instead of silently "working". ``@TP:`` (start product)
+is refused the same way *unless* a test opts in with
+``SimulatorConfig(allow_brew=True)``, which turns on the full
+start -> ``@TB`` -> ``@TV:`` progress stream -> ``@TV:3E`` chain.
 """
 
 from __future__ import annotations
@@ -46,6 +49,13 @@ from collections.abc import Iterator
 from . import protocol
 from .client import _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
+from .profile import RECIPE_BLOB_BYTES
+from .progress import (
+    BYPASS_MARKER_INDEX,
+    PERCENT_INDEX,
+    PRODUCT_ARGUMENTS,
+    ProgressState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +160,20 @@ class SimulatorConfig:
     # them over WiFi.
     pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
 
+    # -- brewing ------------------------------------------------------
+    # Off by default: @TP: is a destructive prefix and the simulator's
+    # job is to make an accidental brew in a test scream (@an:error).
+    # Tests that want the whole start -> progress -> done chain opt in.
+    allow_brew: bool = False
+    # How many @TV:41 progress frames a modelled brew emits before the
+    # @TV:3E (ENJOY) completion frame.
+    brew_progress_steps: int = 4
+    # Delay between the frames of a modelled brew. 0 keeps tests fast;
+    # raise it to watch the stream at human speed.
+    brew_progress_interval: float = 0.0
+    # Target water ticks reported as the maximum in the progress frames.
+    brew_target_ticks: int = 0x1E
+
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
     # so the test-suite can read/write the same arguments the J.O.E.
@@ -165,6 +189,52 @@ class SimulatorConfig:
             "62": "01",  # frother instructions = On
         }
     )
+
+
+def _blob_is_accepted(blob: str) -> bool:
+    """Mirror the machine's accept/ignore rule for a ``@TP:`` blob.
+
+    PROTOCOL.md §5.9, live-verified on an S8 EB: only the 16-byte,
+    ``0x00``-padded blob whose byte 8 is ``0x01`` actually brews. A bare
+    product code or the old FF-padded layout is ACKed with ``@tp:00``
+    and then silently ignored — no ``@TB``, no ``@TV:``.
+    """
+    if len(blob) != RECIPE_BLOB_BYTES * 2:
+        return False
+    try:
+        data = bytes.fromhex(blob)
+    except ValueError:
+        return False
+    return data[8] == 0x01
+
+
+def _brew_frames(blob: str, config: SimulatorConfig) -> list[str]:
+    """The unsolicited frames a real dongle pushes after an accepted brew.
+
+    Models what PROTOCOL.md §5.9 records from a live S8 EB: a ``@TB``
+    brew-start marker, a run of ``@TV:41<product>…`` progress frames
+    with a rising tick count and percentage, then ``@TV:3E<product>``
+    (``ENJOY``) when the cup is done. The frame *layout* is APK-derived
+    (§5.10): a 16-byte payload whose 14-byte value window carries the
+    current/target water ticks at slots 2/3 and the percentage at slot
+    12. Slot 6 is ``0xFF`` so state ``41`` reads as ``HOTWATER_VOLUME``
+    rather than ``BYPASS_WATER_VOLUME``.
+    """
+    product = blob[:2].upper() if len(blob) >= 2 else "00"
+    frames = ["@TB"]
+    steps = max(1, config.brew_progress_steps)
+    target = config.brew_target_ticks & 0xFF
+    for step in range(1, steps + 1):
+        window = bytearray(len(PRODUCT_ARGUMENTS))
+        window[2] = round(target * step / steps)
+        window[3] = target
+        window[BYPASS_MARKER_INDEX] = 0xFF
+        window[PERCENT_INDEX] = round(100 * step / steps)
+        head = f"{ProgressState.HOTWATER_VOLUME:02X}{product}"
+        frames.append(f"@TV:{head}{window.hex().upper()}")
+    done = bytearray(len(PRODUCT_ARGUMENTS))
+    frames.append(f"@TV:{ProgressState.ENJOY:02X}{product}{done.hex().upper()}")
+    return frames
 
 
 class Simulator:
@@ -186,6 +256,9 @@ class Simulator:
         # Public for tests to inspect:
         self.sent_commands: list[bytes] = []
         self.handshakes: list[tuple[str, str, str]] = []  # (pin, conn_id, hash)
+        # Frames queued by a command handler to be pushed after its
+        # reply (the brew progress stream).
+        self._queued: list[str] = []
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -285,6 +358,7 @@ class Simulator:
             if reply == "@@CLOSE":
                 return
             self._send(conn, reply)
+            self._drain_queue(conn)
 
     # -- handshake -----------------------------------------------------
     def _handle_handshake(self, cmd: str) -> str:
@@ -323,6 +397,16 @@ class Simulator:
     # -- read commands -------------------------------------------------
     def _handle_command(self, cmd: str) -> str | None:
         b = cmd.encode("ascii")
+        if cmd.startswith("@TP:") and self.config.allow_brew:
+            # Opt-in only. An accepted blob is ACKed with a bare "@tp"
+            # and followed by the frames the real dongle pushes: @TB,
+            # then the @TV: progress stream, then @TV:3E (ENJOY). A blob
+            # the machine would ignore gets "@tp:00" and nothing else.
+            blob = cmd[len("@TP:") :].strip()
+            if not _blob_is_accepted(blob):
+                return "@tp:00"
+            self._queued.extend(_brew_frames(blob, self.config))
+            return "@tp"
         for prefix in DESTRUCTIVE_PREFIXES:
             if b.startswith(prefix):
                 log.warning("simulator: refusing destructive command %r", cmd)
@@ -450,6 +534,15 @@ class Simulator:
             return f"@tr:{cmd[4:6]}00"
         # Unknown -> dongle stays silent
         return None
+
+    # -- queued (unsolicited) frames -----------------------------------
+    def _drain_queue(self, conn: socket.socket) -> None:
+        """Push frames a handler queued behind its reply, in order."""
+        queued, self._queued = self._queued, []
+        for frame in queued:
+            if self.config.brew_progress_interval > 0:
+                time.sleep(self.config.brew_progress_interval)
+            self._send(conn, frame)
 
     # -- status emission -----------------------------------------------
     def _emit_status(self, conn: socket.socket) -> None:

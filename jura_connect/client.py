@@ -43,6 +43,7 @@ from collections.abc import Callable, Iterator
 
 from . import profile, protocol
 from .profile import MachineProfile, ProductDef, SettingDef
+from .progress import ProductProgress, is_progress_frame
 
 log = logging.getLogger(__name__)
 
@@ -242,6 +243,8 @@ class JuraClient:
         self.auth_hash = auth_hash
         self.handshake: HandshakeResult | None = None
         self.status_history: list[str] = []
+        # Progress frames collected by the last brew(follow=True) call.
+        self.last_progress: tuple[ProductProgress, ...] = ()
         # Optional MachineProfile (from jura_connect.profile). When set,
         # status bit names + product names come from the profile's
         # ALERTS / PRODUCTS sections rather than the EF536 baseline.
@@ -425,6 +428,58 @@ class JuraClient:
                     return
             else:
                 yield self.conn.recv_str()
+
+    # -- progress stream -----------------------------------------------
+    def iter_progress(
+        self, *, timeout: float | None = None, until: float | None = None
+    ) -> Iterator[ProductProgress]:
+        """Yield decoded ``@TV:`` progress frames as the machine sends them.
+
+        Built on :meth:`iter_frames`; everything that is not a decodable
+        progress frame is skipped — ``@TF:`` status broadcasts, the
+        ``@TB`` brew-start marker, and the ``@TV:81/82/84``
+        language-download / clock-sync frames. ``@TF:`` frames still land
+        in :attr:`status_history` so nothing is lost.
+
+        ``timeout`` is a duration in seconds from now; ``until`` an
+        absolute :func:`time.monotonic` deadline (``timeout`` wins when
+        both are given). With neither, this blocks until the connection
+        closes. The generator stops when the deadline passes — callers
+        that want to stop on completion should ``break`` on
+        :attr:`ProductProgress.is_complete`.
+        """
+        if timeout is not None:
+            until = time.monotonic() + timeout
+        for frame in self.iter_frames(until=until):
+            if frame.startswith("@TF:"):
+                self.status_history.append(frame)
+                continue
+            if not is_progress_frame(frame):
+                continue
+            yield ProductProgress.parse(frame, self.profile)
+
+    def follow_progress(
+        self,
+        *,
+        timeout: float = 120.0,
+        on_progress: Callable[[ProductProgress], None] | None = None,
+    ) -> list[ProductProgress]:
+        """Collect progress frames until the machine says ``ENJOY``.
+
+        Returns every frame seen, in order, stopping on the ``ENJOY``
+        (``3E``) completion frame or when ``timeout`` seconds elapse —
+        whichever comes first. ``on_progress`` is called with each frame
+        as it arrives, for live UIs that don't want to wait for the
+        list.
+        """
+        collected: list[ProductProgress] = []
+        for update in self.iter_progress(timeout=timeout):
+            collected.append(update)
+            if on_progress is not None:
+                on_progress(update)
+            if update.is_complete:
+                break
+        return collected
 
     # -- structured reads ---------------------------------------------
     def read_maintenance_counter(
@@ -942,6 +997,9 @@ class JuraClient:
         substring: bool = False,
         retry: bool = False,
         timeout: float = 6.0,
+        follow: bool = False,
+        follow_timeout: float = 120.0,
+        on_progress: Callable[[ProductProgress], None] | None = None,
     ) -> str:
         """Start brewing a product (``@TP:<recipe blob>``).
 
@@ -976,7 +1034,15 @@ class JuraClient:
 
         Returns the dongle's reply (``"@tp"`` on accept). The machine
         then emits ``@TB`` (brew start) and ``@TV:`` progress frames,
-        observable via :meth:`iter_frames`.
+        observable via :meth:`iter_frames` / :meth:`iter_progress`.
+
+        ``follow=True`` (off by default, so the call stays a single
+        round-trip unless asked) blocks after an accepted blob and
+        collects the progress stream via :meth:`follow_progress` until
+        the ``ENJOY`` frame or ``follow_timeout`` seconds. The frames
+        land in :attr:`last_progress`; ``on_progress`` sees each one as
+        it arrives. A rejected blob (``@tp:00``) is never followed —
+        the machine sends nothing to follow.
         """
         definition = self.resolve_product(product, substring=substring)
         overrides: dict[str, int | str] = {}
@@ -997,6 +1063,11 @@ class JuraClient:
             # Energy-safe wake-up: the first @TP: only woke the machine;
             # resend now that it is awake.
             reply = self.request(f"@TP:{recipe}", timeout=timeout)
+        self.last_progress = ()
+        if follow and _is_brew_accept(reply):
+            self.last_progress = tuple(
+                self.follow_progress(timeout=follow_timeout, on_progress=on_progress)
+            )
         return reply
 
     @staticmethod

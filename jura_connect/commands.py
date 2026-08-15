@@ -34,6 +34,7 @@ from collections.abc import Callable, Sequence
 from . import profile
 from .client import JuraClient
 from .profile import RECIPE_BLOB_BYTES
+from .progress import ProgressLog
 
 CommandRunner = Callable[["CommandSpec", JuraClient, "tuple[str, ...]", float], object]
 
@@ -292,6 +293,25 @@ def _r_cancel(_spec, client, _args, timeout):
     differ in case and trailing payload.
     """
     return client.request("@TG:FF", match=r"(?i)^@tg", timeout=timeout)
+
+def _r_progress(_spec, client, args, timeout):
+    """Watch the unsolicited ``@TV:`` stream and decode every frame.
+
+    Read-only: it sends nothing, it only listens. Returns as soon as the
+    machine reports ``ENJOY`` (the product is done) or after the watch
+    window elapses, whichever comes first.
+    """
+    seconds = timeout
+    if args:
+        try:
+            seconds = float(args[0])
+        except ValueError as exc:
+            raise CommandError(
+                f"progress: <seconds> must be a number, got {args[0]!r}"
+            ) from exc
+        if seconds <= 0:
+            raise CommandError(f"progress: <seconds> must be > 0, got {args[0]!r}")
+    return ProgressLog(frames=tuple(client.follow_progress(timeout=seconds)))
 
 
 def _r_raw(_spec, client, args, timeout):
@@ -1089,6 +1109,22 @@ _SPECS: tuple[CommandSpec, ...] = (
             "renames the dongle. Persistent across reboots; cosmetic only "
             "but still a write to the device, so behind the gate by default."
         ),
+    ),
+    # ---- read-only (appended) -------------------------------------------
+    CommandSpec(
+        name="progress",
+        description=(
+            "watch the machine's @TV: product-progress stream and decode "
+            "it (read-only; stops on the ENJOY frame or after <seconds>)"
+        ),
+        arguments=(
+            Argument(
+                "seconds",
+                "how long to watch before giving up; defaults to the command timeout",
+                optional=True,
+            ),
+        ),
+        runner=_r_progress,
     ),
 )
 
