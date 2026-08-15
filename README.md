@@ -10,15 +10,59 @@ end-to-end against a **JURA S8 EB** running firmware **TT237W V06.11**
 
 ## Status
 
+53 named commands, 770 tests. The table splits by *how well verified*
+each area is, because that is the thing worth knowing before you point
+this at your machine.
+
+**Verified against physical hardware** (a JURA S8 EB / EF1091 running
+TT237W V06.11, plus an E6 for the brew blob):
+
 | Capability | Status |
 | --- | --- |
 | UDP/51515 broadcast discovery + parser | ✓ ; falls back to TCP-port-sweep on the TT237W firmware which doesn't reply to UDP |
 | Wire framing (`* … \r\n`) and obfuscation cipher | ✓ ; 2 000-input random round-trip + every key value exhaustively tested |
-| storage of authentication codes | ✓ |
-| Read commands: maintenance counters, maintenance %, machine status / alerts, screen lock/unlock | ✓ |
-| Per-machine profiles — 88 bundled XMLs from the J.O.E. APK; alert names + product codes are looked up per `EF_code` so a Cortado on an S8 EB names itself, not `0x2B=2` | ✓ |
-| Brewing by product name — `brew hotwater water=220 temp=high` — with water / strength / temperature / milk overrides validated against the machine XML | ✓ ; the `@TP:` recipe-blob format is verified by physically brewing on a JURA S8 EB (EF1091) and an E6, see §5.9 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
-| Other writes / maintenance processes | available but require extra attention |
+| `@HP:` handshake, pairing (with or without a setup PIN), credential storage | ✓ |
+| Read commands: maintenance counters, maintenance %, machine status / alerts, per-product brew counters, screen lock/unlock | ✓ |
+| Per-machine profiles — 89 bundled XMLs from the J.O.E. APK; alert names + product codes are looked up per `EF_code` so a Cortado on an S8 EB names itself, not `0x2B=2` | ✓ |
+| Machine settings: single-setting read and checksummed write | ✓ |
+| Brewing by product name — `brew hotwater water=220 temp=high` — with water / strength / temperature / bypass overrides validated against the machine XML | ✓ ; the `@TP:` recipe-blob format is verified by physically brewing, see §5.9 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
+
+**Implemented, simulator-verified, never run against hardware** — see
+the warning below. Section numbers refer to
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md):
+
+| Capability | Wire | Doc |
+| --- | --- | --- |
+| Product progress: 87 decoded states, live percentage, `brew(follow=True)` | `@TV:` | §5.10 |
+| Interactive maintenance processes (start, watch, confirm, advance) | `@TG:01` / `@TG:04` / `@TG:10` | §5.11 |
+| Extra counter banks: special, barista, daily + daily reset | `@TR:52/53/34/35/42..45`, `@TF:05` | §5.5 |
+| Batch settings read, live per-product limits | `@TM:00,FC`, `@TM:60` | §5.7 |
+| Programmable-recipe (PMode) writes | `@TM:41` / `@TM:42` | §5.6 |
+| Brew preselections (extra shot, double, powder, cold brew, sweet foam) | `@TP:` mask / overwrites | §5.13 |
+| Coffee timer (scheduled brew) | `@TM:3C` + `@TV:84` | §5.12 |
+| Language download | `@TS:F1` / `@TT:xx` / `@TV:8x` | §5.14 |
+| Milk cooler update, dongle restart, dongle firmware OTA | `@HU` / `@HT:3` / `@HB`…`@HE` | §5.15 |
+
+> ### ⚠ Read this before using anything in the second table
+>
+> Everything in it was reverse-engineered from the J.O.E. Android APK
+> and is exercised only against `jura_connect.simulator` — a TCP server
+> in this repo that speaks the same protocol. **The simulator's replies
+> were written from the same APK reading as the client's expectations,
+> so a shared misreading passes both halves of the test-suite.** No
+> byte in that table has ever been confirmed by a real Jura machine.
+>
+> Practically: a wrong preselection or recipe byte **misbrews**, a
+> maintenance confirmation sent at the wrong moment **consumes a
+> cleaning tablet**, an interrupted language download leaves a language
+> slot showing garbage, and the firmware OTA can **brick the WiFi
+> dongle with no remote recovery** (which is why it has no CLI command
+> at all and is gated behind `acknowledge_bricking_risk=True` in
+> Python). The first table is what you can rely on.
+>
+> [`docs/JOE_GAPS.md`](docs/JOE_GAPS.md) §9 enumerates every
+> unverified area, what breaks if it is wrong, and the cheapest
+> read-only experiments that would settle it.
 
 ## Installation
 
@@ -76,7 +120,7 @@ with `0600` permissions. Override the location with the global
 
 Different Jura models speak the same wire protocol but disagree about
 which **product codes** mean what and which **alert bits** map to which
-display strings. The 88 machine XMLs from the J.O.E. APK are bundled
+display strings. The 89 machine XMLs from the J.O.E. APK are bundled
 with this package and looked up by EF code; pairing tries to detect the
 code automatically from UDP discovery, but on firmwares that don't
 answer unicast UDP (notably TT237W) you'll want to pass it explicitly.
@@ -129,36 +173,67 @@ command, not a raw hex code. Discover the catalog with:
 $ jura-connect command --list
 available commands:
   read-only:
-    info                     full read-only snapshot (status + counters + percent)
-    counters                 maintenance counters (@TG:43)
-    percent                  maintenance percent indicators (@TG:C0)
-    status                   parsed status / active alerts (waits for a pushed @TF: frame)
-    brews                    per-product brew counters (@TR:32 paginated; 16 pages)
-    products                 list brewable products + allowed 'brew' param=value values (profile-driven; no I/O)
-    pmode                    programmable-recipe slots (@TM:50 + @TM:42,<slot>); per-machine
-    setting <name> [<value>] read or write a machine setting; profile-aware; write is gated
-    lock                     lock the front-panel display (@TS:01)
-    unlock                   unlock the front-panel display (@TS:00)
-    mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
-    register-read <bank>     read a register bank (@TR:<bank>); firmware-specific
-    cancel                   cancel the running product step (@TG:FF); the 'abort this brew' verb
-    raw <frame>              send a verbatim '@…' command; payload checked against the destructive set
+    info                                                full read-only snapshot (status + counters + percent)
+    counters                                            maintenance counters (@TG:43)
+    percent                                             maintenance percent indicators (@TG:C0)
+    status                                              parsed status / active alerts (waits for a pushed @TF: frame)
+    brews                                               per-product brew counters (@TR:32 paginated; 16 pages)
+    products                                            list brewable products and their allowed 'brew' param=value ranges/choices (from the machine profile; no machine I/O)
+    pmode                                               programmable-mode slots (@TM:50 + @TM:42); empty on the S8 EB
+    lock                                                lock the front-panel display (@TS:01)
+    unlock                                              unlock the front-panel display (@TS:00)
+    mem-read <addr>                                     read a memory/setting slot (@TM:<addr>); firmware-specific
+    register-read <bank>                                read a register bank (@TR:<bank>); firmware-specific
+    cancel                                              cancel the running product step (@TG:FF); the 'abort this brew' verb
+    raw <frame>                                         send a verbatim '@…' command; payload checked against the destructive set
+    setting <name> [<value>]                            read or write one machine setting ('hardness', 'language', 'units', 'auto_off', 'brightness', 'milk_rinsing', 'frother_instructions' on the S8 EB / EF1091); the second arg writes and is gated
+    progress [<seconds>]                                watch the machine's @TV: product-progress stream and decode it (read-only; stops on the ENJOY frame or after <seconds>)
+    special-counters                                    special counter bank (@TR:52 paginated; 4 pages) — cold brew, sweet foam & friends; declared by 14 of the 89 profiles
+    barista-counters                                    barista counter bank (@TR:34 paginated) — declared by 4 profiles; not read by the J.O.E. app, so untested on hardware
+    daily-brews                                         per-product brew counters since the last daily reset (@TR:42 paginated); not read by the J.O.E. app
+    daily-barista-counters                              barista counters since the last daily reset (@TR:44 paginated); not read by the J.O.E. app
+    settings                                            read every machine setting; tries the XML's batch bank (@TM:00,FC) and falls back to one @TM:<arg> per setting
+    limits <product>                                    live per-product parameter limits (@TM:60); the ranges the machine allows right now, as opposed to the XML's static ones
+    pmode-product <product>                             read one product's stored programmable-recipe settings (@TM:41,<code>); APK-derived, hardware-untested
+    processes                                           list the maintenance processes this machine declares (from the machine profile; no machine I/O)
+    process-watch [<seconds>]                           decode the machine's pushed maintenance-state stream (read-only; names each @TV: state via the machine XML)
+    coffee-timer-time <time>                            tell the machine the wall-clock time a coffee timer refers to (@TV:84); APK-derived, untested on hardware
+    languages                                           list the machine's language slots (@TT:00) and its language-download support (@TM:23 + profile capabilities)
+    milk-cooler-status                                  milk cooler (Cool Control) firmware-update state (@HU?); '@hu:800' = no cooler connected
 
   destructive (require --allow-destructive-commands; see 'jura-connect command --help'):
-    clean                    [destructive] start coffee-system cleaning cycle (@TG:24)
-    descale                   [destructive] start descaling cycle (@TG:25)
-    filter-change            [destructive] run water-filter change procedure (@TG:26)
-    cappu-clean              [destructive] start cappuccino-system cleaning (@TG:21)
-    cappu-rinse              [destructive] rinse the milk system (@TG:23)
-    skip-quality-step [<scope>]  [destructive] skip a quality-assistant step (@TG:7E); also seen zeroing the maintenance counters
-    restart                  [destructive] reboot the WiFi dongle (@TF:02)
-    power-off                [destructive] put the machine into standby (@AN:02)
-    brew <product> [<param=value>…]  [destructive] start brewing a product (@TP:<recipe blob>)
-    set-pin <pin>            [destructive] write a new front-panel PIN (@HW:01,<pin>)
-    set-ssid <ssid>          [destructive] write a new WiFi SSID for the dongle (@HW:80,<ssid>)
-    set-password <password>  [destructive] write a new WiFi password (@HW:81,<pwd>)
-    set-name <name>          [destructive] rename the dongle (@HW:82,<name>)
+    clean                                               [destructive] start coffee-system cleaning cycle (@TG:24)
+    descale                                             [destructive] start descaling cycle (@TG:25)
+    filter-change                                       [destructive] run water-filter change procedure (@TG:26)
+    cappu-clean                                         [destructive] start cappuccino-system cleaning (@TG:21)
+    cappu-rinse                                         [destructive] rinse the milk system (@TG:23)
+    skip-quality-step [<scope>]                         [destructive] skip a quality-assistant step (@TG:7E); 'all' skips every remaining step. Has also been seen to zero the maintenance counters
+    restart                                             [destructive] reboot the WiFi dongle (@TF:02)
+    power-off                                           [destructive] standby command (@AN:02); likely no-op on WiFi
+    brew <product> [<param=value|preselection>...]      [destructive] start brewing a product (@TP:<recipe blob>); run 'products' to discover valid names and param=value ranges
+    set-pin <pin>                                       [destructive] write a new front-panel PIN (@HW:01,<pin>)
+    set-ssid <ssid>                                     [destructive] write a new WiFi SSID for the dongle (@HW:80,<ssid>)
+    set-password <password>                             [destructive] write a new WiFi password (@HW:81,<pwd>)
+    set-name <name>                                     [destructive] rename the dongle (@HW:82,<name>)
+    reset-daily-counters                                [destructive] zero the daily counter banks (@TF:05)
+    pmode-set-product <product> [<param=value>...]      [destructive] overwrite a product's programmable-recipe settings (@TM:41,<blob>)
+    pmode-set-slot <slot> <product> [<param=value>...]  [destructive] assign a product (with settings) to a programmable-recipe slot (@TM:42,<slot>,<blob>)
+    process-start <process>                             [destructive] start a maintenance process and return the machine's acknowledgement (run 'processes' for the names)
+    process-run <process> [<seconds>]                   [destructive] start a maintenance process and follow its state machine to the end, confirming every prompt
+    process-accept [<command>]                          [destructive] confirm the maintenance step the machine is waiting on (@TG:10 / @TG:04, whichever its XML declares)
+    process-next                                        [destructive] advance the machine to the next step (@TG:01); answers @tg:00 when there was nothing to advance
+    coffee-timer <product> <when> [<param=value>...]    [destructive] schedule a product for later (@TM:3C + @TV:84); APK-derived, untested on hardware
+    language-lock                                       [destructive] lock the keypad for a language download (@TS:F1)
+    language-display <line1> [<line2>]                  [destructive] overwrite the two display lines shown during a language download (@TV:81 / @TV:82)
+    language-download <source> [<block>]                [destructive] push a language image into the machine (@TS:F1 / @TT:01 / @TT:02 or @TT:08 / @TT:03); takes an S-record file or blob. APK-derived, never hardware-tested
+    milk-cooler-update                                  [destructive] start a milk-cooler firmware update (@HU)
+    restart-dongle                                      [destructive] restart the WiFi dongle (@HT:3)
 ```
+
+That is the complete catalogue as of this release — 27 read-only and 26
+destructive commands. It is generated from
+`jura_connect.commands`, so the CLI and `jura_connect.list_commands()`
+can never drift apart.
 
 The same catalogue is reachable from Python as
 `jura_connect.list_commands()`. Run a command by name:
@@ -224,6 +299,28 @@ made the CLI report e.g. `no_beans` when the live frame actually
 meant `coffee_ready`. v0.9.0 fixes this; see CHANGELOG for the
 correction window.
 
+With a machine profile loaded, `status` also answers *"can I brew right
+now?"*. Each `<ALERT>` in the XML declares which product kinds it
+blocks and which maintenance process clears it, so the status line
+gains two more rows:
+
+```sh
+$ jura-connect command --name Kaffeebert status
+bits=0020000020000000
+  errors  : (none)
+  info    : no_beans
+  process : cleaning_alert
+  blocked : C, CM
+  clear by: cleaning_alert -> cleaning
+```
+
+`MachineStatus.can_brew("espresso")` / `.can_brew_kind("C")` answer the
+same question from Python, and `.alert_processes` names the process to
+feed to `process-run`. Without a profile these stay empty — the
+fallback codebook carries no such metadata, and guessing would be
+worse than saying nothing. See §5.11 of
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
 The `pmode` command reads the programmable-recipe slot table via
 `@TM:50` + `@TM:42,<slot>`. On the S8 EB / EF1091 every slot returns
 `@tm:C2` ("not supported by machine"), and `pmode` surfaces that as
@@ -275,6 +372,41 @@ The trailing two hex chars on every write are a checksum the dongle
 verifies — see `_settings_checksum` in `jura_connect.client` and §5.7
 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md). A bad checksum gets
 `@an:error` from the firmware (and from the simulator).
+
+### Read every setting at once (`settings`), and live limits (`limits`)
+
+`settings` dumps the whole catalogue. It first tries the batch bank the
+XML declares (`@TM:00,FC`, one round trip for four settings) and falls
+back to one `@TM:<arg>` read per setting if the machine rejects it or
+the reply doesn't decode — so it works either way, and the result says
+which path was taken:
+
+```sh
+$ jura-connect command --name Kaffeebert settings
+settings (7 read via batch @TM:00,FC):
+  hardness                     0x10
+  auto_off                     30min (0x211E)
+  units                        ml (0x00)
+  language                     english (0x02)
+  display_brightness_setting   40 (0x04)
+  milk_rinsing                 automatic (0x00)
+  frother_instructions         on (0x01)
+```
+
+`limits <product>` asks the machine what ranges it will accept *right
+now* (`@TM:60`), as opposed to the static ranges in the XML. Machines
+without product programming answer `@tm:C1`:
+
+```sh
+$ jura-connect command --name Kaffeebert limits espresso
+error: @TM:60 for espresso: machine answered C1 — this firmware does
+not support product programming / limit load
+```
+
+The batch reply layout is a **guess** — J.O.E. declares the command in
+every XML but never sends it — which is exactly why the fallback
+exists. §5.7 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) has the
+derivation and the read-only experiment that would confirm it.
 
 For one-off advanced use, `raw` echoes any wire command verbatim:
 
@@ -412,8 +544,248 @@ with JuraClient(addr, conn_id=cid, auth_hash=h,
                 profile=load_profile("EF538")) as c:
     c.brew("hotwater", ml=220)                      # '@tp' on accept
     c.brew("espresso", strength=7, temperature="high")
-    # then watch @TB / @TV:41… progress / @TV:3E… done via c.iter_frames()
+    # or block until the machine says ENJOY:
+    c.brew("espresso", follow=True,
+           on_progress=lambda p: print(p.format()))
 ```
+
+#### Preselections
+
+A bare word after the product is a **preselection** — the extra-shot /
+double / powder / cold-brew / sweet-foam toggles the machine's XML
+declares per product:
+
+```sh
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew espresso double
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    brew cappuccino extra_shot temp=high
+```
+
+`products` lists each product's preselections and flags the ones this
+machine generation cannot express, so `brew` never advertises something
+it will reject. Validation happens client-side in four steps: the name
+is known, the product declares it, the requested set fits one legal
+`<COMBINATION>` row, and this machine can actually send it.
+
+On older machines a `double` **selects a different product** (its code
+is swapped into the blob) rather than setting a flag; newer
+`IntakeF18` machines get a 20-byte blob with a mask byte instead.
+
+> **Never seen on a wire.** The preselection encoding is transcribed
+> from the APK and a wrong byte overwrites a recipe parameter, i.e.
+> misbrews. §5.13 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) has the
+> full derivation and the open questions.
+
+### Watch what the machine is doing (`progress`)
+
+The machine pushes `@TV:` frames unsolicited whenever it is busy.
+`progress` listens and decodes them — it sends nothing at all, so it is
+safe to point at a brew somebody started at the front panel. It returns
+on the `ENJOY` frame or when the watch window expires:
+
+```sh
+$ jura-connect command --name Kaffeebert progress 60
+handshake -> CORRECT  (@hp4)
+COFFEE_WATER_AMOUNT  espresso  coffee_water_amount 6/30  20%
+COFFEE_WATER_AMOUNT  espresso  coffee_water_amount 18/30  60%
+COFFEE_WATER_AMOUNT  espresso  coffee_water_amount 30/30  100%
+ENJOY  espresso
+```
+
+87 states are decoded (`ProgressState`), covering products, maintenance
+processes, the coffee timer and the aroma preselection screen. An
+unknown state code never raises — it comes through as
+`UNKNOWN(0x..)` with the raw byte intact, which is what makes this safe
+to run against a firmware family nobody has seen. §5.10 of
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### Run a maintenance process end to end
+
+A cleaning cycle is a conversation, not a command: the machine answers
+the start verb, then drives *you* through its state table ("empty the
+tray", "add a tablet", "press Rinse") and parks until each prompt is
+confirmed. `processes` lists what this machine declares — no machine
+I/O, it reads the profile:
+
+```sh
+$ jura-connect command --name Kaffeebert processes
+processes declared by EF1091
+  filter_change (@TG:26)  no progress frames
+  cleaning (@TG:24)
+  descale (@TG:25)
+  cappu_rinse (@TG:23)
+  cappu_clean (@TG:21)
+```
+
+`process-run` starts one and follows it to its finish state, confirming
+every prompt on the way:
+
+```sh
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    process-run cleaning 900
+handshake -> CORRECT  (@hp4)
+process cleaning
+  start reply: @tg:24
+  70 cleaning_start
+  72 cleaning_empty_tray
+  75 cleaning_add_tablet
+  26 press_rinse  needs @TG:10
+  74 cleaning_process
+  76 cleaning_process_finished  (done)
+-- finished
+```
+
+For manual control there are `process-start`, `process-accept` (sends
+`@TG:10` or `@TG:04`, whichever the machine's XML declares for that
+state), `process-next` (`@TG:01`) and `cancel` (`@TG:FF`).
+`process-watch` is the read-only counterpart: it decodes a cycle
+somebody started at the machine without sending anything.
+
+> Every confirmation advances a **physical** cycle: tablets and
+> descaler are consumed and hot liquid is dispensed. Prepare the
+> machine before running `process-run`, which auto-confirms
+> unattended. §5.11 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### The other counter banks
+
+`brews` reads the product counter (`@TR:32`) every machine has. Some
+machines declare more banks, and the library reads whichever the
+profile declares — a machine that doesn't gets a plain explanation
+rather than an error:
+
+```sh
+# The S8 EB declares @TR:32 and nothing else:
+$ jura-connect command --name Kaffeebert special-counters
+EF1091 does not implement the @TR:52 counter bank (not declared in its
+XML, or answered @tr:00)
+
+# A machine that does declare the daily bank:
+$ jura-connect command --name Barista --machine-type EF1143 daily-brews
+daily product counter (@TR:42) total: 12
+  espresso            : 3
+  coffee              : 0
+  cappuccino          : 5
+  milkcoffee          : 0
+  espresso_macchiato  : 0
+  latte_macchiato     : 2
+```
+
+| Command | Bank | Notes |
+| --- | --- | --- |
+| `special-counters` | `@TR:52` (+ `53` overflow) | cold brew, sweet foam & friends; 14 of 89 profiles |
+| `barista-counters` | `@TR:34` (+ `35`) | 4 profiles; no J.O.E. code path |
+| `daily-brews` | `@TR:42` (+ `43`) | since the last daily reset; 37 profiles |
+| `daily-barista-counters` | `@TR:44` (+ `45`) | 4 profiles |
+| `reset-daily-counters` | `@TF:05` | **gated, irreversible** — read `daily-brews` first |
+
+The daily banks are a machine capability the J.O.E. app ignores
+entirely (the XML even says so), which makes them the natural source
+for a "brews today" sensor — and also means nothing but the XML
+documents them.
+
+### Programmable recipes (PMode writes)
+
+Machines whose XML says `Productprogramming="true"` (20 of the 89
+profiles) let you store a recipe against a product or assign one to a
+slot on the machine's own menu:
+
+```sh
+# What is stored for a product today
+$ jura-connect command --name Kaffeebert pmode-product espresso
+
+# Overwrite it (gated)
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    pmode-set-product espresso water=40 strength=8
+
+# Put a product with settings into slot 3 (gated)
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    pmode-set-slot 3 cappuccino milk=25
+```
+
+The S8 EB / EF1091 answers `@tm:C1` / `@tm:C2` to all of it — it
+reports 20 slots via `@TM:50` but exposes none of them over WiFi — and
+the CLI says so instead of crashing. §5.6 of
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### Coffee timer
+
+Schedule a brew for later, either at a wall-clock time or after a
+delay:
+
+```sh
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    coffee-timer espresso 07:30
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    coffee-timer espresso 45m water=40
+```
+
+Range is 1 minute to 16 hours out; `<PRODUCT Coffeetimer="false">`
+marks a product ineligible and is refused client-side.
+`coffee-timer-time` sends the clock frame (`@TV:84`) on its own.
+There is no cancel verb — `cancel` (`@TG:FF`) is what the app sends,
+but whether it clears a *pending* timer is untested.
+
+> The machine pours later, unattended, whether or not a cup is under
+> the spout. APK-derived and never confirmed on hardware, so it may
+> also brew something other than what you asked for. §5.12 of
+> [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### Language download
+
+`languages` is read-only and tells you what the machine has and whether
+it supports a download at all:
+
+```sh
+$ jura-connect command --name Kaffeebert languages
+Machine languages:
+  slot  0: DE
+  slot  1: EN
+  slot  2: FR
+  …
+  slot 11: -  <- download block
+  download supported (profile): no
+  download block: 0B
+  transfer form: binary (@TT:08)
+  machine @TM:23: success
+```
+
+`language-download` pushes a Motorola S-record image into one slot,
+handling the keypad lock, block select, chunked transfer and finish;
+`language-display` paints the two display lines the machine shows while
+it runs. This library never fetches the images — J.O.E. downloads them
+from Jura's CDN, `jura-connect` takes whatever bytes you supply.
+
+> A transfer that aborts part-way leaves that slot showing garbage
+> until a full download replaces it, and a run that dies before the
+> trailing `@TS:00` leaves the display locked until a power cycle.
+> APK-derived, never hardware-tested. §5.14 of
+> [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### Milk cooler and dongle
+
+```sh
+$ jura-connect command --name Kaffeebert milk-cooler-status
+milk cooler: no_cooler (@hu:800)
+
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    milk-cooler-update
+$ jura-connect command --name Kaffeebert --allow-destructive-commands \
+    restart-dongle
+```
+
+`milk-cooler-status` (`@HU?`) is read-only — `@hu:800` means no Cool
+Control is attached, which is also why it doubles as a harmless nudge
+for firmwares that want traffic on the socket before they push a status
+frame.
+
+The **dongle firmware OTA** (`@HB` → `@HO:` → `@HD:` → `@HE`) is
+implemented in `jura_connect.firmware` but deliberately has **no CLI
+command**: a named command can only perform one step, and a partially
+transferred image is exactly the failure that bricks the dongle with no
+remote recovery. From Python it needs both blobs and an explicit
+`acknowledge_bricking_risk=True`, or it raises before touching the
+socket. §5.15 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ### Destructive commands (gated)
 
@@ -439,11 +811,27 @@ does and have any required supplies / containers / cups in place:
 $ jura-connect command --name Kaffeebert --allow-destructive-commands clean
 ```
 
-The list of gated wire prefixes (`@TG:21/23/24/25/26/7E`, `@TF:02`,
-`@AN:02`, `@TP:`, `@HW:`) is exported as
-`jura_connect.DESTRUCTIVE_PREFIXES`. The `raw` escape hatch inspects its
-argument against the same list, so `command raw '@TG:24'` is gated
-too — the bypass cannot be used by accident.
+The gated wire patterns are exported as
+`jura_connect.DESTRUCTIVE_PREFIXES` (byte-prefix matched) and
+`jura_connect.DESTRUCTIVE_EXACT` (exact match):
+
+| Family | Patterns |
+| --- | --- |
+| maintenance processes | `@TG:01` `@TG:04` `@TG:10` `@TG:21` `@TG:23` `@TG:24` `@TG:25` `@TG:26` `@TG:7E` |
+| machine / counters | `@TF:02` `@TF:05` `@AN:02` |
+| brewing | `@TP:` `@TM:3C,` |
+| dongle settings | `@HW:` |
+| language download | `@TS:F1` `@TT:01` `@TT:02` `@TT:03` `@TT:08` `@TV:81` `@TV:82` |
+| dongle firmware | `@HB` `@HO:` `@HD:` `@HE` `@HT:` and the exact `@HU` |
+
+Two of those need explaining. `@TM:3C,` carries the **trailing comma**
+on purpose: the tuple is prefix-matched and the `@TM:` space is shared
+with harmless register reads, so the bare form would gate `mem-read
+3C`. `@HU` is exact-matched because prefix-matching it would swallow
+the read-only `@HU?` status frame. `jura_connect.match_destructive()`
+is the single matcher the runtime gate, the `raw` inspector and the
+simulator all share, so `command raw '@TG:24'` is gated too — the
+bypass cannot be used by accident.
 
 Wrong values for `set-pin` / `set-ssid` / `set-password` can leave you
 locked out of the machine or unable to reach the dongle over WiFi;
@@ -472,7 +860,7 @@ removed 'Kaffeebert' from .../credentials.json
 ```python
 from jura_connect import (
     JuraClient, CredentialStore, MachineCredentials,
-    discover, run_named, list_commands,
+    discover, run_named, list_commands, load_profile,
 )
 
 # Discovery
@@ -500,7 +888,8 @@ client.close()
 # Reconnect later from disk and run named commands
 creds = store.get("Kaffeebert")
 with JuraClient(creds.address, conn_id=creds.conn_id,
-                auth_hash=creds.auth_hash) as c:
+                auth_hash=creds.auth_hash,
+                profile=load_profile("EF1091")) as c:
     # Either the high-level helpers …
     info = c.read_machine_info()
     print(info.maintenance_counters.cleaning)   # 21 (None if not reported)
@@ -512,6 +901,54 @@ with JuraClient(creds.address, conn_id=creds.conn_id,
     result = run_named(c, "counters")
     print(result.format())             # cleaning=21 filter=1 descale=8 …
 ```
+
+### Readiness and progress
+
+The two things a long-running integration — the `jura-connect-hass`
+Home Assistant component among them — actually needs: *may I start this
+product now*, and *how far along is it*. Both need a profile loaded:
+without one the alert metadata does not exist and `can_brew()` answers
+`True` rather than guessing.
+
+```python
+from jura_connect import JuraClient, load_profile
+
+with JuraClient(addr, conn_id=cid, auth_hash=h,
+                profile=load_profile("EF1091")) as c:
+    status = c.read_status()          # waits for the next pushed @TF:
+    status.can_brew("espresso")       # False while a blocking alert is up
+    status.can_brew_kind("CM")        # same question by product kind
+    status.blocked_kinds              # ('C', 'CM')
+    status.blocking_alerts            # ('no_beans',)
+    status.alert_processes            # (('cleaning_alert', 'cleaning'),)
+
+    if status.can_brew("espresso"):
+        # Blocks until the machine says ENJOY (or follow_timeout).
+        c.brew("espresso", ml=45, follow=True,
+               on_progress=lambda p: print(p.format(), p.percent))
+        for update in c.last_progress:
+            update.to_dict()          # JSON-serialisable, stable keys
+
+    # Or watch without sending anything — a brew started at the
+    # front panel shows up here just the same.
+    for update in c.iter_progress(timeout=60.0):
+        print(update.state_name, update.product, update.percent)
+        if update.is_complete:
+            break
+```
+
+`ProductProgress` never raises on an unknown state code or a truncated
+frame: `state` becomes `None`, the raw byte stays in `state_code`, and
+missing values are `None`. Every result type in the library exposes the
+same `format()` / `to_dict()` pair.
+
+Maintenance processes have the same shape — `c.watch_process()` is
+read-only, `c.process_runner("cleaning")` gives step-by-step control,
+and `c.run_process("cleaning", auto_accept=True)` drives one to the
+end. `jura_connect.language` and `jura_connect.firmware` are
+library-only modules for the language download and the dongle OTA; the
+OTA entry points refuse to send anything without
+`acknowledge_bricking_risk=True`.
 
 ## Tests, lint, and type-check
 
@@ -531,8 +968,8 @@ Concretely the gate is:
 1. `ruff check jura_connect/ tests/` — lint.
 2. `ruff format --check jura_connect/ tests/` — formatting drift.
 3. `ty check jura_connect/` — Astral's type checker on the library.
-4. `pytest tests/ -q` — the 340-case test suite against the in-tree
-   simulator, including 88-XML profile-registry coverage.
+4. `pytest tests/ -q` — the 770-case test suite against the in-tree
+   simulator, including 89-XML profile-registry coverage.
 
 If you want to run any one of them ad-hoc without the whole build,
 enter the dev shell (`nix develop`) which has all four tools on
@@ -552,13 +989,29 @@ The test-suite covers:
 * the JSON credential round-trip plus a full pair→persist→reconnect
   workflow (`test_credentials.py`),
 * every entry of the named-command registry round-tripped through the
-  simulator, plus error paths (`test_commands.py`),
-* the 88-XML profile registry — every bundled machine parses cleanly,
+  simulator, plus error paths and both destructive gates
+  (`test_commands.py`),
+* the 89-XML profile registry — every bundled machine parses cleanly,
   EF1091 surfaces its S8 EB-specific product codes, alert severities
   follow the XML's `ALERT.Type` attribute (`test_profile.py`),
+* `@TV:` progress decoding across all 87 states, unknown codes and
+  truncated frames (`test_progress.py`),
+* the maintenance-process state machine end to end, including the
+  accept commands every bundled XML declares (`test_process.py`),
+* the counter banks past `@TR:32`, the batch settings read and its
+  per-setting fallback, PMode writes, preselections, the coffee timer,
+  the language download and the firmware family (`test_counter_banks.py`,
+  `test_settings_bank.py`, `test_pmode.py`, `test_preselections.py`,
+  `test_coffee_timer.py`, `test_language_download.py`,
+  `test_firmware.py`),
 * CLI smoke tests for `command --list`, `command info` against the
   simulator, the `machine-types` / `set-machine-type` subcommands,
   and credential-store interactions (`test_cli.py`).
+
+Note what this does **not** prove. The simulator was written from the
+same APK reading as the client, so for everything in the second Status
+table above the tests confirm internal consistency, not correctness
+against a real Jura.
 
 ## Versioning
 
@@ -655,6 +1108,13 @@ description (wire framing, handshake state-machine, command catalogue,
 known unknowns). This document is the source of truth for the
 implementation and was used to validate every code path against the
 Android APK and against Kaffeebert.
+
+[`docs/JOE_GAPS.md`](docs/JOE_GAPS.md) is the companion scoreboard:
+what the official J.O.E. app does, what this library does, what is
+left, and — §9 — the honest enumeration of everything that is
+implemented but has never been confirmed on hardware, with the
+read-only experiments that would settle it. Read that section before
+trusting anything in the second Status table.
 
 ## Acknowledgements
 
