@@ -16,6 +16,11 @@ The simulator models:
   (maintenance percent), ``@TS:01``/``@TS:00`` (lock/unlock display),
   ``@HU?`` (status request that yields one ``@TF:`` frame),
   ``@HE`` (graceful close).
+* The programmable-recipe (PMode) interface — ``@TM:50`` slot count,
+  ``@TM:41``/``@TM:42`` product and slot reads, and (opt-in, see
+  ``SimulatorConfig.pmode_writable``) the matching writes, in both the
+  "machine exposes slots" and the EF1091-style "answers ``@tm:C2`` for
+  everything" flavours.
 * Periodic unsolicited ``@TF:<hex>`` status broadcasts on the
   connection so reader code in the client can be exercised.
 
@@ -136,12 +141,35 @@ class SimulatorConfig:
     overflow_bank_reply: str = "@tr:00"
     # @TM:50 reply bytes (per-kind slot counts; summed = total slots).
     # Default matches Kaffeebert: 5 kinds × 4 slots = 20 reported.
+    # Empty models a machine that answers the "D0" rejection token.
     pmode_slot_bytes: bytes = bytes.fromhex("0404040404")
     # @TM:42,<slot> → product code at that slot. None entries (or
     # missing slots) cause the simulator to answer "@tm:C2" mirroring
     # the real EF1091 firmware that reports slots but doesn't expose
     # them over WiFi.
     pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
+    # Full per-slot payloads (product code + F2..Fn argument bytes) as
+    # written by @TM:42. Populated by a slot write; a slot listed in
+    # `pmode_slots` without an entry here is answered with just its
+    # product code, which is all we ever observed on hardware.
+    pmode_slot_blobs: dict[int, str] = dataclasses.field(default_factory=dict)
+    # Stored @TM:41 product settings, keyed by product code. ``None``
+    # models the EF1091-style machine whose XML says
+    # Productprogramming="false": every @TM:41 answers "@tm:C1" and
+    # every @TM:42 write answers "@tm:C2". A dict (even an empty one)
+    # models a machine that *does* expose product programming.
+    pmode_products: dict[int, str] | None = None
+    # PMode writes are refused with "@an:error" unless this is set, the
+    # same guardrail DESTRUCTIVE_PREFIXES gives the @TG: process
+    # commands: a write that overwrites a user recipe slot must be
+    # opted into by the test that means to exercise it.
+    pmode_writable: bool = False
+    # Model a firmware that ACKs the write frame with the bare "@tm:00"
+    # rejection token instead of storing anything.
+    pmode_reject_writes: bool = False
+    # Drop the TCP session after this many @TM:42 *reads*, mirroring the
+    # real S8 EB resetting the connection mid-table. ``None`` disables.
+    pmode_reset_after_slot: int | None = None
 
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
@@ -179,6 +207,7 @@ class Simulator:
         # Public for tests to inspect:
         self.sent_commands: list[bytes] = []
         self.handshakes: list[tuple[str, str, str]] = []  # (pin, conn_id, hash)
+        self._pmode_reads = 0  # for SimulatorConfig.pmode_reset_after_slot
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -341,18 +370,12 @@ class Simulator:
             # Per-kind slot counts. Append a fake checksum byte so the
             # client's parser sees a well-formed reply (the checksum
             # algorithm is opaque; the client doesn't currently verify).
+            if not self.config.pmode_slot_bytes:
+                return "@tm:D0"  # PModeNumSlotReadParser's "no slots"
             body = self.config.pmode_slot_bytes.hex().upper()
             return f"@tm:50,{body}7A"
-        if cmd.startswith("@TM:42,"):
-            try:
-                slot = int(cmd[len("@TM:42,") :], 16)
-            except ValueError:
-                return "@tm:C2"
-            product = self.config.pmode_slots.get(slot)
-            if product is None:
-                return "@tm:C2"
-            # Real reply format: @tm:42,<slot>,<product_code>...<checksum>
-            return f"@tm:42,{slot:02X},{product:02X}"
+        if cmd.startswith(("@TM:41,", "@TM:42,")):
+            return self._handle_pmode(cmd)
         if cmd.startswith("@TM:"):
             arg_full = cmd[4:]
             # Distinguish writes (@TM:<arg>,<val><checksum>) from reads
@@ -432,6 +455,82 @@ class Simulator:
             return "@an:error"  # destructive guard already caught these
         # Unknown -> dongle stays silent
         return None
+
+    # -- programmable-recipe (PMode) ------------------------------------
+    #
+    # APK-derived, hardware-untested: no machine that exposes PMode was
+    # available. Modelled after WifiCommandPModeProduct{Read,Write} and
+    # WifiCommandPModeSlotProduct{Read,Write} plus their parsers. The
+    # simulator serves both branches — a machine that exposes slots
+    # (`pmode_products` set) and the EF1091-style machine that answers
+    # the C1 / C2 rejection tokens for everything (`pmode_products`
+    # left None, the default).
+
+    def _handle_pmode(self, cmd: str) -> str | None:
+        head, _, rest = cmd[len("@TM:") :].partition(",")
+        # Reads carry just the product code / slot index (one byte);
+        # anything longer is a write with a blob and a checksum.
+        if len(rest) <= 2:
+            return self._pmode_read(head, rest)
+        if not self.config.pmode_writable:
+            # Same guardrail DESTRUCTIVE_PREFIXES gives @TG: — a test
+            # that means to exercise a write must ask for it.
+            log.warning("simulator: refusing pmode write %r", cmd)
+            return "@an:error"
+        return self._pmode_write(head, rest)
+
+    def _pmode_read(self, head: str, rest: str) -> str | None:
+        if head == "41":
+            products = self.config.pmode_products
+            if products is None:
+                return "@tm:C1"
+            try:
+                code = int(rest, 16)
+            except ValueError:
+                return "@tm:C1"
+            blob = products.get(code)
+            if blob is None:
+                return "@tm:C1"
+            return f"@tm:41,{blob}{_settings_checksum(f'41,{blob}')}"
+        # head == "42"
+        limit = self.config.pmode_reset_after_slot
+        if limit is not None:
+            self._pmode_reads += 1
+            if self._pmode_reads > limit:
+                # The real S8 EB resets the TCP session mid-table.
+                return "@@CLOSE"
+        try:
+            slot = int(rest, 16)
+        except ValueError:
+            return "@tm:C2"
+        product = self.config.pmode_slots.get(slot)
+        if product is None:
+            return "@tm:C2"
+        payload = self.config.pmode_slot_blobs.get(slot, f"{product:02X}")
+        body = f"42,{slot:02X}{payload}"
+        return f"@tm:{body}{_settings_checksum(body)}"
+
+    def _pmode_write(self, head: str, rest: str) -> str:
+        body, csum = f"{head},{rest[:-2]}", rest[-2:].upper()
+        if _settings_checksum(body) != csum:
+            log.warning("simulator: bad pmode checksum for %r", body)
+            return "@an:error"
+        if self.config.pmode_reject_writes:
+            return "@tm:00"
+        products = self.config.pmode_products
+        payload = rest[:-2].upper()
+        if head == "41":
+            if products is None:
+                return "@tm:C1"
+            products[int(payload[:2], 16)] = payload
+            return "@tm:41"
+        # head == "42": <slot><14-byte head><optional 6-byte tail>
+        if products is None:
+            return "@tm:C2"
+        slot, blob = int(payload[:2], 16), payload[2:]
+        self.config.pmode_slots[slot] = int(blob[:2], 16)
+        self.config.pmode_slot_blobs[slot] = blob
+        return f"@tm:42,{slot:02X}"
 
     # -- status emission -----------------------------------------------
     def _emit_status(self, conn: socket.socket) -> None:

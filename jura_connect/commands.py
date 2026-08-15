@@ -742,6 +742,96 @@ def _r_setting(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Programmable-recipe (PMode) runners — APK-derived, untested
+# --------------------------------------------------------------------- #
+#
+# The wire prefixes ``@TM:41,`` and ``@TM:42,`` deliberately do NOT go
+# into :data:`DESTRUCTIVE_PREFIXES`: that list is matched as a byte
+# prefix, and the very same prefixes carry the *reads* (``pmode``,
+# ``pmode-product``) — gating them would break the read path. Only the
+# payload length tells a read from a write. These commands are gated
+# statically instead, exactly like the ``@TM:<arg>,<val><csum>``
+# settings write, which is not in the prefix list for the same reason.
+
+#: Shared danger text for both PMode writes.
+_PMODE_WRITE_DANGER = (
+    "overwrites a user-programmable recipe stored on the machine — the "
+    "previous contents of that product's settings (or of that slot) are "
+    "gone the moment the machine ACKs, and there is no undo: the "
+    "protocol has no read-modify-restore and no factory-default command "
+    "for a single slot. Read the current values with 'pmode' / "
+    "'pmode-product' first if you want to be able to put them back. The "
+    "wire format is derived from the J.O.E. APK and has never been "
+    "verified against a real machine."
+)
+
+#: A verbatim PMode blob is 17 bytes = 34 hex chars (see
+#: :data:`jura_connect.profile.PMODE_BLOB_BYTES`).
+_VERBATIM_PMODE_BLOB_HEX = profile.PMODE_BLOB_BYTES * 2
+
+
+def _pmode_overrides(name: str, args: Sequence[str]) -> dict[str, int | str]:
+    """Parse ``param=value`` args with the same keys ``brew`` accepts."""
+    overrides: dict[str, int | str] = {}
+    for raw in args:
+        key, sep, value = raw.partition("=")
+        if not sep or not value:
+            raise CommandError(
+                f"{name}: expected param=value (e.g. water=220), got {raw!r}"
+            )
+        kind = _BREW_KEY_TO_KIND.get(key.strip().lower())
+        if kind is None:
+            known = ", ".join(sorted(_BREW_KEY_TO_KIND))
+            raise CommandError(f"{name}: unknown parameter {key!r}. Known: {known}")
+        overrides[kind] = value.strip()
+    return overrides
+
+
+def _r_pmode_product(_spec, client, args, timeout):
+    product = _ascii_arg("product", args[0])
+    try:
+        stored = client.read_pmode_product(product, timeout=timeout)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+    if stored is None:
+        # @tm:C1 — the same "this firmware doesn't expose it" shape the
+        # `pmode` command reports for @tm:C2, not an error.
+        return (
+            f"pmode-product: the machine answered @tm:C1 for {product!r} "
+            "(= 'product programming is not supported'). This firmware "
+            "does not expose per-product PMode settings over WiFi."
+        )
+    return stored
+
+
+def _r_pmode_set_product(_spec, client, args, timeout):
+    overrides = _pmode_overrides("pmode-set-product", args[1:])
+    try:
+        return client.write_pmode_product(
+            _ascii_arg("product", args[0]), overrides, timeout=timeout
+        )
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+def _r_pmode_set_slot(_spec, client, args, timeout):
+    raw_slot = _ascii_arg("slot", args[0])
+    try:
+        slot = int(raw_slot, 0)
+    except ValueError as exc:
+        raise CommandError(
+            f"pmode-set-slot: slot must be a decimal or 0x-hex index, got {raw_slot!r}"
+        ) from exc
+    overrides = _pmode_overrides("pmode-set-slot", args[2:])
+    try:
+        return client.write_pmode_slot(
+            slot, _ascii_arg("product", args[1]), overrides, timeout=timeout
+        )
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -1030,6 +1120,63 @@ _SPECS: tuple[CommandSpec, ...] = (
             "renames the dongle. Persistent across reboots; cosmetic only "
             "but still a write to the device, so behind the gate by default."
         ),
+    ),
+    CommandSpec(
+        name="pmode-product",
+        description=(
+            "read one product's stored programmable-recipe settings "
+            "(@TM:41,<code>); APK-derived, hardware-untested"
+        ),
+        arguments=(Argument("product", "profile product name or 2-hex code"),),
+        runner=_r_pmode_product,
+    ),
+    CommandSpec(
+        name="pmode-set-product",
+        description=(
+            "[destructive] overwrite a product's programmable-recipe "
+            "settings (@TM:41,<blob>)"
+        ),
+        arguments=(
+            Argument(
+                "product",
+                "profile product name, 2-hex code, or a full "
+                f"{_VERBATIM_PMODE_BLOB_HEX}-hex blob sent verbatim",
+            ),
+            Argument(
+                "param=value",
+                "recipe override(s), same keys as 'brew'; defaults come "
+                "from the machine XML",
+                optional=True,
+                variadic=True,
+            ),
+        ),
+        runner=_r_pmode_set_product,
+        destructive=True,
+        danger=_PMODE_WRITE_DANGER,
+    ),
+    CommandSpec(
+        name="pmode-set-slot",
+        description=(
+            "[destructive] assign a product (with settings) to a "
+            "programmable-recipe slot (@TM:42,<slot>,<blob>)"
+        ),
+        arguments=(
+            Argument("slot", "slot index, decimal or 0x-prefixed hex"),
+            Argument(
+                "product",
+                "profile product name, 2-hex code, or a full "
+                f"{_VERBATIM_PMODE_BLOB_HEX}-hex blob sent verbatim",
+            ),
+            Argument(
+                "param=value",
+                "recipe override(s), same keys as 'brew'",
+                optional=True,
+                variadic=True,
+            ),
+        ),
+        runner=_r_pmode_set_slot,
+        destructive=True,
+        danger=_PMODE_WRITE_DANGER,
     ),
 )
 
