@@ -486,6 +486,14 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("set-ssid", ["mywifi"]),
     ("set-password", ["s3cret"]),
     ("set-name", ["Kaffeebert"]),
+    # Interactive maintenance processes: starting one, confirming the
+    # step it parks on, and advancing to the next one all drive a real
+    # cycle. See docs/PROTOCOL.md §5.11.
+    ("process-start", ["cleaning"]),
+    ("process-run", ["cleaning"]),
+    ("process-accept", []),
+    ("process-accept", ["@TG:04"]),
+    ("process-next", []),
 ]
 
 

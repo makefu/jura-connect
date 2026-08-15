@@ -42,6 +42,12 @@ clear failure instead of silently "working". ``@TP:`` (start product)
 is refused the same way *unless* a test opts in with
 ``SimulatorConfig(allow_brew=True)``, which turns on the full
 start -> ``@TB`` -> ``@TV:`` progress stream -> ``@TV:3E`` chain.
+``SimulatorConfig(allow_process=True)`` does the same for the
+interactive maintenance processes: the start verb is acknowledged with
+its lower-cased echo and the machine then walks its ``<STATE>``
+sequence, parking on every state that declares an ``AcceptCommand``
+until the client sends exactly that command (see
+:data:`DEFAULT_PROCESS_SEQUENCES` and docs/PROTOCOL.md §5.11).
 """
 
 from __future__ import annotations
@@ -58,6 +64,8 @@ from collections.abc import Iterator
 from . import protocol
 from .client import OVERFLOW_COUNTER_BANK, _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
+from .process import ACCEPT_COMMANDS as _PROCESS_ACCEPT_COMMANDS
+from .process import NEXT_STEP_COMMAND as _NEXT_STEP_COMMAND
 from .profile import RECIPE_BLOB_BYTES
 from .progress import (
     BYPASS_MARKER_INDEX,
@@ -114,6 +122,59 @@ _COUNTER_BANK_TABLES: dict[str, tuple[str, int, int]] = {
 def _default_limit_load() -> dict[int, str]:
     #        F4     F5     F6     F10    F11
     return {0x04: "0530" + "FFFF" + "012D" + "FFFF" + "FFFF"}
+
+
+#: The state walk each maintenance process performs, as
+#: ``(state code, AcceptCommand or None)`` pairs. Modelled on EF1091's
+#: ``<STATE>`` table: the machine pushes each state as a ``@TV:`` frame
+#: and stops at a state carrying an accept command until the client
+#: sends exactly that command. The final state of every sequence is the
+#: process's "…finished" state. APK/XML-derived — the real ordering of
+#: the states within a cycle has never been observed on hardware.
+DEFAULT_PROCESS_SEQUENCES: dict[str, tuple[tuple[int, str | None], ...]] = {
+    "@TG:24": (  # Cleaning
+        (0x70, None),  # Cleaning Start
+        (0x72, None),  # Cleaning empty tray
+        (0x75, None),  # Cleaning add tablet
+        (0x26, "@TG:10"),  # Press Rinse — waits for the confirmation
+        (0x74, None),  # Cleaning Process
+        (0x76, None),  # Cleaning Process finished
+    ),
+    "@TG:25": (  # Decalc
+        (0x50, None),  # Decalcify Start
+        (0x52, None),  # Decalcify empty tray
+        (0x53, None),  # Decalcify add fluid
+        (0x26, "@TG:10"),  # Press Rinse
+        (0x54, None),  # Decalcify Process
+        (0x55, None),  # Rinse watertank
+        (0x56, None),  # Descale finished
+    ),
+    "@TG:26": (  # FilterChange
+        (0x60, None),  # Filter Rinse start
+        (0x62, None),  # Filter Rinse change
+        (0x26, "@TG:10"),  # Press Rinse
+        (0x63, None),  # Filter Rinse process
+        (0x65, None),  # Filter Rinse finished
+    ),
+    "@TG:21": (  # CappuClean
+        (0x90, None),  # Cappu Clean Start
+        (0x92, "@TG:04"),  # Cappu Clean add cleaner (the @TG:04 machines)
+        (0x93, None),  # Cappu Clean process
+        (0x95, None),  # Cappu Clean finish
+    ),
+    "@TG:23": (  # CappuRinse
+        (0x9A, None),  # Cappu Rinse process
+        (0x0B, None),  # Cappurinse finished
+    ),
+    "@TG:22": (  # CoffeeRinse — 3 profiles; no "finished" state exists
+        (0x23, None),  # Rinse process
+        (0x3E, None),  # Enjoy, the generic end-of-run frame
+    ),
+}
+
+
+def _default_process_sequences() -> dict[str, tuple[tuple[int, str | None], ...]]:
+    return dict(DEFAULT_PROCESS_SEQUENCES)
 
 
 def _flip_checksum(csum: str) -> str:
@@ -235,6 +296,25 @@ class SimulatorConfig:
     # Target water ticks reported as the maximum in the progress frames.
     brew_target_ticks: int = 0x1E
 
+    # -- maintenance processes ----------------------------------------
+    # Off by default for the same reason as brewing: @TG:21..@TG:26 are
+    # destructive prefixes and an accidental one in a test must scream
+    # (@an:error) rather than quietly walk a cycle.
+    allow_process: bool = False
+    # Wire start command -> the state walk it performs. See
+    # DEFAULT_PROCESS_SEQUENCES.
+    process_sequences: dict[str, tuple[tuple[int, str | None], ...]] = (
+        dataclasses.field(default_factory=_default_process_sequences)
+    )
+    # True: states without an AcceptCommand advance on their own, the
+    # way a real machine works through "Cleaning Process" while it runs.
+    # False: the machine pushes exactly one state and then waits for
+    # @TG:01 (or that state's own AcceptCommand) — the "Press Rotary or
+    # Next" flavour.
+    process_auto_advance: bool = True
+    # Delay between pushed process state frames. 0 keeps tests fast.
+    process_step_interval: float = 0.0
+
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
     # so the test-suite can read/write the same arguments the J.O.E.
@@ -292,6 +372,21 @@ def _blob_is_accepted(blob: str) -> bool:
     return data[8] == 0x01
 
 
+def _process_frame(state_code: int, process_code: int) -> str:
+    """One pushed ``@TV:`` frame of a maintenance process.
+
+    Same 16-byte shape as the brew frames (state, item code, then the
+    14-byte value window); the item code is the process byte, which is
+    what makes the decoder classify it as ``ProgressType.PROCESS``. The
+    value window is left zeroed: what a machine puts there during a
+    maintenance cycle has never been observed, and the app reads no
+    quantities for these states, so filling it in would be a fabricated
+    layout.
+    """
+    window = bytearray(len(PRODUCT_ARGUMENTS))
+    return f"@TV:{state_code:02X}{process_code:02X}{window.hex().upper()}"
+
+
 def _brew_frames(blob: str, config: SimulatorConfig) -> list[str]:
     """The unsolicited frames a real dongle pushes after an accepted brew.
 
@@ -341,8 +436,14 @@ class Simulator:
         self.sent_commands: list[bytes] = []
         self.handshakes: list[tuple[str, str, str]] = []  # (pin, conn_id, hash)
         # Frames queued by a command handler to be pushed after its
-        # reply (the brew progress stream).
+        # reply (the brew progress stream, the process state walk).
         self._queued: list[str] = []
+        # Running maintenance process: the start command, how far into
+        # its state sequence we are, and the confirmation the current
+        # state is parked on (None = the client may send @TG:01).
+        self._process_command: str | None = None
+        self._process_index = 0
+        self._process_awaiting: str | None = None
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -491,6 +592,12 @@ class Simulator:
                 return "@tp:00"
             self._queued.extend(_brew_frames(blob, self.config))
             return "@tp"
+        if self.config.allow_process:
+            # Opt-in only, and checked before the blanket refusal below
+            # because the start verbs are destructive prefixes.
+            process_reply = self._handle_process(cmd)
+            if process_reply is not None:
+                return process_reply
         for prefix in DESTRUCTIVE_PREFIXES:
             if b.startswith(prefix):
                 log.warning("simulator: refusing destructive command %r", cmd)
@@ -513,7 +620,9 @@ class Simulator:
             # reply; it arrives with the next unsolicited @TF: frame.
             return "@hu:800"
         if cmd == "@TG:FF":
-            # WifiCommandCancelProductStep — cancel the running step.
+            # WifiCommandCancelProductStep — cancel the running step,
+            # which also tears down a running maintenance process.
+            self._clear_process()
             return "@tg:FF"
         if cmd == "@TG:43":
             return "@tg:43" + self.config.maint_counters.hex().upper()
@@ -586,6 +695,71 @@ class Simulator:
         # Unknown -> dongle stays silent
         return None
 
+    # -- maintenance processes -----------------------------------------
+    def _handle_process(self, cmd: str) -> str | None:
+        """Model ``WifiCommandStartProcess`` / ``ProcessAccept`` / ``NextStep``.
+
+        Returns the reply, or ``None`` when ``cmd`` is not part of the
+        process conversation (so the caller keeps looking / falls through
+        to the destructive refusal).
+
+        The wire behaviour mirrors the J.O.E. app: the start command is
+        acknowledged with its own lower-cased echo, the confirmation
+        commands echo themselves too, and ``@TG:01`` answers ``@tg:01``
+        when it advanced something and ``@tg:00`` when it did not.
+        """
+        upper = cmd.strip().upper()
+        if upper in self.config.process_sequences:
+            self._process_command = upper
+            self._process_index = 0
+            self._process_awaiting = None
+            self._advance_process()
+            return upper.lower()
+        if upper in _PROCESS_ACCEPT_COMMANDS:
+            if self._process_command is None or self._process_awaiting != upper:
+                # No cycle is parked on this confirmation.
+                return "@an:error"
+            self._process_awaiting = None
+            self._advance_process()
+            return upper.lower()
+        if upper == _NEXT_STEP_COMMAND:
+            if self._process_command is None or self._process_awaiting is not None:
+                # WiFiCommandNextProductStep's "rejected" answer.
+                return "@tg:00"
+            self._advance_process()
+            return "@tg:01"
+        return None
+
+    def _advance_process(self) -> None:
+        """Queue the state frames the machine pushes next.
+
+        With ``process_auto_advance`` the machine runs on by itself and
+        only stops at a state that declares an ``AcceptCommand``;
+        without it, it pushes exactly one state and waits for ``@TG:01``
+        (or that state's own confirmation).
+        """
+        command = self._process_command
+        if command is None:
+            return
+        sequence = self.config.process_sequences[command]
+        code = int(command.rsplit(":", 1)[-1], 16)
+        while self._process_index < len(sequence):
+            state, accept = sequence[self._process_index]
+            self._process_index += 1
+            self._queued.append(_process_frame(state, code))
+            if accept is not None:
+                self._process_awaiting = accept
+                return
+            if not self.config.process_auto_advance:
+                return
+        # Sequence exhausted: the last frame was the "…finished" state.
+        self._clear_process()
+
+    def _clear_process(self) -> None:
+        self._process_command = None
+        self._process_index = 0
+        self._process_awaiting = None
+
     # -- queued (unsolicited) frames -----------------------------------
     def _drain_queue(self, conn: socket.socket) -> None:
         """Push frames a handler queued behind its reply, in order."""
@@ -593,6 +767,8 @@ class Simulator:
         for frame in queued:
             if self.config.brew_progress_interval > 0:
                 time.sleep(self.config.brew_progress_interval)
+            elif self.config.process_step_interval > 0:
+                time.sleep(self.config.process_step_interval)
             self._send(conn, frame)
 
     # -- counter banks -------------------------------------------------
