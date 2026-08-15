@@ -439,6 +439,13 @@ KIND_MILK_AMOUNT = "milk_amount"
 KIND_MILK_FOAM_AMOUNT = "milk_foam_amount"
 KIND_MILK_BREAK = "milk_break"
 KIND_BYPASS = "bypass"
+#: ``Argument="F17"``. Unlike every other kind this one sits at blob
+#: offset 16, i.e. *past* the live-verified 16-byte layout — see
+#: :meth:`ProductDef.build_recipe_hex`, which grows the blob to 17
+#: bytes for a product that declares it, the way J.O.E.'s
+#: ``AppProduct.c`` does. Six of the 89 bundled profiles have products
+#: with it.
+KIND_GRINDER_FREENESS = "grinder_freeness"
 
 #: All recipe-parameter kinds this library knows how to encode, in a
 #: stable order suitable for building UI (product code first is implicit).
@@ -450,6 +457,7 @@ RECIPE_PARAM_KINDS: tuple[str, ...] = (
     KIND_MILK_FOAM_AMOUNT,
     KIND_MILK_BREAK,
     KIND_BYPASS,
+    KIND_GRINDER_FREENESS,
 )
 
 
@@ -832,7 +840,13 @@ class ProductDef:
         preselect_mask: int | None = None,
         preselect_bytes: tuple[tuple[int, int], ...] = (),
     ) -> str:
-        """Build the 16-byte ``@TP:`` recipe blob for this product.
+        """Build the ``@TP:`` recipe blob for this product.
+
+        16 bytes, or 17 for a product that declares ``Argument="F17"``
+        (grinder freeness), whose byte lands at offset 16 — J.O.E.'s
+        ``AppProduct.c`` cuts the blob at ``(hasF17 ? 17 : 16) * 2`` hex
+        chars for exactly that reason. Only the 16-byte form is
+        live-verified; the F17 byte is APK-derived.
 
         Blob layout — **live-verified by physically brewing** on a JURA
         S8 EB (EF1091) and, independently, an E6:
@@ -893,6 +907,13 @@ class ProductDef:
         explicit = set(overrides or ())
         overrides = dict(overrides or {})
         size = RECIPE_BLOB_BYTES
+        if self.param(KIND_GRINDER_FREENESS) is not None:
+            # J.O.E.'s AppProduct.c: `substring(0, (hasF17 ? 17 : 16) * 2)`.
+            # F17 (grinder freeness) sits at blob offset 16, so a product
+            # that declares it needs one byte more than the verified
+            # 16-byte layout. Products without F17 keep exactly 16 —
+            # a blob of the wrong length is ACKed `@tp:00` and ignored.
+            size = RECIPE_BLOB_BYTES + 1
         if preselect_mask is not None:
             if not 0 <= preselect_mask <= 0xFF:
                 raise ValueError(

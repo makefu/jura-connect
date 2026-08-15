@@ -341,6 +341,77 @@ def test_build_recipe_hex_matches_e6_live_verified_espresso_vector():
     assert espresso.build_recipe_hex() == "02000809000002000100000000000000"
 
 
+# --------------------------------------------------------------------- #
+# F17 (grinder freeness) — the 17-byte blob
+# --------------------------------------------------------------------- #
+
+
+def test_build_recipe_hex_grows_to_17_bytes_for_an_f17_product():
+    """A product declaring ``Argument="F17"`` (grinder freeness) puts a
+    byte at offset 16, one past the 16-byte blob. J.O.E.'s
+    ``AppProduct.c`` builds ``(hasF17 ? 17 : 16)`` bytes for exactly
+    this reason; before the fix this raised ValueError and the product
+    could not be brewed at all."""
+    p = load_profile("EF1119")
+    espresso = p.product_by_code[0x02]
+    blob = espresso.build_recipe_hex()
+    # 17 bytes = 34 hex chars, not 32.
+    assert len(blob) == 34
+    # Product code, strength F3 -> byte 2, water F4 -> byte 3 (45 ml =
+    # 9 ticks), temperature F7 -> byte 6, the constant byte 8, and the
+    # grinder freeness F17 -> byte 16 (XML default 2).
+    assert blob == "02000809000002000100000000000000" + "02"
+    assert blob[16 * 2 : 16 * 2 + 2] == "02"
+
+
+def test_build_recipe_hex_f17_override_lands_on_byte_16():
+    p = load_profile("EF1119")
+    coffee = p.product_by_code[0x03]
+    # The XML default for this product is 1; ask for the other catalogue
+    # value so the assertion proves the override reached byte 16.
+    assert coffee.param("grinder_freeness").default == 1
+    blob = coffee.build_recipe_hex({"grinder_freeness": 2})
+    assert len(blob) == 34
+    assert blob[16 * 2 : 16 * 2 + 2] == "02"
+    # Out-of-catalogue values are still refused, at byte 16 like anywhere.
+    with pytest.raises(ValueError, match="not in the catalogue"):
+        coffee.build_recipe_hex({"grinder_freeness": 9})
+
+
+def test_build_recipe_hex_stays_16_bytes_without_f17():
+    """The live-verified layout must not grow for the 83 profiles whose
+    products declare no F17 — the machine ACKs and ignores a blob of the
+    wrong length."""
+    for code, product_code in (("EF1091", 0x28), ("EF538", 0x02)):
+        product = load_profile(code).product_by_code[product_code]
+        assert len(product.build_recipe_hex()) == 32
+
+
+def test_every_f17_product_builds_a_blob():
+    """Regression guard across the whole catalogue: no product may raise
+    'offset outside the recipe blob' for a parameter its own XML
+    declares."""
+    built = 0
+    for profile in iter_profiles():
+        for product in profile.products:
+            has_f17 = any(param.argument == 17 for param in product.params)
+            if not has_f17:
+                continue
+            # Millilitre parameters with no XML default are refused by
+            # design (they would brew dry); skip only those.
+            if any(
+                param.kind in ("water_amount", "bypass") and param.default is None
+                for param in product.params
+            ):
+                continue
+            blob = product.build_recipe_hex()
+            assert len(blob) == 34, (profile.code, product.name, blob)
+            built += 1
+    # Six bundled profiles declare F17 products; make sure the sweep
+    # actually exercised them rather than skipping everything.
+    assert built > 0
+
+
 def test_parse_xml_handles_default_namespace():
     """The Jura XMLs use a default namespace; the loader must strip it."""
     text = """<?xml version="1.0"?>
