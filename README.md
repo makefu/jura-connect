@@ -497,7 +497,7 @@ with JuraClient(creds.address, conn_id=creds.conn_id,
                 auth_hash=creds.auth_hash) as c:
     # Either the high-level helpers …
     info = c.read_machine_info()
-    print(info.maintenance_counters)   # MaintenanceCounters(cleaning=21, ...)
+    print(info.maintenance_counters.cleaning)   # 21 (None if not reported)
     print(info.status.active_alerts)   # ('coffee_ready', 'energy_safe')
 
     # … or the named-command registry — same API the CLI uses:
