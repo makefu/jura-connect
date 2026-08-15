@@ -403,14 +403,20 @@ class JuraClient:
     def read_maintenance_counter(
         self, *, timeout: float = 6.0
     ) -> "MaintenanceCounters":
-        """Read the maintenance counter bank (``@TG:43``)."""
+        """Read the maintenance counter bank (``@TG:43``).
+
+        The bank's field order is machine-specific, so the decode uses
+        :attr:`profile` when one is loaded — without it the EF536 /
+        EF1091 baseline order is assumed, which mislabels the 21
+        profiles that declare a different one.
+        """
         reply = self.request("@TG:43", match=r"^@tg:43", timeout=timeout)
-        return MaintenanceCounters.parse(reply)
+        return MaintenanceCounters.parse(reply, profile=self.profile)
 
     def read_maintenance_percent(self, *, timeout: float = 6.0) -> "MaintenancePercent":
         """Read the maintenance percent bank (``@TG:C0``)."""
         reply = self.request("@TG:C0", match=r"^@tg:C0", timeout=timeout)
-        return MaintenancePercent.parse(reply)
+        return MaintenancePercent.parse(reply, profile=self.profile)
 
     def read_status(self, *, timeout: float = 6.0) -> "MachineStatus":
         """Wait for the next unsolicited ``@TF:`` status frame and parse it."""
@@ -1004,88 +1010,196 @@ def _settings_checksum(payload: str) -> str:
     return f"{(-1 - total) & 0xFF:02X}"
 
 
+#: Field order of the ``@TG:43`` bank on the EF536 / EF1091 baseline.
+#: Used when no :class:`MachineProfile` is available; the profile's own
+#: ``maintenance_counter_fields`` wins whenever there is one, because
+#: the order is per-machine (docs/PROTOCOL.md §5.3).
+DEFAULT_MAINTENANCE_COUNTER_FIELDS: tuple[str, ...] = (
+    "cleaning",
+    "filter_change",
+    "descale",
+    "cappu_rinse",
+    "coffee_rinse",
+    "cappu_clean",
+)
+
+#: Same for the ``@TG:C0`` percent bank. Uniform across every bundled
+#: profile except EF567_C, which omits ``filter_change``.
+DEFAULT_MAINTENANCE_PERCENT_FIELDS: tuple[str, ...] = (
+    "cleaning",
+    "filter_change",
+    "descale",
+)
+
+#: Human labels for the pretty-printed ``format()`` output where they
+#: differ from the field name.
+_MAINTENANCE_LABELS = {"filter_change": "filter"}
+
+
+def _maintenance_fields(
+    profile: MachineProfile | None, attribute: str, fallback: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Field order for one maintenance bank.
+
+    Prefers the machine XML's declaration and falls back to the
+    hard-coded baseline when no profile is loaded (or when a profile
+    somehow declares no such bank).
+    """
+    declared = getattr(profile, attribute, ()) if profile is not None else ()
+    return tuple(declared) or fallback
+
+
+def _decode_maintenance(
+    values: list[int], fields: tuple[str, ...], bank: str, reply: str
+) -> dict[str, int]:
+    """Zip decoded wire values onto the bank's declared field names.
+
+    A machine that returns fewer values than its XML declares is
+    reported for what it sent rather than padded with garbage — the
+    remaining names simply stay absent. This is also the shape a
+    four-counter machine takes when it is read without a profile.
+    """
+    if not values:
+        raise ValueError(f"{bank} payload too short (0 values): {reply!r}")
+    if len(values) < len(fields):
+        log.warning(
+            "%s returned %d value(s) but %d field(s) are declared; "
+            "decoding the ones that arrived (pass a MachineProfile if the "
+            "machine's field order differs from the baseline)",
+            bank,
+            len(values),
+            len(fields),
+        )
+    return dict(zip(fields, values, strict=False))
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class MaintenanceCounters:
-    """Decoded ``@TG:43`` payload.
+    """Decoded ``@TG:43`` payload — each counter a big-endian u16.
 
-    Order and meaning are taken from the machine XML ``<BANK Command="@TG:43">``
-    section (EF536 / S8). Each counter is a 16-bit big-endian unsigned int.
+    Which counters the payload carries, and in which order, is declared
+    per machine by the XML's ``<BANK Command="@TG:43">`` ``<TEXTITEM
+    Type=…>`` children; :meth:`parse` takes them from a
+    :class:`~jura_connect.profile.MachineProfile` when one is available
+    and falls back to :data:`DEFAULT_MAINTENANCE_COUNTER_FIELDS`
+    otherwise. ``counters`` holds the decoded name/value pairs in wire
+    order; the named properties return ``None`` for counters this
+    machine does not report.
     """
 
-    cleaning: int
-    filter_change: int
-    descale: int
-    cappu_rinse: int
-    coffee_rinse: int
-    cappu_clean: int
+    counters: tuple[tuple[str, int], ...]
     raw: bytes
 
     @classmethod
-    def parse(cls, reply: str) -> MaintenanceCounters:
+    def parse(
+        cls, reply: str, profile: MachineProfile | None = None
+    ) -> MaintenanceCounters:
         data = _hex_body(reply, "@tg:43")
-        if len(data) < 12:
-            raise ValueError(f"@tg:43 payload too short ({len(data)} bytes): {reply!r}")
-        u = [int.from_bytes(data[i : i + 2], "big") for i in range(0, 12, 2)]
-        return cls(
-            cleaning=u[0],
-            filter_change=u[1],
-            descale=u[2],
-            cappu_rinse=u[3],
-            coffee_rinse=u[4],
-            cappu_clean=u[5],
-            raw=data,
+        fields = _maintenance_fields(
+            profile, "maintenance_counter_fields", DEFAULT_MAINTENANCE_COUNTER_FIELDS
         )
+        values = [
+            int.from_bytes(data[i : i + 2], "big")
+            for i in range(0, len(data) - len(data) % 2, 2)
+        ]
+        decoded = _decode_maintenance(values, fields, "@tg:43", reply)
+        return cls(counters=tuple(decoded.items()), raw=data)
+
+    def get(self, name: str) -> int | None:
+        """Counter by field name, or ``None`` when not reported."""
+        for field, value in self.counters:
+            if field == name:
+                return value
+        return None
+
+    @property
+    def cleaning(self) -> int | None:
+        return self.get("cleaning")
+
+    @property
+    def filter_change(self) -> int | None:
+        return self.get("filter_change")
+
+    @property
+    def descale(self) -> int | None:
+        return self.get("descale")
+
+    @property
+    def cappu_rinse(self) -> int | None:
+        return self.get("cappu_rinse")
+
+    @property
+    def coffee_rinse(self) -> int | None:
+        return self.get("coffee_rinse")
+
+    @property
+    def cappu_clean(self) -> int | None:
+        return self.get("cappu_clean")
 
     def format(self) -> str:
-        return (
-            f"cleaning={self.cleaning} filter={self.filter_change} "
-            f"descale={self.descale} cappu_rinse={self.cappu_rinse} "
-            f"coffee_rinse={self.coffee_rinse} cappu_clean={self.cappu_clean}"
+        return " ".join(
+            f"{_MAINTENANCE_LABELS.get(name, name)}={value}"
+            for name, value in self.counters
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "cleaning": self.cleaning,
-            "filter_change": self.filter_change,
-            "descale": self.descale,
-            "cappu_rinse": self.cappu_rinse,
-            "coffee_rinse": self.coffee_rinse,
-            "cappu_clean": self.cappu_clean,
-            "raw_hex": self.raw.hex().upper(),
-        }
+        out: dict[str, object] = dict(self.counters)
+        out["raw_hex"] = self.raw.hex().upper()
+        return out
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class MaintenancePercent:
-    """Decoded ``@TG:C0`` payload (one byte per maintenance type, 0..100, or 0xFF if absent)."""
+    """Decoded ``@TG:C0`` payload (one byte per maintenance type, 0..100, or 0xFF if absent).
 
-    cleaning: int
-    filter_change: int
-    descale: int
+    Like :class:`MaintenanceCounters` the fields are XML-declared per
+    machine (``<BANK Command="@TG:C0">``); every bundled profile but
+    EF567_C, which has no filter, uses the baseline order.
+    """
+
+    percent: tuple[tuple[str, int], ...]
     raw: bytes
 
     @classmethod
-    def parse(cls, reply: str) -> MaintenancePercent:
+    def parse(
+        cls, reply: str, profile: MachineProfile | None = None
+    ) -> MaintenancePercent:
         data = _hex_body(reply, "@tg:C0")
-        if len(data) < 3:
-            raise ValueError(f"@tg:C0 payload too short ({len(data)} bytes): {reply!r}")
-        return cls(
-            cleaning=data[0],
-            filter_change=data[1],
-            descale=data[2],
-            raw=data,
+        fields = _maintenance_fields(
+            profile, "maintenance_percent_fields", DEFAULT_MAINTENANCE_PERCENT_FIELDS
         )
+        decoded = _decode_maintenance(list(data), fields, "@tg:C0", reply)
+        return cls(percent=tuple(decoded.items()), raw=data)
+
+    def get(self, name: str) -> int | None:
+        """Percentage by field name, or ``None`` when not reported."""
+        for field, value in self.percent:
+            if field == name:
+                return value
+        return None
+
+    @property
+    def cleaning(self) -> int | None:
+        return self.get("cleaning")
+
+    @property
+    def filter_change(self) -> int | None:
+        return self.get("filter_change")
+
+    @property
+    def descale(self) -> int | None:
+        return self.get("descale")
 
     def format(self) -> str:
-        return f"cleaning={self.cleaning} filter={self.filter_change} descale={self.descale}"
+        return " ".join(
+            f"{_MAINTENANCE_LABELS.get(name, name)}={value}"
+            for name, value in self.percent
+        )
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "cleaning": self.cleaning,
-            "filter_change": self.filter_change,
-            "descale": self.descale,
-            "raw_hex": self.raw.hex().upper(),
-        }
+        out: dict[str, object] = dict(self.percent)
+        out["raw_hex"] = self.raw.hex().upper()
+        return out
 
 
 # Bit-to-alert mapping for the S8 / EF536 (see assets/documents/xml/EF536/1.0.xml).

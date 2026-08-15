@@ -42,6 +42,11 @@ _XML_TYPE_TO_SEVERITY = {
     "ip": "process",
 }
 
+#: Wire commands of the two maintenance banks whose field order the XML
+#: declares. Used as the ``<BANK Command=…>`` lookup key.
+MAINTENANCE_COUNTER_BANK = "@TG:43"
+MAINTENANCE_PERCENT_BANK = "@TG:C0"
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class AlertDef:
@@ -500,6 +505,14 @@ class MachineProfile:
     # declares "@TR:32"; a subset also declares overflow / special /
     # barista banks. See docs/PROTOCOL.md §5.5.
     counter_banks: tuple[str, ...] = ()
+    # Field names of the maintenance banks, in the order the machine
+    # answers them — the <TEXTITEM Type=…> children of
+    # <BANK Command="@TG:43"> and <BANK Command="@TG:C0">. Per-machine:
+    # 21 of the 89 bundled profiles disagree with the EF536/EF1091
+    # baseline (four-field machines, a swapped rinse/clean tail, one
+    # profile without FilterChange). See docs/PROTOCOL.md §5.3.
+    maintenance_counter_fields: tuple[str, ...] = ()
+    maintenance_percent_fields: tuple[str, ...] = ()
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -614,7 +627,30 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         settings=settings,
         has_pmode=has_pmode,
         counter_banks=counter_banks,
+        maintenance_counter_fields=_bank_fields(root, MAINTENANCE_COUNTER_BANK),
+        maintenance_percent_fields=_bank_fields(root, MAINTENANCE_PERCENT_BANK),
     )
+
+
+def _bank_fields(root: ET.Element, command: str) -> tuple[str, ...]:
+    """Ordered field names of one ``<BANK Command=…>`` element.
+
+    The bank's ``<TEXTITEM Type=…>`` children name the values the
+    machine returns, in wire order — this is what makes the ``@TG:43``
+    payload self-describing per machine. ``Type`` is normalised the
+    same way alert names are, so the XML's "Decalc" becomes the
+    "descale" key the rest of the API uses. Returns an empty tuple when
+    the machine declares no such bank.
+    """
+    for bank in root.findall(".//{*}BANK"):
+        if (bank.get("Command") or "").strip() != command:
+            continue
+        return tuple(
+            _snake(kind).replace("decalc", "descale")
+            for item in bank.findall("{*}TEXTITEM")
+            if (kind := (item.get("Type") or "").strip())
+        )
+    return ()
 
 
 def _int_attr(el: ET.Element, name: str) -> int | None:

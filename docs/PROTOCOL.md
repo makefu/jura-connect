@@ -277,8 +277,8 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | `@HP:p,c,h`      | `@hp4` / `@hp5`   | `HandshakeResult` | authentication |
 | `@HE`            | _none_            | —            | polite close |
 | `@HU?`           | `@TF:<hex>` (status frame) | `MachineStatus` | status request — the dongle just emits the next status frame |
-| `@TG:43`         | `@tg:43<12 bytes hex>` | `MaintenanceCounters` | 6 × big-endian u16 |
-| `@TG:C0`         | `@tg:C0<3 bytes hex>` | `MaintenancePercent` | 1 byte per cleaning / filter / descale (`0xFF` = N/A) |
+| `@TG:43`         | `@tg:43<8..12 bytes hex>` | `MaintenanceCounters` | 4..6 × big-endian u16, XML-declared order — see §5.3 |
+| `@TG:C0`         | `@tg:C0<2..3 bytes hex>` | `MaintenancePercent` | 1 byte per XML-declared field (`0xFF` = N/A) — see §5.3 |
 | `@TS:01`         | `@TB` then `@ts`  | str | lock the front-panel display |
 | `@TS:00`         | `@ts`             | str | unlock the display |
 | `@TM:<addr>`     | `@tm:<addr>...`   | str | memory / setting read (firmware-specific) |
@@ -295,27 +295,57 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | `@TV:<hex>` | brewing-in-progress / product progress |
 | `@hu:<code>` | heartbeat acknowledgement: `ok` / `wait` / `busy` / `abort` / `error` |
 
-### 5.3 Maintenance counter layout (`@TG:43`)
+### 5.3 Maintenance counter layout (`@TG:43`, `@TG:C0`)
 
-12 bytes after the `@tg:43` prefix, 6 × big-endian u16. Order matches
-the `<BANK Command="@TG:43">` section of the machine XML
-(`assets/documents/xml/EF536/1.0.xml`):
+Big-endian u16 per counter after the `@tg:43` prefix — **but neither
+the number of counters nor their order is universal.** Both are
+declared per machine by the `<TEXTITEM Type=…>` children of the XML's
+`<BANK Command="@TG:43">` element, and J.O.E. reads them from there:
 
+```xml
+<BANK Command="@TG:43" Name="Maintenance Counter">
+  <TEXTITEM Type="Cleaning" Text="33"/>
+  <TEXTITEM Type="FilterChange" Text="34"/>
+  <TEXTITEM Type="Decalc" Text="35"/>
+  <TEXTITEM Type="CappuRinse" Text="40"/>
+  <TEXTITEM Type="CoffeeRinse" Text="36"/>
+  <TEXTITEM Type="CappuClean" Text="41"/>
+</BANK>
 ```
-[0..2]  cleaning
-[2..4]  filter_change
-[4..6]  descale
-[6..8]  cappu_rinse
-[8..10] coffee_rinse
-[10..12] cappu_clean
-```
 
-Live example from Kaffeebert:
+Across the 89 bundled profiles there are four variants (`Decalc` is
+this library's `descale`):
+
+| Fields (wire order) | Payload | Profiles |
+| ------------------- | ------- | -------- |
+| `Cleaning, FilterChange, Decalc, CappuRinse, CoffeeRinse, CappuClean` | 12 B | 68 — incl. EF536 and EF1091 (Kaffeebert) |
+| `Cleaning, FilterChange, Decalc, CoffeeRinse` | 8 B | 13 — EF1013, EF1031, EF1089, EF1105, EF1105V2, EF1115, EF1115V2, EF1124, EF1125, EF1128, EF529, EF532COFFEEONLY, EF534 |
+| `Cleaning, FilterChange, Decalc, CoffeeRinse, CappuRinse, CappuClean` | 12 B | 7 — EF0000, EF1090, EF1123, EF1143, EF1148, EF1171, EF_MASTER |
+| `Cleaning, Decalc, CappuRinse, CoffeeRinse, CappuClean` | 10 B | 1 — EF567_C (no filter) |
+
+`@TG:C0` (one byte per field, `0xFF` = not applicable) is declared the
+same way and is `Cleaning, FilterChange, Decalc` on all 89 profiles
+except EF567_C, which is `Cleaning, Decalc`.
+
+`MachineProfile.maintenance_counter_fields` /
+`.maintenance_percent_fields` carry the parsed order;
+`MaintenanceCounters.parse(reply, profile=…)` and
+`MaintenancePercent.parse(reply, profile=…)` use it, and
+`JuraClient.read_maintenance_counter` / `read_maintenance_percent`
+pass the client's profile automatically. Without a profile the first
+(EF536 / EF1091) variant is assumed — on any of the other 21 machines
+that mislabels the counters, so pass `--machine-type`. Fields the
+machine does not report read back as `None` and are omitted from
+`format()` / `to_dict()`.
+
+Live example from Kaffeebert (EF1091, baseline order):
 ```
 @tg:4300150001000801580E21005B
        └┘└┘└┘└┘└┘└┘
        21  1  8 344 3617 91
 ```
+The same 12 bytes on an EF1090 mean 344 `coffee_rinse` and 3617
+`cappu_rinse` — the tail is swapped.
 
 ### 5.4 Status bits (`@TF:`)
 
