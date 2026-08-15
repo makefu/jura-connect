@@ -12,6 +12,10 @@ The simulator models:
 
 * ``@HP:<pin>,<conn_id_hex>,<hash>`` handshake including the "press OK
   on machine" pairing window for an empty hash.
+* The batch settings read ``@TM:00,FC`` (the XML's
+  ``<BANK Name="Setting">``) and the per-product limit load
+  ``@TM:60,<code><csum>``, including their rejection tokens
+  (``@tm:00`` / ``@tm:C1``) so the client's fallback paths are covered.
 * Read commands ``@TG:43`` (maintenance counters), ``@TG:C0``
   (maintenance percent), ``@TS:01``/``@TS:00`` (lock/unlock display),
   ``@TG:FF`` (cancel the running product step),
@@ -99,6 +103,22 @@ _COUNTER_BANK_TABLES: dict[str, tuple[str, int, int]] = {
     "@TR:52": ("special_counters", 2, _PC_UNUSED),
     "@TR:53": ("special_counter_overflow", 1, 0x00),
 }
+
+
+# Default @TM:60 limit-load table: product code -> the five min/max byte
+# pairs for F4, F5, F6, F10, F11 (see client.LIMIT_LOAD_ARGUMENTS).
+# Populated for Cappuccino (0x04) with EF1091's own XML ranges expressed
+# the way LimitLoadParser reads them — in Step units, so F4's 25..240 ml
+# arrive as 05..30 (×5) and F6's 1..45 s as 01..2D (×1). "FFFF" marks a
+# parameter the product does not have.
+def _default_limit_load() -> dict[int, str]:
+    #        F4     F5     F6     F10    F11
+    return {0x04: "0530" + "FFFF" + "012D" + "FFFF" + "FFFF"}
+
+
+def _flip_checksum(csum: str) -> str:
+    """Return a deliberately wrong checksum for the negative paths."""
+    return f"{int(csum, 16) ^ 0xFF:02X}"
 
 
 def _default_product_counters() -> list[int]:
@@ -230,6 +250,29 @@ class SimulatorConfig:
             "62": "01",  # frother instructions = On
         }
     )
+
+    # Batch settings read (@TM:00,FC). The CommandArgument the simulated
+    # machine's XML declares — the values are answered in this order.
+    # None models a machine with no batch read at all, which replies
+    # with the bare rejection token below (32 of the 89 bundled profiles
+    # carry no <MACHINESETTINGS> block, so no bank either).
+    settings_bank_arguments: str | None = "02080913"
+    # Rejection token for the batch read. "@tm:00" is the short "frame
+    # refused" answer the dongle already uses for settings writes.
+    settings_bank_reject_reply: str = "@tm:00"
+    # Model a firmware that only accepts the checksummed request form
+    # (@TM:00,FC<csum>) — which of the two forms a real machine wants is
+    # unknown, so both are exercised.
+    settings_bank_requires_checksum: bool = False
+    # Corrupt the reply checksum to exercise the client's verification.
+    settings_bank_corrupt_checksum: bool = False
+
+    # Limit load (@TM:60,<product code><csum>): product code -> the five
+    # min/max byte pairs. Codes outside the table get "@tm:C1" — the
+    # APK's "machine does not support product programming" token.
+    limit_load: dict[int, str] = dataclasses.field(default_factory=_default_limit_load)
+    limit_load_corrupt_checksum: bool = False
+    limit_load_echo_wrong_code: bool = False
 
 
 def _blob_is_accepted(blob: str) -> bool:
@@ -488,6 +531,10 @@ class Simulator:
             # algorithm is opaque; the client doesn't currently verify).
             body = self.config.pmode_slot_bytes.hex().upper()
             return f"@tm:50,{body}7A"
+        if cmd.upper().startswith("@TM:00,FC"):
+            return self._handle_settings_bank(cmd)
+        if cmd.upper().startswith("@TM:60,"):
+            return self._handle_limit_load(cmd)
         if cmd.startswith("@TM:42,"):
             try:
                 slot = int(cmd[len("@TM:42,") :], 16)
@@ -591,6 +638,72 @@ class Simulator:
         mask = (1 << (8 * width)) - 1
         payload = "".join(f"{v & mask:0{width * 2}X}" for v in values)
         return f"@tr:{bank[4:6].lower()},{page:02X},{payload}"
+
+    # -- batch settings read / limit load ------------------------------
+    def _handle_settings_bank(self, cmd: str) -> str:
+        """Answer the XML's ``<BANK Name="Setting" Command="@TM:00,FC">``.
+
+        The reply layout mirrors ``client._parse_settings_bank_reply``:
+        the stored values of the bank's arguments concatenated in
+        declaration order (self-delimited by the ItemSlider type tags)
+        plus the usual ``ByteOperations.d`` checksum over
+        ``"00,<values>"``. Nothing about it is hardware-verified — no
+        J.O.E. code path issues this command — so the simulator also
+        models the rejection token that makes the client fall back to
+        per-setting reads.
+        """
+        tail = cmd[len("@TM:00,FC") :].strip().upper()
+        expected_request_csum = _settings_checksum("00,FC")
+        if tail and tail != expected_request_csum:
+            return "@an:error"
+        if self.config.settings_bank_requires_checksum and not tail:
+            return self.config.settings_bank_reject_reply
+        declared = self.config.settings_bank_arguments
+        if not declared:
+            return self.config.settings_bank_reject_reply
+        values: list[str] = []
+        for i in range(0, len(declared), 2):
+            stored = self.config.settings.get(declared[i : i + 2].upper())
+            if stored is None:
+                # A bank argument this machine has no value for: the
+                # whole batch read is refused rather than half-answered.
+                return self.config.settings_bank_reject_reply
+            values.append(stored.upper())
+        body = "".join(values)
+        csum = _settings_checksum(f"00,{body}")
+        if self.config.settings_bank_corrupt_checksum:
+            csum = _flip_checksum(csum)
+        return f"@tm:00,{body}{csum}"
+
+    def _handle_limit_load(self, cmd: str) -> str:
+        """Answer ``@TM:60,<product code><csum>`` (``WifiCommandReadLimitLoad``).
+
+        Reply shape from the APK's ``LimitLoadParser``:
+        ``@tm:60,<code><5 min/max byte pairs><checksum>``.
+        """
+        body = cmd[len("@TM:60,") :].strip()
+        if len(body) < 4:
+            return "@an:error"
+        code_hex, csum_recv = body[:2].upper(), body[2:].upper()
+        if csum_recv != _settings_checksum(f"60,{code_hex}"):
+            log.warning("simulator: bad limit-load checksum for %r", cmd)
+            return "@an:error"
+        try:
+            code = int(code_hex, 16)
+        except ValueError:
+            return "@an:error"
+        blob = self.config.limit_load.get(code)
+        if blob is None:
+            # "Machine does not support Product Programming".
+            return "@tm:C1"
+        echoed = code_hex
+        if self.config.limit_load_echo_wrong_code:
+            echoed = f"{(code + 1) & 0xFF:02X}"
+        payload = f"{echoed}{blob.upper()}"
+        csum = _settings_checksum(f"60,{payload}")
+        if self.config.limit_load_corrupt_checksum:
+            csum = _flip_checksum(csum)
+        return f"@tm:60,{payload}{csum}"
 
     # -- status emission -----------------------------------------------
     def _emit_status(self, conn: socket.socket) -> None:

@@ -995,6 +995,168 @@ class JuraClient:
             definition.p_argument, value, timeout=timeout, verify=verify
         )
 
+    # -- batch settings read (@TM:00,FC) ---------------------------------
+    def read_settings_bank(
+        self, *, timeout: float = 3.0, checksum: bool = False
+    ) -> dict[str, str]:
+        """Read several settings in one round trip via the XML's
+        settings bank (``<BANK Name="Setting" Command="@TM:00,FC"
+        CommandArgument="02080913"/>``).
+
+        Returns ``{P_Argument: value_hex}`` in the bank's declared order
+        (``{"02": "10", "08": "00", "09": "02", "13": "211E"}`` on the
+        S8 EB), i.e. the same values four separate
+        :meth:`read_setting` calls would return.
+
+        **APK-derived request, guessed reply layout, untested on
+        hardware.** J.O.E. 4.6.10 parses ``CommandArgument`` out of the
+        XML and then throws it away (``Bank``'s constructor drops it),
+        and its WiFi settings path is ``WifiCommandReadPModeComposite``
+        — one ``@TM:<arg>`` per setting. So nothing in the app tells us
+        what the machine answers here. What we send is the XML's
+        ``Command`` verbatim, like every other ``<BANK Command="…">``;
+        what we expect back is modelled on the single-setting read:
+
+            client → @TM:00,FC
+            dongle → @tm:00,<v1><v2>…<checksum>
+            dongle → @tm:00                  (rejection — no bank)
+
+        with the values concatenated in ``CommandArgument`` order and
+        self-delimited by the ItemSlider type tags documented in
+        §5.7 (``21`` = one value byte follows, ``22`` = two, anything
+        else = a bare one-byte value), and ``<checksum>`` the usual
+        ``ByteOperations.d`` over ``"00,<values>"``.
+
+        Pass ``checksum=True`` to append the ``ByteOperations.d``
+        checksum to the *request* as well (``@TM:00,FCEA``) — the other
+        plausible request form, since ``@TM:60,…`` and every settings
+        write carry one while ``@TM:41/42,…`` reads do not. Which form
+        (if either) a real machine accepts is unknown.
+
+        Raises :class:`ValueError` when the machine rejects the command
+        or the reply does not parse; :meth:`read_all_settings` catches
+        that and falls back to per-setting reads.
+        """
+        if self.profile is None:
+            raise RuntimeError(
+                "no MachineProfile loaded — pass profile=load_profile('EFxxxx') "
+                "to JuraClient() to use the batch settings read."
+            )
+        bank = self.profile.settings_bank
+        if bank is None:
+            raise ValueError(
+                f"{self.profile.code}: the machine XML declares no "
+                "<MACHINESETTINGS><BANK Name='Setting'> — there is no batch "
+                "settings read on this machine family."
+            )
+        cmd = bank.command
+        if checksum:
+            body = cmd[4:] if cmd.upper().startswith("@TM:") else cmd
+            cmd = f"{cmd}{_settings_checksum(body)}"
+        reply = self.request(cmd, match=r"(?i)^@(tm|an)", timeout=timeout)
+        return _parse_settings_bank_reply(reply, bank.command, bank.arguments)
+
+    def read_all_settings(
+        self, *, timeout: float = 3.0, batch: bool = True
+    ) -> SettingsSnapshot:
+        """Read every setting in the machine's catalogue.
+
+        Uses the batch read (:meth:`read_settings_bank`) for the
+        arguments the XML's settings bank covers and one
+        :meth:`read_setting` per remaining catalogue entry. When the
+        batch read is unavailable, rejected, or answers something we
+        cannot parse — the expected case, since its reply layout is a
+        guess — every setting is read individually instead and the
+        failure is recorded in :attr:`SettingsSnapshot.batch_error`.
+        The returned values are identical either way.
+
+        Set ``batch=False`` to skip the batch attempt entirely.
+        """
+        if self.profile is None:
+            raise RuntimeError(
+                "no MachineProfile loaded — pass profile=load_profile('EFxxxx') "
+                "to JuraClient() to read the settings catalogue."
+            )
+        profile = self.profile
+        batch_values: dict[str, str] = {}
+        batch_error: str | None = None
+        if batch and profile.settings_bank is not None:
+            try:
+                batch_values = self.read_settings_bank(timeout=timeout)
+            except (ValueError, TimeoutError) as exc:
+                batch_error = str(exc)
+
+        readings: list[SettingReading] = []
+        covered: set[str] = set()
+        for definition in profile.settings:
+            arg = definition.p_argument.upper()
+            covered.add(arg)
+            if arg in batch_values:
+                raw, source = batch_values[arg].upper(), "batch"
+            else:
+                raw, source = self.read_setting(arg, timeout=timeout).upper(), "single"
+            item = definition.item_from_hex(raw)
+            readings.append(
+                SettingReading(
+                    p_argument=arg,
+                    name=definition.name,
+                    raw=raw,
+                    item=item.name if item is not None else None,
+                    definition=definition,
+                    source=source,
+                )
+            )
+        # Bank arguments the catalogue does not declare still carry real
+        # values (16 of the 89 profiles name settings their own
+        # <MACHINESETTINGS> block omits); surface them unnamed rather
+        # than dropping machine data on the floor.
+        for arg, raw in batch_values.items():
+            if arg in covered:
+                continue
+            readings.append(
+                SettingReading(
+                    p_argument=arg,
+                    name=None,
+                    raw=raw.upper(),
+                    item=None,
+                    definition=None,
+                    source="batch",
+                )
+            )
+        return SettingsSnapshot(
+            readings=tuple(readings),
+            batch_used=bool(batch_values),
+            batch_error=batch_error,
+        )
+
+    # -- limit load (@TM:60) ---------------------------------------------
+    def read_limit_load(
+        self, product: str | int, *, timeout: float = 3.0
+    ) -> ProductLimits:
+        """Read the machine's *live* limits for one product (``@TM:60``).
+
+        J.O.E.'s ``WifiCommandReadLimitLoad`` sends
+        ``@TM:60,<product code><checksum>`` and bounds the product
+        sliders with the answer instead of with the static XML ranges —
+        the machine narrows them according to its current state (filter,
+        milk system, cup size, …).
+
+        Returns a :class:`ProductLimits` whose ranges are already scaled
+        into XML units (ml for water/bypass, seconds for the milk
+        parameters), so they can be compared directly against the values
+        :meth:`brew` accepts.
+
+        Wire format and decode are APK-derived (``LimitLoadParser``) but
+        **untested on hardware**. Raises :class:`ValueError` when the
+        machine answers the ``C1`` "product programming not supported"
+        token or the reply fails its checksum / product-code check.
+        """
+        definition = self.resolve_product(product)
+        payload = f"60,{definition.code:02X}"
+        cmd = f"@TM:{payload}{_settings_checksum(payload)}"
+        reply = self.request(cmd, match=r"(?i)^@(tm|an)", timeout=timeout)
+        return _parse_limit_load(reply, definition)
+
     # -- brewing ---------------------------------------------------------
     def resolve_product(
         self, product: str | int, *, substring: bool = False
@@ -2213,3 +2375,344 @@ def _parse_pmode_slot(slot: int, reply: str) -> PModeSlot | None:
     except ValueError:
         return None
     return PModeSlot(index=slot, product_code=product_code, raw_payload=body)
+
+
+# --------------------------------------------------------------------- #
+# Batch settings read (@TM:00,FC — the XML's <BANK Name="Setting">)
+# --------------------------------------------------------------------- #
+#
+# Every newer machine XML declares
+#
+#     <BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>
+#
+# under <MACHINESETTINGS> — one round trip for the four settings 02
+# (hardness), 08 (units), 09 (language) and 13 (auto-off) instead of
+# four separate @TM:<arg> reads. J.O.E. 4.6.10 parses the declaration
+# (XMLParser.e()) and then discards CommandArgument in Bank's
+# constructor; its WiFi settings path is WifiCommandReadPModeComposite,
+# i.e. one WifiCommandReadPMode per SettingElement. So the app never
+# issues this command and tells us nothing about the reply.
+#
+# What is implemented here: the XML's Command sent verbatim, and a
+# deliberately strict parser modelled on the single-setting read
+# (`@tm:<addr>,<values><checksum>`). Anything unexpected raises, and
+# JuraClient.read_all_settings falls back to per-setting reads — so a
+# wrong guess costs a round trip, not a wrong value.
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class SettingReading:
+    """One setting's value inside a :class:`SettingsSnapshot`.
+
+    ``name``/``definition`` are ``None`` for a bank argument that the
+    machine's own ``<MACHINESETTINGS>`` catalogue does not declare.
+    ``source`` is ``"batch"`` when the value came from the settings
+    bank and ``"single"`` when it came from its own ``@TM:<arg>`` read.
+    """
+
+    p_argument: str
+    name: str | None
+    raw: str
+    item: str | None
+    definition: SettingDef | None
+    source: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "p_argument": self.p_argument,
+            "name": self.name,
+            "raw": self.raw,
+            "item": self.item,
+            "source": self.source,
+        }
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class SettingsSnapshot:
+    """Result of :meth:`JuraClient.read_all_settings`.
+
+    ``batch_used`` says whether the ``@TM:00,FC`` bank answered; when it
+    did not, ``batch_error`` carries the reason and every reading came
+    from an individual ``@TM:<arg>`` request.
+    """
+
+    readings: tuple[SettingReading, ...]
+    batch_used: bool
+    batch_error: str | None = None
+
+    def reading(self, name: str) -> SettingReading | None:
+        """Look up one reading by its snake_case setting name."""
+        for r in self.readings:
+            if r.name == name:
+                return r
+        return None
+
+    def format(self) -> str:
+        how = "batch @TM:00,FC" if self.batch_used else "per-setting @TM:<arg>"
+        lines = [f"settings ({len(self.readings)} read via {how}):"]
+        for r in self.readings:
+            label = r.name or f"(arg {r.p_argument})"
+            value = f"{r.item} (0x{r.raw})" if r.item else f"0x{r.raw}"
+            lines.append(f"  {label:<28} {value}")
+        if self.batch_error:
+            lines.append(f"  batch read unavailable: {self.batch_error}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "batch_used": self.batch_used,
+            "batch_error": self.batch_error,
+            "readings": [r.to_dict() for r in self.readings],
+        }
+
+
+def _split_tagged_values(body: str) -> list[str]:
+    """Split a concatenation of settings values into individual values.
+
+    Uses the ItemSlider type tags documented in ``docs/PROTOCOL.md``
+    §5.7: ``21`` prefixes a one-byte value, ``22`` a two-byte value,
+    and anything else *is* a bare one-byte value. That makes the run
+    self-delimiting, which is the only way a concatenated reply can be
+    decoded at all — AutoOFF alone is 1, 2 or 3 bytes wide depending on
+    the chosen item.
+    """
+    values: list[str] = []
+    i = 0
+    while i < len(body):
+        tag = body[i : i + 2].upper()
+        width = {"21": 4, "22": 6}.get(tag, 2)
+        chunk = body[i : i + width]
+        if len(chunk) != width:
+            raise ValueError(
+                f"settings bank: value at offset {i} is truncated ({chunk!r})"
+            )
+        try:
+            int(chunk, 16)
+        except ValueError as exc:
+            raise ValueError(
+                f"settings bank: value at offset {i} is not hex ({chunk!r})"
+            ) from exc
+        values.append(chunk.upper())
+        i += width
+    return values
+
+
+def _parse_settings_bank_reply(
+    reply: str, command: str, arguments: tuple[str, ...]
+) -> dict[str, str]:
+    """Decode the reply to the XML's settings-bank command.
+
+    ``command`` is the declaration (``"@TM:00,FC"``); its address
+    (``"00"``) is what the dongle echoes. Layout is a guess — see the
+    section comment above — so every deviation raises
+    :class:`ValueError` instead of being papered over.
+    """
+    address = command[4:].split(",", 1)[0].strip().upper() if len(command) > 4 else ""
+    text = reply.strip()
+    low = text.lower()
+    if low.startswith("@an:"):
+        raise ValueError(
+            f"settings bank {command!r}: machine rejected the batch read ({reply!r})"
+        )
+    if not low.startswith("@tm:"):
+        raise ValueError(f"settings bank {command!r}: unexpected reply {reply!r}")
+    head, sep, rest = text[4:].partition(",")
+    if head.strip().upper() != address:
+        raise ValueError(
+            f"settings bank {command!r}: reply echoes address "
+            f"{head.strip()!r}, expected {address!r} ({reply!r})"
+        )
+    rest = rest.strip()
+    if not sep or not rest:
+        # Bare "@tm:00" — the same short rejection token a settings
+        # write gets when the dongle refuses the frame.
+        raise ValueError(
+            f"settings bank {command!r}: machine rejected the batch read "
+            f"({reply!r}) — this firmware has no batch settings read"
+        )
+    if len(rest) < 4:
+        raise ValueError(f"settings bank {command!r}: reply too short ({reply!r})")
+    body, csum = rest[:-2], rest[-2:]
+    expected = _settings_checksum(f"{address},{body}")
+    if csum.upper() != expected:
+        raise ValueError(
+            f"settings bank {command!r}: checksum mismatch (got {csum!r}, "
+            f"expected {expected!r} over {address!r},{body!r}); reply was {reply!r}"
+        )
+    values = _split_tagged_values(body)
+    if len(values) != len(arguments):
+        raise ValueError(
+            f"settings bank {command!r}: reply carries {len(values)} value(s) "
+            f"but the XML declares {len(arguments)} argument(s) "
+            f"({', '.join(arguments)}); reply was {reply!r}"
+        )
+    return dict(zip(arguments, values, strict=True))
+
+
+# --------------------------------------------------------------------- #
+# Limit load (@TM:60,<product code><checksum>)
+# --------------------------------------------------------------------- #
+#
+# Decode ported from the APK's LimitLoadParser. The reply body is a
+# product code followed by exactly five min/max byte pairs, always in
+# this argument order regardless of what the product declares:
+LIMIT_LOAD_ARGUMENTS: tuple[int, ...] = (4, 5, 6, 10, 11)
+#
+# A pair whose min or max is 0xFF means "not applicable to this
+# product"; the app drops those, and so do we. Each surviving pair is
+# scaled by the argument's XML ``Step`` (5 for water/bypass, giving
+# millilitres; 1 for the milk parameters, giving seconds).
+_LIMIT_LOAD_BODY_HEX = 2 + len(LIMIT_LOAD_ARGUMENTS) * 4  # code + 5 pairs
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProductLimit:
+    """One parameter's live range from a ``@TM:60`` reply."""
+
+    kind: str  # profile KIND_* identifier, e.g. "water_amount"
+    argument: int  # F-number (4, 5, 6, 10, 11)
+    minimum: int  # in XML units (ml / seconds), already scaled
+    maximum: int
+    step: int  # the scale factor that was applied
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "argument": self.argument,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "step": self.step,
+        }
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProductLimits:
+    """Result of :meth:`JuraClient.read_limit_load`."""
+
+    product_code: int
+    product_name: str
+    limits: tuple[ProductLimit, ...]
+    raw: str
+
+    def limit(self, kind: str) -> ProductLimit | None:
+        for entry in self.limits:
+            if entry.kind == kind:
+                return entry
+        return None
+
+    def allows(self, kind: str, value: int) -> bool:
+        """Whether ``value`` (in XML units) is inside the machine's live
+        range for ``kind``. Parameters the machine did not report are
+        unconstrained and return ``True``."""
+        entry = self.limit(kind)
+        if entry is None:
+            return True
+        return entry.minimum <= value <= entry.maximum
+
+    def format(self) -> str:
+        lines = [
+            f"limits for {self.product_name} (0x{self.product_code:02X}), "
+            f"as reported by the machine:"
+        ]
+        if not self.limits:
+            lines.append("  (no adjustable parameter reported)")
+        for entry in self.limits:
+            lines.append(
+                f"  {entry.kind:<20} {entry.minimum}..{entry.maximum} "
+                f"(step {entry.step})"
+            )
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "product_code": f"{self.product_code:02X}",
+            "product_name": self.product_name,
+            "limits": [entry.to_dict() for entry in self.limits],
+            "raw": self.raw,
+        }
+
+
+def _parse_limit_load(reply: str, definition: ProductDef) -> ProductLimits:
+    """Decode a ``@tm:60,…`` reply against the product's XML parameters.
+
+    Mirrors ``LimitLoadParser.e()``: verify the ``ByteOperations.d``
+    checksum over ``"60,<body>"``, check the echoed product code, then
+    read five min/max pairs for F4, F5, F6, F10 and F11, dropping the
+    ones flagged ``FF`` and the ones this product does not declare.
+    """
+    text = reply.strip()
+    low = text.lower()
+    if low.startswith("@an:"):
+        raise ValueError(f"@TM:60 for {definition.name}: machine refused ({reply!r})")
+    if not low.startswith("@tm:"):
+        raise ValueError(f"@TM:60 for {definition.name}: unexpected reply {reply!r}")
+    rest = text[4:]
+    head = rest[:2].upper()
+    if head == "C1":
+        # LimitLoadParser logs "Machine does not support Product
+        # Programming" and gives up on this token.
+        raise ValueError(
+            f"@TM:60 for {definition.name}: machine answered C1 — this "
+            "firmware does not support product programming / limit load"
+        )
+    if head != "60":
+        raise ValueError(
+            f"@TM:60 for {definition.name}: reply echoes {head!r}, "
+            f"expected '60' ({reply!r})"
+        )
+    body_all = rest[2:].lstrip(",").strip()
+    if len(body_all) < _LIMIT_LOAD_BODY_HEX + 2:
+        raise ValueError(
+            f"@TM:60 for {definition.name}: reply body too short "
+            f"({len(body_all)} hex chars, need {_LIMIT_LOAD_BODY_HEX + 2}): {reply!r}"
+        )
+    body, csum = body_all[:-2], body_all[-2:]
+    expected = _settings_checksum(f"60,{body}")
+    if csum.upper() != expected:
+        raise ValueError(
+            f"@TM:60 for {definition.name}: checksum mismatch (got {csum!r}, "
+            f"expected {expected!r} over '60,{body}'); reply was {reply!r}"
+        )
+    try:
+        echoed = int(body[:2], 16)
+    except ValueError as exc:
+        raise ValueError(
+            f"@TM:60 for {definition.name}: product code {body[:2]!r} is not hex"
+        ) from exc
+    if echoed != definition.code:
+        raise ValueError(
+            f"@TM:60 for {definition.name}: reply carries product code "
+            f"0x{echoed:02X}, expected 0x{definition.code:02X}"
+        )
+    pairs = body[2:_LIMIT_LOAD_BODY_HEX]
+    limits: list[ProductLimit] = []
+    for index, f_number in enumerate(LIMIT_LOAD_ARGUMENTS):
+        chunk = pairs[index * 4 : index * 4 + 4]
+        lo_hex, hi_hex = chunk[:2].upper(), chunk[2:].upper()
+        if lo_hex == "FF" or hi_hex == "FF":
+            continue  # not applicable to this product
+        param = next((p for p in definition.params if p.argument == f_number), None)
+        if param is None:
+            continue  # reported but not declared by this product's XML
+        try:
+            lo, hi = int(lo_hex, 16), int(hi_hex, 16)
+        except ValueError as exc:
+            raise ValueError(
+                f"@TM:60 for {definition.name}: F{f_number} range {chunk!r} is not hex"
+            ) from exc
+        step = param.step or 1
+        limits.append(
+            ProductLimit(
+                kind=param.kind,
+                argument=f_number,
+                minimum=lo * step,
+                maximum=hi * step,
+                step=step,
+            )
+        )
+    return ProductLimits(
+        product_code=definition.code,
+        product_name=definition.name,
+        limits=tuple(limits),
+        raw=body_all.upper(),
+    )

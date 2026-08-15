@@ -805,6 +805,19 @@ def _r_setting(_spec, client, args, timeout):
     return f"set {definition.name} = 0x{value_hex} (reply: {reply})"
 
 
+def _r_settings(_spec, client, _args, timeout):
+    _require_profile(client)
+    return client.read_all_settings(timeout=timeout)
+
+
+def _r_limits(_spec, client, args, timeout):
+    _require_profile(client)
+    try:
+        return client.read_limit_load(_ascii_arg("product", args[0]), timeout=timeout)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
 # --------------------------------------------------------------------- #
 # Counter banks beyond @TR:32 (see docs/PROTOCOL.md §5.5)
 # --------------------------------------------------------------------- #
@@ -1230,6 +1243,25 @@ _SPECS: tuple[CommandSpec, ...] = (
             "the XML's own Reset verb; no J.O.E. code path sends it, so "
             "what a real machine does with it has never been observed."
         ),
+    ),
+    # ---- read-only, appended ------------------------------------------
+    CommandSpec(
+        name="settings",
+        description=(
+            "read every machine setting; tries the XML's batch bank "
+            "(@TM:00,FC) and falls back to one @TM:<arg> per setting"
+        ),
+        arguments=(),
+        runner=_r_settings,
+    ),
+    CommandSpec(
+        name="limits",
+        description=(
+            "live per-product parameter limits (@TM:60); the ranges the "
+            "machine allows right now, as opposed to the XML's static ones"
+        ),
+        arguments=(Argument("product", "product name or 2-hex code"),),
+        runner=_r_limits,
     ),
 )
 

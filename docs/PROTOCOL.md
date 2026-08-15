@@ -800,6 +800,137 @@ settings. On EF1091 (S8 EB) the seven settings are:
 before the write is sent. The CLI's ``setting`` command goes through
 both validation and the destructive gate.
 
+#### Catalogue shape across all 89 profiles
+
+`<MACHINESETTINGS>` only ever contains four element kinds, all of
+which `MachineProfile` parses: `SWITCH` (91 across the bundle),
+`COMBOBOX` (122), `SLIDER` with `SliderType="StepSlider"` (46) or
+`"ItemSlider"` (44), plus the `BANK` declaration below. Notes from the
+survey:
+
+* 32 of the 89 profiles carry **no** `<MACHINESETTINGS>` block at all
+  (the older T-protocol families — `EF532`…`EF567`, `EF657`…`EF722`,
+  including the synthetic `EF536` fallback baseline). On those, there
+  is nothing to read and no settings bank.
+* Every `COMBOBOX` carries `Read="TM:<P_Argument>"`, which is
+  redundant with `P_Argument` in 121 of 122 cases (the 122nd is an
+  empty string). Nothing is parsed from it.
+* `Mask` is **not** slider-only: the ESM switch (`P_Argument="07"`)
+  in the `EF0000` / `EF_MASTER` templates carries `Mask="01"`.
+  `SettingDef.mask` now keeps it for every kind.
+* Settings arguments the J.O.E. mock exercises but EF1091 lacks are
+  ordinary catalogue entries elsewhere in the bundle and need no
+  special handling: `1F` (TimeFormat, a `SWITCH`, 10 profiles) and
+  `0A` (DisplayBrightnessSetting, a `COMBOBOX`, present on EF1091).
+* A `P_Argument` may legitimately appear twice in one block (`1E` is
+  both "Operating instructions" and "Aroma Control Instructions" in
+  the template); the first declaration wins, matching J.O.E.
+
+#### Batch settings read (`@TM:00,FC`) — **guessed reply, untested**
+
+57 of the 89 profiles declare, inside `<MACHINESETTINGS>`:
+
+```xml
+<BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>
+```
+
+`CommandArgument` is a concatenation of two-hex-digit `P_Argument`
+codes — `02` hardness, `08` units, `09` language, `13` auto-off —
+i.e. one round trip instead of four. The declaration is **identical**
+in all 57 (same command, same argument list); 16 of them name
+arguments their own `<MACHINESETTINGS>` block never declares (e.g.
+`EF1096` has neither `02`, `08` nor `13`), so the list is Jura
+boilerplate rather than per-machine truth.
+
+What the APK says about it: **nothing**. `XMLParser.e()` parses
+`CommandArgument` into the `Bank` model, whose constructor then throws
+it away (it keeps only name, command and text items). No
+`WifiCommand*` class issues `@TM:00,…`; the WiFi settings path is
+`WifiCommandReadPModeComposite`, which fans out into one
+`WifiCommandReadPMode` (`@TM:<arg>`) per `SettingElement`. So the app
+declares the bank and then never uses it.
+
+`jura_connect` therefore sends the XML's `Command` verbatim, the same
+way it treats every other `<BANK Command="…">`, and applies a strict,
+guessed decoder modelled on the single-setting read:
+
+```
+client → @TM:00,FC
+dongle → @tm:00,<v1><v2><v3><v4><csum>   (assumed success)
+dongle → @tm:00                          (rejection — no batch read)
+```
+
+* values are concatenated in `CommandArgument` order and
+  self-delimited by the ItemSlider type tags (`21` = one value byte
+  follows, `22` = two, anything else *is* a one-byte value) — the only
+  way a concatenated run can be split at all, since AutoOFF alone is
+  1, 2 or 3 bytes wide;
+* `<csum>` is the usual `ByteOperations.d` over `"00,<values>"`.
+
+Unknowns, spelled out:
+
+* whether the request needs a checksum of its own. `@TM:60,…` and
+  every settings write carry one; `@TM:41,…` / `@TM:42,…` reads do
+  not. `read_settings_bank(checksum=True)` sends the alternative form
+  `@TM:00,FCEA` for probing.
+* whether the reply is one frame or several.
+* whether the value order follows `CommandArgument` at all.
+
+Because of that, `JuraClient.read_all_settings()` treats the batch
+read as an optimisation only: any rejection, checksum failure, or
+value-count mismatch is caught and the settings are re-read one
+`@TM:<arg>` at a time. The returned `SettingsSnapshot` records which
+path was taken (`batch_used`, `batch_error`). **A wrong guess costs a
+round trip, never a wrong value.** Verifying this against a real
+machine is a read-only, non-destructive experiment: send `@TM:00,FC`
+and compare the reply against four individual reads.
+
+#### Limit load (`@TM:60,<product code><csum>`) — APK-derived, untested
+
+`WifiCommandReadLimitLoad` asks the machine for the ranges it will
+accept for one product *right now*, which is what J.O.E. bounds its
+product sliders with instead of the static XML `Min`/`Max`:
+
+```
+client → @TM:60,<product code><csum>       csum = ByteOperations.d("60,<code>")
+dongle → @tm:60,<code><5 min/max pairs><csum>
+dongle → @tm:C1                            (no product programming on this machine)
+```
+
+Decoded by `LimitLoadParser`:
+
+1. strip `@tm:`, require the `60` address (`C1` means "machine does
+   not support Product Programming" and aborts the read);
+2. the last two chars are a `ByteOperations.d` checksum over
+   `"60,<body>"` — same algorithm as the settings read/write;
+3. `<body>` is the echoed product code (which must match the request)
+   followed by **exactly five min/max byte pairs**, in this fixed
+   order regardless of what the product declares:
+
+   | Slot | Arg | Parameter |
+   | ---- | --- | --------- |
+   | 1 | `F4` | water amount |
+   | 2 | `F5` | milk amount |
+   | 3 | `F6` | milk foam amount |
+   | 4 | `F10` | bypass |
+   | 5 | `F11` | milk break |
+
+4. a pair with `FF` for min or max means "not applicable" and is
+   dropped, as is any pair for a parameter the product's XML does not
+   declare;
+5. surviving values are scaled by that parameter's XML `Step` — 5 for
+   water/bypass (so the bytes are 5 ml ticks, matching §5.9), 1 for
+   the milk parameters (seconds).
+
+Example (EF1091 Cappuccino, `04`): body `04` `0530` `FFFF` `012D`
+`FFFF` `FFFF` decodes to water 25..240 ml and milk foam 1..45 s, with
+milk / bypass / milk-break not applicable.
+
+`JuraClient.read_limit_load()` returns a `ProductLimits` whose
+`allows(kind, value)` bounds a brew against the machine's live limits.
+The request form and the decode come straight from the APK; neither
+has been exercised on hardware.
+
 ### 5.8 **Destructive** commands — gated behind `--allow-destructive-commands`
 
 These were observed in the EF536 machine XML or the APK and are

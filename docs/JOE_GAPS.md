@@ -25,9 +25,15 @@ for what is *implemented*. This file is the to-do list.
 | Status alerts (`@TF:`) | yes, + product/process/progress context | bit decode only |
 | Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
+<<<<<<< HEAD
 | Special / barista counter banks | yes (special only) | yes |
 | Daily counter banks + `@TF:05` reset | no | yes |
 | Machine settings read/write | yes (+ batch read) | yes (single) |
+=======
+| Special / barista counter banks | yes | no |
+| Machine settings read/write | yes (+ batch read) | yes; batch read implemented (guessed reply, falls back) |
+| Per-product live limits (`@TM:60`) | yes | yes (APK-derived, untested) |
+>>>>>>> wt/settings-batch
 | PMode slot read | yes | yes |
 | PMode slot/product **write** | yes | no |
 | Start product (`@TP:`) | yes, + preselections | yes, no preselections |
@@ -82,7 +88,8 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | `@TM:42,<slot>` → `@tm:(42,.*\|C2)` | `WifiCommandPModeSlotProductRead` | ✅ `pmode` |
 | `@TM:42,<slot>,<blob>` | `WifiCommandPModeSlotProductWrite` | ❌ |
 | `@TM:50` → `@tm:(50,.*\|D0)` | `WifiCommandPModeNumSlotsRead` | ✅ |
-| `@TM:60,<…>` → `@tm:60,…` | `WifiCommandReadLimitLoad` | ❌ |
+| `@TM:60,<…>` → `@tm:60,…` | `WifiCommandReadLimitLoad` | ✅ `limits` (untested on hardware) |
+| `@TM:00,FC` (XML `<BANK Name="Setting">`) | *declared, never sent* | ✅ `settings` (guessed reply, falls back) |
 | `@TP:<blob>` → `@tp` | `WifiCommandStartProduct` | ✅ `brew` |
 | `@TR:32,<page>` ×16 | `WifiCommandProductCounterStatistics` | ✅ `brews` |
 | `@TR:33,<page>` ×16 | same class, 1 byte/value | ✅ (overflow fold-in) |
@@ -203,19 +210,49 @@ and a `<LIFETIME>` block that we ignore.
 ## 5. Machine settings
 
 Implemented: single-setting read (`@TM:<arg>`) and the checksummed,
-`@TS:01`/`@TS:00`-wrapped write. Missing:
+`@TS:01`/`@TS:00`-wrapped write, plus (new) the batch read and the
+limit load. Status of each:
 
-* **Batch read.** Each XML declares
+* ~~**Batch read.**~~ **Done, with a caveat.** Each XML declares
   `<BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>`
-  — one round trip returning the four settings `02` (hardness), `08`
-  (units), `09` (language), `13` (auto-off) on EF1091. Today that is
-  four separate requests. (Which J.O.E. code path issues it is not
-  pinned down; the `Bank` model carries `commandArgument`, so it is
-  built from the XML, not hard-coded.)
-* **`@TM:60,…` limit load** (`WifiCommandReadLimitLoad`) — per-product
-  limits, read before showing product sliders. Unknown payload.
-* Settings arguments seen in the app's mock that our EF1091 catalogue
-  doesn't expose: `@TM:1F` (→ `@tm:1F,00FC`), `@TM:0A`.
+  — one round trip for the four settings `02` (hardness), `08`
+  (units), `09` (language), `13` (auto-off). `MachineProfile.
+  settings_bank` parses the declaration and
+  `JuraClient.read_settings_bank()` issues it (CLI: `settings`).
+  **The reply layout is a guess, not APK-derived**: J.O.E. 4.6.10
+  parses `CommandArgument` and then *discards* it in `Bank`'s
+  constructor, and its WiFi settings path is
+  `WifiCommandReadPModeComposite` = one `@TM:<arg>` per setting, so
+  the app never issues this command at all. `read_all_settings()`
+  therefore falls back to per-setting reads on any rejection,
+  checksum failure or value-count mismatch. Verifying it on hardware
+  is a read-only experiment: send `@TM:00,FC` and diff against four
+  single reads. Survey result: 57 of 89 profiles declare the bank,
+  always with the identical command and argument list; the remaining
+  32 have no `<MACHINESETTINGS>` block at all; and 16 of the 57 list
+  arguments their own catalogue never declares, so the list is
+  boilerplate — never hard-code it.
+* ~~**`@TM:60,…` limit load**~~ **Done** (`WifiCommandReadLimitLoad`).
+  Payload decoded from `LimitLoadParser`: `@tm:60,<code><5 min/max
+  byte pairs><csum>` for F4, F5, F6, F10, F11 in that fixed order,
+  `FF` meaning "not applicable", each pair scaled by the argument's
+  XML `Step`. `JuraClient.read_limit_load()` returns a `ProductLimits`
+  (CLI: `limits <product>`) whose `allows(kind, value)` bounds a brew
+  by what the machine permits *now* rather than by the static XML
+  range. APK-derived but never seen on a real machine.
+* ~~Settings arguments seen in the app's mock that our EF1091
+  catalogue doesn't expose: `@TM:1F` (→ `@tm:1F,00FC`), `@TM:0A`.~~
+  Not a gap: `1F` (TimeFormat) is an ordinary `<SWITCH>` on the 10
+  profiles that have it and `0A` (brightness) an ordinary
+  `<COMBOBOX>` — EF1091 simply has no TimeFormat. A survey of all 89
+  `<MACHINESETTINGS>` blocks found only four element kinds
+  (`SWITCH`, `COMBOBOX`, `SLIDER`×2 flavours, plus `BANK`), all of
+  them parsed. Two real omissions were fixed: the `BANK` element
+  itself, and `Mask` being read for sliders only (the ESM switch
+  carries `Mask="01"`). `Read="TM:<arg>"` on every `COMBOBOX` is
+  redundant with `P_Argument` and carries nothing.
+
+Still missing here: nothing for reads. Writes remain single-setting.
 
 ---
 
@@ -360,7 +397,7 @@ with their resolution because the reasoning is the interesting part.
 | `<PRESELECTION>` | extra-shot / double / powder / cold-brew flags | §6 |
 | `<COMBINATION>` | legal preselection combinations | §6 |
 | ~~`<BANK Command="@TG:43"/"@TG:C0">` `<TEXTITEM>`~~ | ~~per-machine counter field order~~ | done (§8.5) |
-| `<BANK Name="Setting">` | batch settings read | §5 |
+| ~~`<BANK Name="Setting">`~~ | ~~batch settings read~~ | done (§5) |
 | `<TOTALCOUNTER>`, `<LIFETIME>` | totals metadata | §4 |
 | `<BUTTON>`, `<PREDICTIVEBUTTON>` | machine-side favourites | UI only |
 | `<ENJOYSCREEN>`, `<TEXTITEM>`, `<LINK>` | display strings, manual URLs | UI only |
@@ -391,7 +428,17 @@ with their resolution because the reasoning is the interesting part.
 6. **Preselections in `@TP:`** — needs the argument byte reverse
    engineered (`ProductStartData.f18Enabled` suggests `F18`); verify on
    hardware before shipping, a wrong byte misbrews.
-7. **PMode writes (`@TM:41`/`@TM:42` write, `@TM:60`)** — blocked on
-   finding a machine that answers `@TM:42` with data at all; EF1091
-   answers `@tm:C2` for every slot.
-8. Coffee timer, language download, OTA — only if someone wants them.
+7. **PMode writes (`@TM:41`/`@TM:42` write)** — blocked on finding a
+   machine that answers `@TM:42` with data at all; EF1091 answers
+   `@tm:C2` for every slot. `@TM:60` (limit load) is no longer part of
+   this item: it is implemented, and it is the cheapest of the three to
+   confirm on hardware since it only reads.
+8. **Confirm the two new read paths on a machine** (§5). Both are
+   read-only, so this costs nothing but a session: compare
+   `@TM:00,FC` against four single reads (and retry with the
+   checksummed request form, `read_settings_bank(checksum=True)`), and
+   compare `@TM:60,<code>` against the product's XML ranges. If the
+   batch reply layout differs from the guess, fix
+   `client._parse_settings_bank_reply` and PROTOCOL.md §5.7 — the
+   fallback means nothing breaks in the meantime.
+9. Coffee timer, language download, OTA — only if someone wants them.

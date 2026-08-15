@@ -130,7 +130,7 @@ class SettingDef:
     minimum: int | None  # step_slider only
     maximum: int | None  # step_slider only
     step: int | None  # step_slider only
-    mask: str | None  # step_slider only ("FF", "FFFF" …)
+    mask: str | None  # value mask when declared ("FF", "FFFF", "01" …)
 
     def item_by_name(self, name: str) -> SettingItem | None:
         target = _snake(name)
@@ -244,6 +244,33 @@ class SettingDef:
             f"{self.raw_name}: {raw!r} is not a recognised value. "
             f"Allowed: {allowed or '(no options known)'}"
         )
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class SettingsBank:
+    """The ``<MACHINESETTINGS><BANK Name="Setting">`` declaration.
+
+    ``<BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>``
+    describes a *batch* settings read: one round trip that answers with
+    the values of several ``P_Argument`` settings at once (here ``02``
+    hardness, ``08`` units, ``09`` language, ``13`` auto-off) instead of
+    one ``@TM:<arg>`` request per setting.
+
+    All 57 profiles that declare the bank declare exactly this command
+    and this argument list; the remaining 32 carry no
+    ``<MACHINESETTINGS>`` block at all. The list is boilerplate rather
+    than machine truth — 16 profiles name arguments their own catalogue
+    never declares — so consumers must tolerate a bank argument with no
+    matching :class:`SettingDef`.
+
+    See :meth:`jura_connect.client.JuraClient.read_settings_bank`: the
+    reply layout is **not** APK-derived (no J.O.E. code path issues the
+    command) and is untested on hardware.
+    """
+
+    name: str  # the XML Name attribute, always "Setting" so far
+    command: str  # wire command, e.g. "@TM:00,FC"
+    arguments: tuple[str, ...]  # P_Arguments in reply order, e.g. ("02", …)
 
 
 #: Total length of the ``@TP:`` recipe blob in bytes. Live-verified by
@@ -523,6 +550,10 @@ class MachineProfile:
     # profile without FilterChange). See docs/PROTOCOL.md §5.3.
     maintenance_counter_fields: tuple[str, ...] = ()
     maintenance_percent_fields: tuple[str, ...] = ()
+    # The <MACHINESETTINGS><BANK Name="Setting"> declaration, when the
+    # XML carries one (57 of the 89 bundled profiles). See
+    # :class:`SettingsBank` and docs/PROTOCOL.md §5.7.
+    settings_bank: SettingsBank | None = None
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -649,6 +680,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
     )
 
     settings = _parse_machine_settings(root)
+    settings_bank = _parse_settings_bank(root)
 
     return MachineProfile(
         code=code,
@@ -662,6 +694,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         daily_counter_reset=daily_counter_reset,
         maintenance_counter_fields=_bank_fields(root, MAINTENANCE_COUNTER_BANK),
         maintenance_percent_fields=_bank_fields(root, MAINTENANCE_PERCENT_BANK),
+        settings_bank=settings_bank,
     )
 
 
@@ -773,6 +806,39 @@ def _setting_kind(tag: str, slider_type: str | None) -> str | None:
     return _SETTING_TAG_TO_KIND.get(tag)
 
 
+def _parse_settings_bank(root: ET.Element) -> SettingsBank | None:
+    """Parse ``<MACHINESETTINGS><BANK Name="Setting" …>``.
+
+    ``CommandArgument`` is a concatenation of two-hex-digit
+    ``P_Argument`` codes (``"02080913"`` → ``("02", "08", "09", "13")``)
+    naming the settings the batch read answers with, in reply order.
+    Returns ``None`` when the XML declares no settings bank, and drops
+    a bank whose ``CommandArgument`` is missing or not a whole number of
+    hex bytes rather than guessing at a partial list.
+    """
+    container = root.find(".//{*}MACHINESETTINGS")
+    if container is None:
+        return None
+    for el in container:
+        if el.tag.split("}", 1)[-1] != "BANK":
+            continue
+        command = (el.get("Command") or "").strip()
+        raw_args = (el.get("CommandArgument") or "").strip().upper()
+        if not command or not raw_args or len(raw_args) % 2:
+            continue
+        try:
+            int(raw_args, 16)
+        except ValueError:
+            continue
+        arguments = tuple(raw_args[i : i + 2] for i in range(0, len(raw_args), 2))
+        return SettingsBank(
+            name=el.get("Name") or "Setting",
+            command=command,
+            arguments=arguments,
+        )
+    return None
+
+
 def _parse_machine_settings(root: ET.Element) -> tuple[SettingDef, ...]:
     """Parse <MACHINESETTINGS> into a tuple of :class:`SettingDef`.
 
@@ -822,7 +888,12 @@ def _parse_machine_settings(root: ET.Element) -> tuple[SettingDef, ...]:
         minimum: int | None = None
         maximum: int | None = None
         step: int | None = None
-        mask: str | None = None
+        # Mask is not slider-only: the ESM switch (P_Argument="07")
+        # carries Mask="01". Keep whatever the XML declares for every
+        # kind so the catalogue mirrors the source.
+        mask = el.get("Mask")
+        if mask is not None:
+            mask = mask.upper()
         if kind == "step_slider":
             try:
                 minimum = int(el.get("Min", "")) if el.get("Min") else None
@@ -830,9 +901,6 @@ def _parse_machine_settings(root: ET.Element) -> tuple[SettingDef, ...]:
                 step = int(el.get("Step", "")) if el.get("Step") else None
             except ValueError:
                 pass
-            mask = el.get("Mask")
-            if mask is not None:
-                mask = mask.upper()
         settings.append(
             SettingDef(
                 name=_snake(raw_name),
