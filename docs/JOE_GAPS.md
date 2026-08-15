@@ -1,19 +1,25 @@
 # `jura-connect` vs. the J.O.E. Android app — feature gap analysis
 
 What the official J.O.E. app (`ch.toptronic.joe` 4.6.10) does over the
-WiFi (TCP/51515) transport that `jura-connect` 0.12.0 does not, plus the
-places where the two disagree about what a command *means*.
+WiFi (TCP/51515) transport, what `jura-connect` does today, and what is
+left. It doubles as the record of the places where the two once
+disagreed about what a command *means* — those are resolved now, and
+the reasoning is kept because it is the interesting part (§8).
 
 Derived from the decompiled APK — the `joe_android_connector` module
 survives obfuscation with readable class names, so
 `CoffeeMachineAdapterWifi`, the `WifiCommand*` classes and the
 `CoffeeMachineAdapterBle2` (Smart Connect 2) adapter are the reference.
 The bundled machine XMLs under `jura_connect/data/xml/` are the second
-source. **Nothing below was probed on hardware** unless it says so;
-treat the wire formats as APK-derived until verified.
+source.
+
+**Provenance warning, and it is the biggest one in this document:**
+almost everything added after v0.12.0 is *APK-derived and
+simulator-verified only*. See §9 for the honest enumeration — that list,
+not the ❌ rows in §1, is now the main risk in the library.
 
 Companion document: [`PROTOCOL.md`](PROTOCOL.md) is the source of truth
-for what is *implemented*. This file is the to-do list.
+for what is *implemented* and how. This file is the scoreboard.
 
 ---
 
@@ -21,148 +27,164 @@ for what is *implemented*. This file is the to-do list.
 
 | Area | J.O.E. WiFi | `jura-connect` |
 | ---- | ----------- | -------------- |
-| Handshake, pairing, credential store | yes | **yes** |
-| Status alerts (`@TF:`) | yes, + product/process/progress context | bit decode only |
+| Handshake, pairing, credential store | yes | **yes** (hardware-verified) |
+| Status alerts (`@TF:`) | yes, + product/process/progress context | yes; bit decode + `blocked_kinds` / `blocking_alerts` / `alert_processes` / `can_brew()` |
 | Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
-| Special / barista counter banks | yes (special only) | yes |
-| Daily counter banks + `@TF:05` reset | no | yes |
-| Machine settings read/write | yes (+ batch read) | yes; batch read implemented (guessed reply, falls back) |
+| Special / barista counter banks | yes (special only) | yes (both) |
+| Daily counter banks + `@TF:05` reset | no | yes — past J.O.E. |
+| Machine settings read/write | yes (+ batch read declared, never sent) | yes; batch read implemented (guessed reply, falls back per setting) |
 | Per-product live limits (`@TM:60`) | yes | yes (APK-derived, untested) |
 | PMode slot read | yes | yes |
-| PMode slot/product **write** | yes | yes (APK-derived, hardware-untested) |
-| Start product (`@TP:`) | yes, + preselections | yes, no preselections |
-| Product progress state machine (`@TV:`) | yes, ~50 states | no |
-| Maintenance processes with user interaction | yes | fire-and-forget only |
-| Coffee timer (scheduled brew) | yes | no |
-| Language download | yes | no |
-| Firmware OTA / bootloader | yes | no |
-| Milk-cooler firmware update | yes | no |
-| WiFi credential provisioning (BluFi) | yes | no (can set SSID/pass on a paired dongle) |
-| Session keep-alive / priority queue | yes | no |
+| PMode slot/product **write** | yes | yes (APK-derived, untested) |
+| Start product (`@TP:`) | yes, + preselections | yes, + preselections (blob live-verified; preselection encoding untested) |
+| Product progress state machine (`@TV:`) | yes, `ProgressState` | yes — 87 states, `ProductProgress`, `iter_progress` / `follow_progress` / `brew(follow=True)` |
+| Maintenance processes with user interaction | yes | yes — `ProcessRunner` over `@TG:01` / `@TG:04` / `@TG:10` |
+| Coffee timer (scheduled brew) | yes | yes (APK-derived, untested) |
+| Language download | yes (+ CDN fetch) | yes, minus the fetch — caller supplies the S-records |
+| PMode bookkeeping after a language download | yes (`@TM:24/25/09/22/23`) | **no** — deliberate, see §7 |
+| Firmware OTA / bootloader | yes | library-only sequencer, no CLI command, gated on `acknowledge_bricking_risk=True` |
+| Milk-cooler firmware update | yes | yes (`milk-cooler-status` / `milk-cooler-update`) |
+| WiFi credential provisioning (BluFi) | yes | **no** (can set SSID/pass on an already-paired dongle) |
+| Session keep-alive / priority queue | yes | **no** |
+| Smart Connect 2 / BLE2 transport | yes | **no** — out of scope for a WiFi library |
 
-Roughly: `jura-connect` covers the read paths and single-shot writes.
-Everything stateful — anything where the machine talks back mid-operation
-— is missing.
+Roughly: the read paths, the single-shot writes, and — new since
+v0.12.0 — everything stateful are covered. What remains is either a
+different transport (BluFi, BLE2), app-level bookkeeping, or plumbing
+(keep-alive).
 
 ---
 
 ## 1. Command coverage
 
-Every `WifiCommand*` class in the APK, its wire form, and where we stand.
-`⚠` marks a command we send with a *different meaning attached* (see §8).
+Every `WifiCommand*` class in the APK, its wire form, and where we
+stand. All 51 are accounted for: 39 in `connection/command/`, 10 in
+`connection/command/language_download/`, and the two `UDPCommand*`
+classes.
 
 | Wire | J.O.E. class | `jura-connect` |
 | ---- | ------------ | -------------- |
 | `@HP:<pin>,<connid>,<hash>` | `WifiCommandConnectionSetup` | ✅ `JuraClient.connect` / `pair` |
 | *(empty frame)* | `WifiCommandCloseConnection` | ✅ `JuraClient.close` |
-| `@HE` → `@he:ok` | `WifiCommandOTAEnd` | ❌ (no longer sent; simulator still accepts it) |
-| `@HB` → `@hb:ok` | `WifiCommandBootloaderMode` | ❌ |
-| `@HD:<payload>` | `WifiCommandSendApplicationBin` | ❌ |
-| `@HO:<payload>` → `@ho:ok` | `WifiCommandSendApplicationDat` | ❌ |
-| `@HT:3` → `@ht` | `WifiCommandRestartFrog` | ❌ (we restart the *machine*, not the dongle) |
-| `@HU` → `@hu:(ok\|wait\|busy\|abort\|error)` | `WifiCommandMilkCoolerUpdateStart` | ❌ |
-| `@HU?` → `@hu:<3 hex>` | `WifiCommandMilkCoolerUpdateStatus` | ❌ as such; sent only by `read_status(nudge=True)` |
+| `@HE` → `@he:ok` | `WifiCommandOTAEnd` | ✅ `firmware.run_ota` (library-only) |
+| `@HB` → `@hb:ok` | `WifiCommandBootloaderMode` | ✅ same |
+| `@HD:<payload>` | `WifiCommandSendApplicationBin` | ✅ same |
+| `@HO:<payload>` → `@ho:ok` | `WifiCommandSendApplicationDat` | ✅ same |
+| `@HT:3` → `@ht` | `WifiCommandRestartFrog` | ✅ `restart-dongle` (gated) |
+| `@HU` → `@hu:(ok\|wait\|busy\|abort\|error)` | `WifiCommandMilkCoolerUpdateStart` | ✅ `milk-cooler-update` (gated) |
+| `@HU?` → `@hu:<3 hex>` | `WifiCommandMilkCoolerUpdateStatus` | ✅ `milk-cooler-status`; also the optional `read_status(nudge=True)` nudge |
 | `@HW:01,<pin>` | `WifiCommandSetPinCode` | ✅ `set-pin` |
 | `@HW:80,<ssid>` | `WifiCommandSetSSID` | ✅ `set-ssid` |
 | `@HW:81,<pwd>` | `WifiCommandSetPassword` | ✅ `set-password` |
 | `@HW:82,<name>` | `WifiCommandSetFrogName` | ✅ `set-name` |
 | `@TF:02` → `@tf:02` | `WifiCommandRestartCoffeeMachine` | ✅ `restart` |
-| `@TG:01` → `@tg:(01\|00)` | `WiFiCommandNextProductStep` | ❌ |
-| `@TG:04` / `@TG:10` | `WifiCommandProcessAccept` | ❌ |
+| `@TG:01` → `@tg:(01\|00)` | `WiFiCommandNextProductStep` | ✅ `process-next` / `ProcessRunner.next_step` |
+| `@TG:04` / `@TG:10` | `WifiCommandProcessAccept` | ✅ `process-accept` / `ProcessRunner.accept` |
 | `@TG:7E` / `@TG:7E,FF×16` → `@tg:7E` | `WifiCommandCancelQualityAssistantStep` | ✅ `skip-quality-step [one\|all]` (gated — see §8.1) |
-| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ✅ `cancel` (not gated) |
-| `@TG:21/23/24/25/26` | `WifiCommandStartProcess` | ✅ fire-and-forget (`clean`, `descale`, …) |
+| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ✅ `cancel` (not gated — §8.2) |
+| `@TG:21/23/24/25/26` | `WifiCommandStartProcess` | ✅ `clean` / `descale` / … fire-and-forget, **and** `process-start` / `process-run` as a state machine |
 | `@TG:43` → `@tg:43…` | `WifiCommandReadMaintenanceCounter` | ✅ `counters` |
 | `@TG:C0` → `@tg:C0…` | `WifiCommandReadMaintenanceStatus` | ✅ `percent` |
 | `@TM:<arg>` → `@tm:<arg>,…` | `WifiCommandReadPMode` | ✅ `read_setting` |
 | `@TM:<arg>,<val><csum>` | `WifiCommandWritePMode` | ✅ `write_setting` |
-| `@TM:23` | `WifiCommandReadMaxLanguages` | ❌ |
-| `@TM:3C,<40 hex><time><csum>` | `WifiCommandStartCoffeeTimer` | ❌ |
-| `@TM:41,<code>` → `@tm:(41,.*\|C1)` | `WifiCommandPModeProductRead` | ✅ `pmode-product` (untested) |
-| `@TM:41,<blob><csum>` → `@tm:41` | `WifiCommandPModeProductWrite` | ✅ `pmode-set-product` (untested) |
+| *(per-setting composite)* | `WifiCommandReadPModeComposite` | ✅ `settings` fallback path |
+| `@TM:23` | `WifiCommandReadMaxLanguages` | ✅ `languages` |
+| `@TM:3C,<40 hex><time><csum>` | `WifiCommandStartCoffeeTimer` | ✅ `coffee-timer` (gated) |
+| `@TM:41,<code>` → `@tm:(41,.*\|C1)` | `WifiCommandPModeProductRead` | ✅ `pmode-product` |
+| `@TM:41,<blob><csum>` → `@tm:41` | `WifiCommandPModeProductWrite` | ✅ `pmode-set-product` (gated) |
 | `@TM:42,<slot>` → `@tm:(42,.*\|C2)` | `WifiCommandPModeSlotProductRead` | ✅ `pmode` |
-| `@TM:42,<slot>,<blob>` | `WifiCommandPModeSlotProductWrite` | ✅ `pmode-set-slot` (untested) |
+| `@TM:42,<slot>,<blob>` | `WifiCommandPModeSlotProductWrite` | ✅ `pmode-set-slot` (gated) |
 | `@TM:50` → `@tm:(50,.*\|D0)` | `WifiCommandPModeNumSlotsRead` | ✅ |
-| `@TM:60,<…>` → `@tm:60,…` | `WifiCommandReadLimitLoad` | ✅ `limits` (untested on hardware) |
+| `@TM:60,<…>` → `@tm:60,…` | `WifiCommandReadLimitLoad` | ✅ `limits` |
 | `@TM:00,FC` (XML `<BANK Name="Setting">`) | *declared, never sent* | ✅ `settings` (guessed reply, falls back) |
-| `@TP:<blob>` → `@tp` | `WifiCommandStartProduct` | ✅ `brew` |
+| `@TP:<blob>` → `@tp` | `WifiCommandStartProduct` | ✅ `brew`, incl. preselections |
 | `@TR:32,<page>` ×16 | `WifiCommandProductCounterStatistics` | ✅ `brews` |
 | `@TR:33,<page>` ×16 | same class, 1 byte/value | ✅ (overflow fold-in) |
 | `@TR:52,<page>` ×4 | `WifiCommandSpecialCounterStatistics` | ✅ `special-counters` |
 | `@TR:53,<page>` ×4 | same class, 1 byte/value | ✅ (overflow fold-in) |
-| `@TR:34/35` | *(declared in XML; no APK code path — BLE2 reads only 32/33/52/53)* | ✅ `barista-counters` |
+| `@TR:34/35` | *(declared in XML; no APK code path)* | ✅ `barista-counters` |
 | `@TR:42..45` | *(declared in XML under `<DAILYCOUNTER>`; no APK code path)* | ✅ `daily-brews` / `daily-barista-counters` |
 | `@TF:05` | *(XML `<DAILYCOUNTER Reset=…>`; no APK code path)* | ✅ `reset-daily-counters` (gated) |
 | `@TS:01` / `@TS:00` | `WifiCommandLock` / `WifiCommandUnlock` | ✅ `lock` / `unlock` |
-| `@TS:F1` | `WifiCommandLanguageDownloadLock` | ❌ |
-| `@TT:00/01,<n>/02,<data>/03/08,<data>` | language download suite | ❌ |
-| `@TV:81,<text>` / `@TV:82,<text>` | display line 1 / line 2 during download | ❌ |
-| `@TV:84,<time>` | `WifiSendTimeForCoffeeTimer` | ❌ |
-| *(empty, priority 0)* | `WifiCommandNoExecution` (keep-alive) | ❌ |
+| `@TS:F1` | `WifiCommandLanguageDownloadLock` | ✅ `language-lock` (gated) |
+| `@TS:00` (download release) | `WifiCommandLanguageDownloadUnlock` | ✅ same verb as `unlock` |
+| `@TT:00` | `WifiCommandGetListOfLanguages` | ✅ `languages` |
+| `@TT:01,<block>` | `WifiCommandSelectLanguageBlock` | ✅ `language-download` |
+| `@TT:02,<addr><data>` | `WifiCommandTransferLanguageData` | ✅ same (ASCII form) |
+| `@TT:08,<binary>` | `WifiCommandTransferBinaryLanguageData` | ✅ same (binary form) |
+| `@TT:03` | `WifiCommandFinishLanguageDownload` | ✅ same |
+| `@TV:81,<text>` / `@TV:82,<text>` | `WifiCommandLanguageDownloadLoadingMessageLine{1,2}` | ✅ `language-display` (gated) |
+| `@TV:84,<time>` | `WifiSendTimeForCoffeeTimer` | ✅ `coffee-timer-time` |
+| *(empty, priority 0)* | `WifiCommandNoExecution` (keep-alive) | ❌ — §7 |
 | UDP `0010A5F3…` broadcast | `UDPCommandScan` | ✅ `discover` |
 | UDP unicast status probe | `UDPCommandStatus` | ✅ (`probe`; TT237W ignores it) |
 
-Count: 51 J.O.E. WiFi command classes vs. 38 named commands in
-`jura_connect.commands`.
+Count: 51 J.O.E. command classes vs. 53 named commands in
+`jura_connect.commands` plus the library-only OTA sequencer. The counts
+do not line up 1:1 in either direction — several app classes collapse
+into one named command (`@TT:02` / `@TT:08` are both
+`language-download`) and several named commands have no app class at
+all (the daily banks).
 
 ---
 
-## 2. Interactive maintenance processes
+## 2. Interactive maintenance processes — **done**
 
-Today `jura-connect clean` sends `@TG:24` and returns. J.O.E. runs a
-loop:
+`jura_connect/process.py` implements the loop J.O.E. runs:
 
-1. `WifiCommandStartProcess` sends the XML's
-   `<PROCESS ExecuteCommand="@TG:24">`; the reply is the lower-cased
-   echo (`@tg:24`).
-2. The machine then drives the phone through its `<STATE>` table via
-   `@TF:` frames — EF1091 declares **83 states** ("Insert Tray",
-   "Fill watertank", "Add powder", "Press Rinse", …).
-3. States carrying `AcceptCommand` need an explicit confirmation:
-   `@TG:10` (78 of 89 profiles) or `@TG:04` (10 profiles) —
-   `WifiCommandProcessAccept`.
-4. `@TG:01` advances to the next step (`WiFiCommandNextProductStep`),
-   `@TG:FF` cancels the current step.
+1. `ProcessRunner.start()` sends the XML's
+   `<PROCESS ExecuteCommand="@TG:24">`; the machine answers with the
+   lower-cased echo (`@tg:24`).
+2. The machine then drives the client through its `<STATE>` table via
+   pushed `@TV:` frames — EF1091 declares **83 states** ("Insert Tray",
+   "Fill watertank", "Add powder", "Press Rinse", …), decoded through
+   the profile so each step carries the machine's own label.
+3. States carrying `AcceptCommand` are confirmed with `@TG:10` (78 of
+   89 profiles) or `@TG:04` (10 profiles) — `ProcessRunner.accept()`,
+   CLI `process-accept`. Only four states in the whole corpus ever
+   carry one.
+4. `@TG:01` advances (`process-next`), `@TG:FF` cancels (`cancel`).
 
-Consequences of not implementing this: a cleaning cycle started from
-`jura-connect` stalls at the first state that wants a confirmation, and
-the caller has no way to see *which* state it is stuck in beyond raw
-`@TF:` bits. `MachineProfile` does not parse `<PROCESS>` or `<STATE>` at
-all today.
+Exposed as `processes` (catalogue, no I/O), `process-watch`
+(read-only), `process-start`, `process-run` (drives it to the finish
+state, auto-confirming), `process-accept`, `process-next`; from Python
+as `JuraClient.process_runner` / `run_process` / `watch_process`.
+`MachineProfile` parses `<PROCESS>` and `<PROGRESS_STATE_INTAKE>`.
+
+What is still not known: the *order* the states arrive in. The XMLs
+declare which states exist and which need a confirmation, never the
+sequence, so `SimulatorConfig.process_sequences` is a reconstruction
+(PROTOCOL.md §5.11). Nothing here has run against a real machine —
+every confirmation on real hardware advances a real cycle and consumes
+supplies.
 
 ---
 
-## 3. Product progress (`@TV:`)
+## 3. Product progress (`@TV:`) — **done**
 
-`jura-connect` treats `@TV:` frames as noise to be skipped
-(`client.py:328`, `client.py:370`). J.O.E. decodes them into a
-`Progress` object with a mode of
+`jura_connect/progress.py` decodes the pushed `@TV:` frames into a
+`ProductProgress` with a `ProgressType` of
 `PRODUCT / PROCESS / P_MODE / AROMA_PRESELECTION / COFFEE_TIMER /
-QUALITY_ASSISTANT / NONE` and one of ~50 `ProgressState` values, e.g.
+QUALITY_ASSISTANT / NONE` and one of the app's **87** `ProgressState`
+values, plus the `ProductProgressState` value window (current / target /
+percent). Nothing raises on an unknown state code or a truncated
+payload — `state` is `None` and the raw byte survives in `state_code`.
 
-```
-COFFEE_BEAN_AMOUNT(0x39)  COFFEE_WATER_AMOUNT(0x3C)  ENJOY(0x3E)
-MILK_FOAM_MILK_VOLUME(0x32)  MILK_FOAM_PAUSE(0x33)  POPUP_WINDOW(0x30)
-HOTWATER_TEMPERATURE(0x40)  HOTWATER_VOLUME(0x41)  STEAM_TIME(0x42)
-INSERT_TRAY(0x01)  FILL_WATERTANK(0x02)  EMPTY_GROUNDS(0x03)
-ADD_POWDER_COFFEE(0x10)  ADD_BEANS(0x13)  ALARM(0x0E)  …
-```
+Consumed as `JuraClient.iter_progress()` (generator),
+`follow_progress()` (collect until `ENJOY`), `brew(follow=True)`, and
+the read-only `progress` CLI command. `@TV:81` / `@TV:82` / `@TV:84` are
+*not* progress frames and `is_progress_frame` filters them.
 
-plus `ProductProgressState` for the per-parameter live values
-(`COFFEE_WATER_AMOUNT`, `MILK_FOAM_VOLUME`, `BYPASS_WATER_VOLUME`,
-`SMART_ALERT_PAUSE`, …). `PROTOCOL.md` §5.9 already records the byte
-layout we know (`@TV:41<code>…` tick/target/percent, `@TV:3E<code>`
-completion); what's missing is a decoder and a state enum.
-
-This is the single biggest usability gap: without it there is no way to
-report "brewing, 60 %" or "waiting for you to empty the grounds".
+Remaining unknowns are recorded in PROTOCOL.md §9: no full raw capture
+of a real brew, no milk drink, no bypass frame, no `8F` extended-window
+frame, and 18 of EF1091's states are absent from the app's own enum.
 
 ---
 
-## 4. Statistics
+## 4. Statistics — **done**
 
-**Done.** All ten banks are read (`JuraClient.read_counter_bank`,
+All ten banks are read (`JuraClient.read_counter_bank`,
 `COUNTER_BANK_SPECS`), each only when the machine's profile declares
 it. Page counts marked "assumed" use the product counter's 16 pages and
 stop early on `@tr:00`.
@@ -184,14 +206,14 @@ J.O.E. merges the banks it reads into one `StatisticsCollection`
 alongside the maintenance banks; the overflow fold
 (`count = value + (overflow << 16)`) is identical for every pair.
 
-**Where we now go past J.O.E.:** the `<DAILYCOUNTER Reset="@TF:05">`
-banks (`@TR:42`..`@TR:45`) appear in no APK code path — the XML's own
+**Where we go past J.O.E.:** the `<DAILYCOUNTER Reset="@TF:05">` banks
+(`@TR:42`..`@TR:45`) appear in no APK code path — the XML's own
 `<!-- Not available in JOE -->` comment is accurate, and grepping the
 decompiled app for `@TR:4[2-5]` or `@TF:05` returns nothing. They are a
 real machine capability the app ignores, and they are what a "brews
-today" sensor wants, so the library reads them
-(`daily-brews`, `daily-barista-counters`) and exposes the reset verb as
-the gated `reset-daily-counters`. Untested against hardware.
+today" sensor wants, so the library reads them (`daily-brews`,
+`daily-barista-counters`) and exposes the reset verb as the gated
+`reset-daily-counters`. Untested against hardware.
 
 Also unlike J.O.E.: the special bank's named slots
 (`SPECIAL_COUNTER_SLOTS`) drop the app's `hotBrew`, which reads slot 0 —
@@ -199,62 +221,57 @@ the same slot as the total — and looks like a copy/paste bug in
 `SpecialCounterStatisticsParser`.
 
 The XML also declares `<TOTALCOUNTER Code="00" Name="Total Products">`
-and a `<LIFETIME>` block that we ignore.
+and a `<LIFETIME>` block that we still ignore.
 
 ---
 
-## 5. Machine settings
+## 5. Machine settings — **done**
 
-Implemented: single-setting read (`@TM:<arg>`) and the checksummed,
-`@TS:01`/`@TS:00`-wrapped write, plus (new) the batch read and the
-limit load. Status of each:
+Single-setting read (`@TM:<arg>`), the checksummed `@TS:01`/`@TS:00`-
+wrapped write, the batch read and the limit load are all implemented.
 
-* ~~**Batch read.**~~ **Done, with a caveat.** Each XML declares
+* **Batch read.** Each XML declares
   `<BANK Name="Setting" Command="@TM:00,FC" CommandArgument="02080913"/>`
   — one round trip for the four settings `02` (hardness), `08`
-  (units), `09` (language), `13` (auto-off). `MachineProfile.
-  settings_bank` parses the declaration and
+  (units), `09` (language), `13` (auto-off).
+  `MachineProfile.settings_bank` parses the declaration and
   `JuraClient.read_settings_bank()` issues it (CLI: `settings`).
   **The reply layout is a guess, not APK-derived**: J.O.E. 4.6.10
   parses `CommandArgument` and then *discards* it in `Bank`'s
   constructor, and its WiFi settings path is
-  `WifiCommandReadPModeComposite` = one `@TM:<arg>` per setting, so
-  the app never issues this command at all. `read_all_settings()`
-  therefore falls back to per-setting reads on any rejection,
-  checksum failure or value-count mismatch. Verifying it on hardware
-  is a read-only experiment: send `@TM:00,FC` and diff against four
-  single reads. Survey result: 57 of 89 profiles declare the bank,
-  always with the identical command and argument list; the remaining
-  32 have no `<MACHINESETTINGS>` block at all; and 16 of the 57 list
-  arguments their own catalogue never declares, so the list is
-  boilerplate — never hard-code it.
-* ~~**`@TM:60,…` limit load**~~ **Done** (`WifiCommandReadLimitLoad`).
-  Payload decoded from `LimitLoadParser`: `@tm:60,<code><5 min/max
-  byte pairs><csum>` for F4, F5, F6, F10, F11 in that fixed order,
-  `FF` meaning "not applicable", each pair scaled by the argument's
-  XML `Step`. `JuraClient.read_limit_load()` returns a `ProductLimits`
+  `WifiCommandReadPModeComposite` = one `@TM:<arg>` per setting, so the
+  app never issues this command at all. `read_all_settings()`
+  therefore falls back to per-setting reads on any rejection, checksum
+  failure or value-count mismatch. Verifying it on hardware is a
+  read-only experiment: send `@TM:00,FC` and diff against four single
+  reads. Survey result: 57 of 89 profiles declare the bank, always with
+  the identical command and argument list; the remaining 32 have no
+  `<MACHINESETTINGS>` block at all; and 16 of the 57 list arguments
+  their own catalogue never declares, so the list is boilerplate —
+  never hard-code it.
+* **`@TM:60,…` limit load** (`WifiCommandReadLimitLoad`). Payload
+  decoded from `LimitLoadParser`: `@tm:60,<code><5 min/max byte
+  pairs><csum>` for F4, F5, F6, F10, F11 in that fixed order, `FF`
+  meaning "not applicable", each pair scaled by the argument's XML
+  `Step`. `JuraClient.read_limit_load()` returns a `ProductLimits`
   (CLI: `limits <product>`) whose `allows(kind, value)` bounds a brew
   by what the machine permits *now* rather than by the static XML
   range. APK-derived but never seen on a real machine.
-* ~~Settings arguments seen in the app's mock that our EF1091
-  catalogue doesn't expose: `@TM:1F` (→ `@tm:1F,00FC`), `@TM:0A`.~~
-  Not a gap: `1F` (TimeFormat) is an ordinary `<SWITCH>` on the 10
-  profiles that have it and `0A` (brightness) an ordinary
-  `<COMBOBOX>` — EF1091 simply has no TimeFormat. A survey of all 89
-  `<MACHINESETTINGS>` blocks found only four element kinds
-  (`SWITCH`, `COMBOBOX`, `SLIDER`×2 flavours, plus `BANK`), all of
-  them parsed. Two real omissions were fixed: the `BANK` element
-  itself, and `Mask` being read for sliders only (the ESM switch
-  carries `Mask="01"`). `Read="TM:<arg>"` on every `COMBOBOX` is
-  redundant with `P_Argument` and carries nothing.
+* Settings arguments once thought missing (`@TM:1F` TimeFormat,
+  `@TM:0A` brightness) are ordinary `<SWITCH>` / `<COMBOBOX>` elements
+  on the profiles that have them; EF1091 simply has no TimeFormat. A
+  survey of all 89 `<MACHINESETTINGS>` blocks found only four element
+  kinds (`SWITCH`, `COMBOBOX`, `SLIDER`×2 flavours, plus `BANK`), all
+  parsed.
 
-Still missing here: nothing for reads. Writes remain single-setting.
+Writes remain single-setting — the batch command is read-only in every
+XML that declares it.
 
 ---
 
-## 6. Product start — preselections and timers
+## 6. Product start — preselections and timers — **done**
 
-`brew` builds the 16-byte `@TP:` blob from the XML's `Argument="F<n>"`
+`brew` builds the `@TP:` blob from the XML's `Argument="F<n>"`
 parameters. Complete list across all 89 profiles:
 
 | Arg | Tag | Lib |
@@ -268,62 +285,70 @@ parameters. Complete list across all 89 profiles:
 | `F8` | `STROKE` | encoded, untested |
 | `F10` | `BYPASS` | ✅ live-verified |
 | `F11` | `MILK_BREAK` | encoded, untested |
-| `F17` | `GRINDER_FREENESS` | encoded, untested |
+| `F17` | `GRINDER_FREENESS` | encoded, untested (grows the blob to 17 bytes) |
 
-What is *not* implemented:
-
-* **Preselections.** Each `<PRODUCT>` carries `<PRESELECTION>` elements
-  with `xtrashot`, `double="<product code>"`, `powder`, `coldbrew`,
-  `sweetfoam` flags. J.O.E. models these as
-  `PreselectArgument.{EXTRA_SHOT,DOUBLE_SHOT,POWDER,COLD_BREW,
-  LIGHT_BREW,SWEET_FOAM,FAKE_SWEET_FOAM,STRONG_COLD_BREW}` and passes
-  them in `ProductStartData` (which also carries `frotherInstructions`,
-  `grinderInstructions`, `f18Enabled`). `_parse_product_params` skips
-  `<PRESELECTION>` explicitly. Note `double="31"` is the same code the
-  Z10 counter-slot quirk is about — the "2 Espressi" product *is* a
-  preselection of the single, not a separate menu entry.
-* **Coffee timer.** `@TM:3C,<product blob padded to 20 bytes><time>` +
-  checksum schedules a brew; `@TV:84,<time>` syncs the machine clock
-  first. `<PRODUCT ... shouldBeShownInCoffeeTimer>` marks eligible
-  products.
+* **Preselections** are implemented (PROTOCOL.md §5.13). Each
+  `<PRODUCT>` carries `<PRESELECTION>` elements with `xtrashot`,
+  `double="<product code>"`, `powder`, `coldbrew`, `sweetfoam` flags,
+  and `<MULTIPLE_PRESELECTS><COMBINATION>` rows say which may be
+  combined; both are parsed. Old-T-protocol machines get the double
+  product's code swapped into blob byte 0 plus the app's byte
+  overwrites; `IntakeF18` machines get a 20-byte blob with a mask byte
+  instead. CLI: bare words after the product (`brew espresso double`).
+  **Never seen on a wire** — a wrong byte misbrews.
+  Note `double="31"` is the same code the Z10 counter-slot quirk is
+  about: the "2 Espressi" product *is* a preselection of the single,
+  not a separate menu entry.
+* **Coffee timer** is implemented: `@TM:3C,<blob padded to 20 bytes>
+  <delay><csum>` schedules a brew and `@TV:84,<time>` follows it (not
+  precedes it — the app's order). `<PRODUCT Coffeetimer="false">` marks
+  a product ineligible; only 5 of 89 profiles carry the attribute at
+  all and a missing one defaults to eligible, matching the app's
+  nullable Boolean. There is no cancel verb beyond `@TG:FF`.
 
 ---
 
-## 7. Things `jura-connect` deliberately or incidentally has no story for
+## 7. What `jura-connect` still has no story for
 
-* **Language download** — `@TS:F1` lock, `@TM:23` max languages,
-  `@TT:00` list, `@TT:01,<block>` select, `@TT:02`/`@TT:08` transfer
-  (ASCII vs. binary), `@TT:03` finish, `@TV:81`/`@TV:82` to paint the
-  machine display while it runs. Needs the language blobs from Jura's
-  CDN, which the app fetches over HTTPS.
-* **Firmware OTA** — `@HB` (enter bootloader), `@HO:` (.dat), `@HD:`
-  (.bin), `@HE` (end), `@HT:3` (restart dongle). Bricking risk;
-  arguably should stay out of scope.
-* **Milk-cooler update** — `@HU` / `@HU?`.
-* **BluFi onboarding** — the app provisions a factory-fresh dongle's
+* **BluFi onboarding.** The app provisions a factory-fresh dongle's
   WiFi over BLE (ESP32 BluFi) before it ever reaches TCP. Our
-  `set-ssid`/`set-password` only work on an *already paired* dongle,
+  `set-ssid` / `set-password` only work on an *already paired* dongle,
   i.e. they can move a machine between networks but cannot bootstrap
-  one.
-* **Smart Connect 2 / BLE2** — `CoffeeMachineAdapterBle2` speaks the
+  one. Out of scope for a WiFi library — it is a different radio.
+* **Smart Connect 2 / BLE2.** `CoffeeMachineAdapterBle2` speaks the
   same `@` language over BLE with its own crypto (`Ble2CryptoUtil`) and
   its own handshake, plus `@HA:02` and `@HR:81` (read dongle name /
-  hand over WiFi credentials). Out of scope for a WiFi library, but it
-  is the most readable reference for the full command set — its method
-  names survived obfuscation.
-* App-level things with no protocol component: shop, recipes, QR
+  hand over WiFi credentials). Out of scope, but it remains the most
+  readable reference for the full command set — its method names
+  survived obfuscation.
+* **The PMode bookkeeping after a successful language download.**
+  J.O.E. additionally writes `@TM:24` (a packed download date plus the
+  language code taken from the file name), `@TM:25,01`, `@TM:09,FF`
+  (language setting = "the downloaded one"), `@TM:22` and `@TM:23,0C`.
+  `jura_connect` writes none of them: they are app-level bookkeeping we
+  cannot verify, and `@TM:09` is already reachable through the ordinary
+  settings API. Consequence: a machine may hold a freshly downloaded
+  image without switching to it. See PROTOCOL.md §5.14.
+* **Session keep-alive / priority queue.** `WifiCommandNoExecution` is
+  an empty, priority-0 frame the app queues to keep its channel warm;
+  J.O.E. also dispatches commands through a `PriorityChannel`.
+  `jura-connect` sends one command at a time on a synchronous socket
+  and has no keep-alive, which is fine for short CLI sessions and is
+  the likeliest suspect if a long-lived integration ever sees the
+  dongle drop it.
+* **Fetching the payloads.** Language images and firmware blobs come
+  from Jura's CDN over HTTPS in the app. This library has no network
+  dependency: the caller supplies the bytes.
+* **App-level things with no protocol component:** shop, recipes, QR
   onboarding, statistics charts, RealWear/AR support.
 
 ---
 
-## 8. Where we and J.O.E. disagree about a command's meaning
+## 8. Where we and J.O.E. once disagreed about a command's meaning
 
-These are the highest-value items, because they are *wrong today*, not
-merely absent. All were read out of the APK; none has been re-probed on
-hardware (and two of them must not be).
-
-**Items 1–4 are fixed** (see `PROTOCOL.md` §5.1 / §5.8); they stay here
-with their resolution because the reasoning is the interesting part.
+**All five items are resolved.** They stay here with their resolutions
+because the reasoning — not the fix — is what is worth keeping, and
+because two of them must never be re-probed on hardware.
 
 1. **`@TG:7E` is `WifiCommandCancelQualityAssistantStep`**, not
    "reset maintenance counters". The class sends bare `@TG:7E` to skip
@@ -331,42 +356,48 @@ with their resolution because the reasoning is the interesting part.
    to skip all. `AGENTS.md` records that an accidental `@TG:7E` *did*
    reset counters on a real TT237W, so both behaviours may exist across
    firmware. **Do not re-probe this on hardware to find out.**
-   *Fixed:* renamed `reset-counters` → `skip-quality-step [one|all]`,
+   *Resolved:* renamed `reset-counters` → `skip-quality-step [one|all]`,
    the skip-all argument is implemented, `@TG:7E` **stays** in
-   `DESTRUCTIVE_PREFIXES` and stays gated, and the danger string now
-   states both readings and that neither is reversible.
+   `DESTRUCTIVE_PREFIXES` and stays gated, and the danger string states
+   both readings and that neither is reversible. The underlying
+   question — firmware difference or side effect — is still open and
+   is recorded in PROTOCOL.md §9 as unresolvable by experiment.
 2. **`@TG:FF` is `WifiCommandCancelProductStep`** — cancel the running
    product step, i.e. the natural "abort this brew".
-   *Fixed:* removed from `DESTRUCTIVE_PREFIXES` (so the `raw` escape
+   *Resolved:* removed from `DESTRUCTIVE_PREFIXES` (so the `raw` escape
    hatch stops gating it too) and exposed as the ungated `cancel`
    command with a tolerant `(?i)^@tg` reply matcher; the simulator
-   answers `@tg:FF`.
+   answers `@tg:FF`. It is also the app's coffee-timer cancel, though
+   whether it clears a *pending* timer is untested.
 3. **`@HE` is `WifiCommandOTAEnd`** (expects `@he:ok`), while J.O.E.'s
    `WifiCommandCloseConnection` sends an *empty* frame. It is an OTA
    verb, and sending it outside an OTA session is not obviously a no-op
    on every firmware.
-   *Fixed:* `JuraClient.close()` now sends the empty frame (still
-   best-effort / exception-safe). The simulator accepts both the empty
-   frame and `@HE` as session teardown.
+   *Resolved:* `JuraClient.close()` sends the empty frame (still
+   best-effort / exception-safe); the simulator accepts both the empty
+   frame and `@HE` as session teardown. `@HE` is now a gated prefix
+   belonging to the OTA sequencer (PROTOCOL.md §5.15) — which is only
+   safe *because* `close()` stopped sending it.
 4. **`@HU?` is `WifiCommandMilkCoolerUpdateStatus`**, matching
-   `@hu:[0-9a-fA-F]{3}`. This finally explains `PROTOCOL.md` §9's
-   "`@HU?` returned `@hu:800` in some probes but `@TF:` in others": the
-   `@hu:800` *is* the correct answer to `@HU?`, and the `@TF:` we key
-   on is just the next unsolicited status frame arriving. J.O.E. never
-   polls for status — `TCPReceiveHandler` routes pushed `@TF:` frames.
-   *Fixed:* `read_status()` sends nothing and returns the next pushed
-   `@TF:` frame; `read_status(nudge=True)` still emits `@HU?` for
-   firmwares that want traffic on the socket, documented as a nudge
-   rather than a query. The simulator answers `@HU?` with `@hu:800`
-   and the §9 bullet is gone.
-5. ~~**`@TG:43` field order is per-machine.**~~ **Fixed** — both banks
-   now decode against the XML's `<BANK Command="@TG:43">` /
-   `<BANK Command="@TG:C0">` `<TEXTITEM Type=…>` children via
+   `@hu:[0-9a-fA-F]{3}`. This explained the old "`@HU?` returned
+   `@hu:800` in some probes but `@TF:` in others": the `@hu:800` *is*
+   the correct answer to `@HU?` — state nibble `8` = "no milk cooler
+   connected" — and the `@TF:` was just the next unsolicited status
+   frame arriving. J.O.E. never polls for status;
+   `TCPReceiveHandler` routes pushed `@TF:` frames.
+   *Resolved:* `read_status()` sends nothing and returns the next
+   pushed `@TF:` frame; `read_status(nudge=True)` still emits `@HU?`
+   for firmwares that want traffic on the socket, documented as a nudge
+   rather than a query. `@HU?` is now also a first-class read-only
+   command (`milk-cooler-status`) that decodes the three hex digits.
+5. **`@TG:43` field order is per-machine.** Both banks decode against
+   the XML's `<BANK Command="@TG:43">` / `<BANK Command="@TG:C0">`
+   `<TEXTITEM Type=…>` children via
    `MachineProfile.maintenance_counter_fields` /
    `.maintenance_percent_fields`, exactly as J.O.E. does; the old
-   hard-coded order survives only as the no-profile fallback (see
-   `PROTOCOL.md` §5.3). Kept here for the record — **21 of 89
-   profiles differ** from that fallback, so those machines still need
+   hard-coded order survives only as the no-profile fallback
+   (PROTOCOL.md §5.3). Kept here for the record — **21 of 89 profiles
+   differ** from that fallback, so those machines still need
    `--machine-type` to be labelled correctly:
    * 13 profiles have only 4 fields (`Cleaning, FilterChange, Decalc,
      CoffeeRinse`) — EF1013, EF1031, EF1089, EF1105(V2), EF1115(V2),
@@ -380,77 +411,64 @@ with their resolution because the reasoning is the interesting part.
 
 ---
 
-## 9. Profile / XML parsing gaps
+## 9. Implemented but hardware-unverified — the current top risk
 
-`MachineProfile` parses `ALERT`, `PRODUCT` (+ `F<n>` params),
-`PRODUCTCOUNTER/BANK`, the `@TG:43` / `@TG:C0` maintenance banks, and
-`MACHINESETTINGS`. Unparsed sections that carry protocol meaning:
+Everything in this section is **APK-derived and verified only against
+`jura_connect/simulator.py`**. The simulator imports the same `crypto`
+and `protocol` modules the client does, so it proves the *framing* and
+the *sequencing* are self-consistent — it proves nothing about what a
+real machine accepts, because its replies were written from the same
+APK reading as the client's expectations. A shared misreading passes
+both halves of the test-suite.
 
-| Section | Carries | Blocks |
-| ------- | ------- | ------ |
-| `<PROCESS>` | `ExecuteCommand`, `Progress` flag | §2 |
-| `<STATE>` (83 on EF1091) | state code → name, `AcceptCommand` | §2, §3 |
-| `<PRESELECTION>` | extra-shot / double / powder / cold-brew flags | §6 |
-| `<COMBINATION>` | legal preselection combinations | §6 |
-| ~~`<BANK Command="@TG:43"/"@TG:C0">` `<TEXTITEM>`~~ | ~~per-machine counter field order~~ | done (§8.5) |
-| ~~`<BANK Name="Setting">`~~ | ~~batch settings read~~ | done (§5) |
-| `<TOTALCOUNTER>`, `<LIFETIME>` | totals metadata | §4 |
-| `<BUTTON>`, `<PREDICTIVEBUTTON>` | machine-side favourites | UI only |
-| `<ENJOYSCREEN>`, `<TEXTITEM>`, `<LINK>` | display strings, manual URLs | UI only |
-| ~~`<PROGRAMMODE>`~~ | ~~kind-count vector~~ | **there is no such element** — see below |
+This list is the honest answer to "what could still be wrong":
 
-`<PROGRAMMODE>` was a phantom: no bundled XML, and neither documented
-template (`EF0000` / `EF_MASTER`), has one, so `MachineProfile.has_pmode`
-was always `False`. The real declarations are now parsed
-(`PROTOCOL.md` §5.6.1):
+| Area | Risk if wrong | PROTOCOL.md |
+| ---- | ------------- | ----------- |
+| `@TV:` progress decode (87 states, value window, percent at slot 12) | wrong readings in a UI; a missed `ENJOY` leaves `follow_progress` waiting for the timeout | §5.10 |
+| Maintenance processes (`@TG:01` / `@TG:04` / `@TG:10`, state ordering) | a confirmation sent at the wrong moment advances a physical cycle and consumes supplies; a wrong finish state hangs the run | §5.11 |
+| Coffee timer (`@TM:3C` + `@TV:84`) | the machine pours later, unattended, possibly the wrong product | §5.12 |
+| Preselections in `@TP:` (byte overwrites, `IntakeF18` mask) | misbrew — a wrong byte overwrites a recipe parameter | §5.13 |
+| Language download (`@TS:F1` / `@TT:xx`) | a half-written slot shows garbage until a full re-download; a lost session leaves the keypad locked until power-cycle | §5.14 |
+| Firmware OTA (`@HB` / `@HO:` / `@HD:` / `@HE`) | **bricks the dongle**, no remote recovery — which is why it has no CLI command and is gated on `acknowledge_bricking_risk=True` | §5.15 |
+| Milk-cooler update (`@HU`) | an interrupted update can leave the cooler needing service | §5.15 |
+| PMode writes (`@TM:41` / `@TM:42`) | overwrites a user's stored recipe or slot assignment | §5.6.3–4 |
+| Limit load (`@TM:60`) | wrong bounds accepted or rejected | §5.7 |
+| Batch settings read (`@TM:00,FC`) | mis-decoded values — mitigated: falls back to per-setting reads on any mismatch | §5.7 |
+| Counter banks `@TR:34/35/42..45` and the `@TF:05` reset | wrong slot mapping, or an irreversible zeroing of counters nobody meant to clear | §5.5 |
+| `@TP:` recipe parameters F2, F5, F6, F8, F11, F17 | misbrew | §5.9 |
 
-| Section / attribute | Carries | `MachineProfile` |
-| ------------------- | ------- | ---------------- |
-| `<MACHINESETTINGS Productprogramming>` | machine supports PMode writes (20/89 true) | `.product_programming`, `.has_pmode` |
-| `<MACHINESETTINGS NumberOfSlotsForProductProgramming>` | declared slot count (5 profiles) | `.pmode_slot_count` |
-| `<PRODUCT ProductSettings>` | product is programmable | `ProductDef.product_settings` |
-| `PModeAdjust="false"` on a parameter | parameter is not PMode-adjustable | `ProductParam.pmode_adjust` |
-| `<MACHINEMANIFEST><CAPABILITIES IntakeF18>` | changes the `@TM:42` blob tail | `.intake_f18` |
+What **is** hardware-verified, on a JURA S8 EB (EF1091, TT237W V06.11)
+and in two cases an E6 / E8 (EB): the cipher and framing, TCP
+discovery, the `@HP:` handshake and pairing, `@TG:43` / `@TG:C0`,
+`@TF:` status bits, `@TR:32`, `@TS:01` / `@TS:00`, single-setting
+`@TM:` reads and writes, `@TM:50` (and EF1091's `@tm:C2` answer to
+every `@TM:42`), `@HU?` → `@hu:800`, and the 16-byte `@TP:` blob for
+water / strength / temperature / bypass.
+
+Cheapest things a machine owner could confirm, in order of
+value-per-risk — the first three are **read-only**:
+
+1. `@TM:00,FC` vs. four single `@TM:<arg>` reads (settles §5).
+2. `@TM:60,<code>` vs. the product's XML ranges (settles the limit
+   load).
+3. A raw capture of a front-panel brew and of a cleaning cycle
+   (settles most of §3 and the state ordering in §2) — `progress` and
+   `process-watch` both send nothing.
+4. `@TM:41` / `@TM:42` **reads** on a machine whose XML says
+   `Productprogramming="true"` (20 of 89 profiles, e.g. EF1143 /
+   EF529). EF1091 answers `@tm:C1` / `@tm:C2` to everything, so the
+   configured-slot decode path has never run against real data.
 
 ---
 
-## 10. Suggested order of work
+## 10. What is left
 
-1. ~~**Fix §8.5** (XML-driven `@TG:43` field order).~~ **Done** — the
-   maintenance banks decode against the profile; 21 machine families
-   fixed, pinned by tests over all 89 bundled XMLs.
-2. ~~**Re-label §8.1–8.4**~~ — **done**: `@TG:FF` is out of the
-   destructive list and exposed as `cancel`, `@TG:7E` is still gated as
-   `skip-quality-step` with both readings documented, `close()` sends
-   the empty frame, and `read_status()` waits for the pushed `@TF:`.
-3. **Decode `@TV:`** into a `ProductProgress` dataclass with the
-   `ProgressState` enum. Unlocks "is it done yet" for `brew` and is a
-   prerequisite for anything interactive.
-4. **`<PROCESS>` + `<STATE>` + `@TG:01` / `@TG:04` / `@TG:10`** — turn
-   `clean` / `descale` into a real state machine that can report and
-   confirm. Highest user value, most testing effort (each confirmation
-   consumes supplies on a real machine — extend the simulator first).
-5. ~~**Special / barista counter banks**~~ — **done**: all ten banks
-   read through one generic, profile-gated reader, plus the daily banks
-   J.O.E. never touches and their gated `@TF:05` reset. Simulator-only
-   verification; no machine here declares anything past `@TR:32`.
-6. **Preselections in `@TP:`** — needs the argument byte reverse
-   engineered (`ProductStartData.f18Enabled` suggests `F18`); verify on
-   hardware before shipping, a wrong byte misbrews.
-7. ~~**PMode writes (`@TM:41`/`@TM:42` write)**~~ — **done**, with the
-   caveat that nothing is hardware-verified: `pmode-product`,
-   `pmode-set-product` and `pmode-set-slot` implement the APK's blob
-   layout and checksums, the simulator models both a machine that
-   exposes slots and the EF1091-style `@tm:C2` machine, and the
-   `<MACHINESETTINGS>` PMode declarations are parsed. Still blocked on
-   finding a machine that answers `@TM:42` with data (EF1091 answers
-   `@tm:C2` for every slot) before any of it can be called verified.
-8. **Confirm the two new read paths on a machine** (§5). Both are
-   read-only, so this costs nothing but a session: compare
-   `@TM:00,FC` against four single reads (and retry with the
-   checksummed request form, `read_settings_bank(checksum=True)`), and
-   compare `@TM:60,<code>` against the product's XML ranges. If the
-   batch reply layout differs from the guess, fix
-   `client._parse_settings_bank_reply` and PROTOCOL.md §5.7 — the
-   fallback means nothing breaks in the meantime.
-9. Coffee timer, language download, OTA — only if someone wants them.
+1. **Confirm the read paths above.** Read-only, costs a session,
+   settles four table rows.
+2. **Session keep-alive** (`WifiCommandNoExecution`) if a long-lived
+   integration ever sees the dongle drop the connection.
+3. **The post-download PMode bookkeeping** (§7) — only worth doing
+   alongside a real language download.
+4. BluFi and BLE2 remain deliberately out of scope: different radios,
+   different crypto, and neither is reachable from a WiFi library.
