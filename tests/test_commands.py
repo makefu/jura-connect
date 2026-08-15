@@ -41,6 +41,7 @@ def test_list_commands_contains_safe_and_destructive_groups() -> None:
         "mem-read",
         "register-read",
         "raw",
+        "cancel",
     ]:
         assert expected in names
     # Destructive operations are present *and* flagged with a danger string.
@@ -50,7 +51,7 @@ def test_list_commands_contains_safe_and_destructive_groups() -> None:
         "filter-change",
         "cappu-clean",
         "cappu-rinse",
-        "reset-counters",
+        "skip-quality-step",
         "restart",
         "power-off",
         "brew",
@@ -75,6 +76,7 @@ def test_list_commands_contains_safe_and_destructive_groups() -> None:
         "register-read",
         "raw",
         "products",
+        "cancel",
     ]:
         assert not commands.get_command(safe).destructive
 
@@ -471,7 +473,10 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("filter-change", []),
     ("cappu-clean", []),
     ("cappu-rinse", []),
-    ("reset-counters", []),
+    # Both forms of the quality-assistant skip: one step and the app's
+    # 32×F "skip everything" argument. Both stay gated.
+    ("skip-quality-step", []),
+    ("skip-quality-step", ["all"]),
     ("restart", []),
     ("power-off", []),
     # A full 32-hex @TP: blob reaches the wire without a profile.
@@ -513,6 +518,71 @@ def test_destructive_command_reaches_wire_with_flag(sim, name, args) -> None:
     assert (
         result.value.startswith("@an:error") or "connection closed" in result.value
     ), f"unexpected reply for {name!r}: {result.value!r}"
+
+
+def test_cancel_runs_without_the_destructive_gate(sim) -> None:
+    """``@TG:FF`` is J.O.E.'s WifiCommandCancelProductStep — the "abort
+    this brew" verb, not a reset. It must work without the gate and get
+    the machine's ``@tg:FF`` acknowledgement back."""
+    c = _paired(sim)
+    try:
+        result = run_named(c, "cancel", timeout=2.0)
+    finally:
+        c.close()
+    assert isinstance(result.value, str)
+    assert result.value.lower().startswith("@tg:ff")
+
+
+def test_cancel_prefix_is_not_in_the_destructive_set(sim) -> None:
+    """The reclassification must also free the raw escape hatch, which
+    gates on DESTRUCTIVE_PREFIXES rather than on the command name."""
+    assert b"@TG:FF" not in commands.DESTRUCTIVE_PREFIXES
+    c = _paired(sim)
+    try:
+        result = run_named(c, "raw", ["@TG:FF"], timeout=2.0)
+    finally:
+        c.close()
+    assert result.value.lower().startswith("@tg:ff")  # type: ignore[union-attr]
+
+
+def test_skip_quality_step_sends_both_wire_forms(sim) -> None:
+    """Bare ``@TG:7E`` skips one quality-assistant step, the 32×F
+    argument skips all of them. Both must reach the wire only with the
+    gate, and the simulator refuses both."""
+    c = _paired(sim)
+    try:
+        one = run_named(c, "skip-quality-step", timeout=2.0, allow_destructive=True)
+        every = run_named(
+            c, "skip-quality-step", ["all"], timeout=2.0, allow_destructive=True
+        )
+    finally:
+        c.close()
+    assert one.value == "@an:error"
+    assert every.value == "@an:error"
+    sent = [f.decode("ascii", errors="replace") for f in sim.sent_commands]
+    assert "@TG:7E" in sent
+    assert "@TG:7E," + "F" * 32 in sent
+
+
+def test_skip_quality_step_rejects_unknown_scope(sim) -> None:
+    c = _paired(sim)
+    try:
+        with pytest.raises(CommandError, match="scope"):
+            run_named(
+                c, "skip-quality-step", ["some"], timeout=1.0, allow_destructive=True
+            )
+    finally:
+        c.close()
+
+
+def test_skip_quality_step_danger_states_both_readings() -> None:
+    """AGENTS.md records a real machine whose maintenance counters were
+    zeroed by @TG:7E while the app calls it a quality-assistant skip.
+    The danger string must not pick a side and hide the other."""
+    danger = commands.get_command("skip-quality-step").danger or ""
+    assert "quality" in danger.lower()
+    assert "counter" in danger.lower()
+    assert "irreversib" in danger.lower()
 
 
 def test_raw_payload_destructive_prefix_blocked_without_flag(sim) -> None:

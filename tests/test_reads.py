@@ -14,9 +14,9 @@ import pytest
 from jura_connect.client import JuraClient
 
 
-def _paired(sim) -> JuraClient:
+def _paired(sim, conn_id: str = "reader") -> JuraClient:
     host, port = sim.address
-    c = JuraClient(host, port=port, conn_id="reader", auth_hash="")
+    c = JuraClient(host, port=port, conn_id=conn_id, auth_hash="")
     r = c.pair(timeout=2.0)
     assert r.state == "CORRECT"
     return c
@@ -57,6 +57,64 @@ def test_status_alerts(sim) -> None:
         c.close()
     assert "no_beans" in st.active_alerts
     assert len(st.raw) == 8
+
+
+def test_status_waits_for_a_pushed_frame_without_polling(sim) -> None:
+    """There is no "read status" verb: the dongle broadcasts ``@TF:``
+    frames and J.O.E. only routes them. ``read_status`` must therefore
+    put nothing on the wire — in particular not ``@HU?``, which is the
+    milk-cooler update-status probe."""
+    c = _paired(sim)
+    try:
+        st = c.read_status(timeout=2.0)
+    finally:
+        c.close()
+    assert "no_beans" in st.active_alerts
+    assert b"@HU?" not in sim.sent_commands
+
+
+def test_status_nudge_sends_the_milk_cooler_probe(sim) -> None:
+    """The opt-in nudge sends ``@HU?`` for firmwares that need traffic
+    on the socket. The dongle answers it with ``@hu:<3 hex>`` — that
+    reply is *not* the status; the status still arrives as ``@TF:``."""
+    c = _paired(sim)
+    try:
+        st = c.read_status(timeout=2.0, nudge=True)
+    finally:
+        c.close()
+    assert "no_beans" in st.active_alerts
+    assert b"@HU?" in sim.sent_commands
+
+
+def test_hu_probe_answers_milk_cooler_update_status(sim) -> None:
+    c = _paired(sim)
+    try:
+        reply = c.request("@HU?", match=r"^@hu:", timeout=2.0)
+    finally:
+        c.close()
+    assert reply == "@hu:800"
+
+
+def test_close_sends_an_empty_frame_and_drops_the_session(sim) -> None:
+    """J.O.E.'s WifiCommandCloseConnection sends an empty frame; ``@HE``
+    is the OTA-end verb and must not be used to hang up. The dongle
+    drops the session, so a fresh client can pair right after."""
+    c = _paired(sim)
+    c.close()
+    # The simulator reads on its own thread; give it a moment to see the
+    # frame we just wrote before inspecting what arrived.
+    deadline = time.monotonic() + 2.0
+    while b"" not in sim.sent_commands and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert b"" in sim.sent_commands
+    assert b"@HE" not in sim.sent_commands
+    # Session really ended: the simulator serves one connection at a
+    # time, so a second pairing only succeeds if the first was dropped.
+    second = _paired(sim, conn_id="reader-2")
+    try:
+        assert second.read_maintenance_counter(timeout=2.0).cleaning == 0x0015
+    finally:
+        second.close()
 
 
 def test_machine_info_bundle(sim) -> None:
@@ -106,9 +164,26 @@ def test_simulator_refuses_destructive_commands(sim) -> None:
     """
     c = _paired(sim)
     try:
-        for danger in ["@TG:24", "@TG:25", "@TG:7E", "@TF:02", "@TP:01"]:
+        for danger in [
+            "@TG:24",
+            "@TG:25",
+            "@TG:7E",
+            "@TG:7E," + "F" * 32,  # quality-assistant "skip all" form
+            "@TF:02",
+            "@TP:01",
+        ]:
             reply = c.request(danger, match=r"^@an:error", timeout=1.5)
             assert reply == "@an:error", danger
+    finally:
+        c.close()
+
+
+def test_simulator_answers_the_product_step_cancel(sim) -> None:
+    """``@TG:FF`` is no longer in the destructive set, so the simulator
+    must model the real acknowledgement instead of ``@an:error``."""
+    c = _paired(sim)
+    try:
+        assert c.request("@TG:FF", match=r"(?i)^@tg", timeout=1.5) == "@tg:FF"
     finally:
         c.close()
 
