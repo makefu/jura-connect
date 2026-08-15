@@ -25,7 +25,7 @@ import dataclasses
 import importlib.resources
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from functools import lru_cache
 
 # Anchor for importlib.resources.files() so the loader works whether
@@ -295,6 +295,232 @@ RECIPE_PARAM_KINDS: tuple[str, ...] = (
 )
 
 
+# --- Preselections -----------------------------------------------------
+# A "preselection" is the extra-shot / double / powder / cold-brew /
+# light-brew / sweet-foam toggle J.O.E. offers next to a product. The
+# machine XML declares them per product as
+#   <PRESELECTION xtrashot="false" double="31" powder="true" .../>
+# and declares which of them may be combined machine-wide as
+#   <MULTIPLE_PRESELECTS><COMBINATION powder="true" sweetfoam="true"/></…>
+#
+# Every attribute is a plain "true"/"false" flag **except** ``double``,
+# which carries the *product code of the double product* (old
+# T-protocol) or ``"00"``. Quoting Jura's own documentation in the
+# EF0000 template XML:
+#
+#   "All preselections are either true or false - except the double.
+#    The double preselect contains the Product Code of the Double
+#    Product (old T-Protocol) or just 00 for the new T-Protocol with
+#    F18 support (<CAPABILITIES IntakeF18="true"/> in the
+#    MACHINEMANIFEST)."
+
+#: Every ``<PRESELECTION>`` attribute name that occurs across the 89
+#: bundled machine XMLs, lower-cased. These are the canonical
+#: preselection names this library accepts. ``pmodeadjust`` is included
+#: because the XMLs carry it, but it is never ``"true"`` anywhere.
+PRESELECTION_NAMES: tuple[str, ...] = (
+    "xtrashot",
+    "double",
+    "powder",
+    "coldbrew",
+    "strongcoldbrew",
+    "lightbrew",
+    "sweetfoam",
+    "fakesweetfoam",
+    "chocolate",
+    "xl",
+    "pmodeadjust",
+)
+
+#: Friendly spellings accepted for :func:`canonical_preselection`, so
+#: ``brew espresso extra_shot`` works as well as ``brew espresso
+#: xtrashot``.
+PRESELECTION_ALIASES: dict[str, str] = {
+    "extra_shot": "xtrashot",
+    "extrashot": "xtrashot",
+    "xtra_shot": "xtrashot",
+    "double_shot": "double",
+    "cold_brew": "coldbrew",
+    "strong_cold_brew": "strongcoldbrew",
+    "light_brew": "lightbrew",
+    "sweet_foam": "sweetfoam",
+    "fake_sweet_foam": "fakesweetfoam",
+    "p_mode_adjust": "pmodeadjust",
+    "pmode_adjust": "pmodeadjust",
+}
+
+#: Blob offset of the preselection **mask** byte on machines that
+#: declare ``<CAPABILITIES IntakeF18="true"/>``, and the length such a
+#: blob has. Both are read straight out of the J.O.E. APK's single
+#: product-start encoder, ``ch.toptronic.joe.model.product.AppProduct.c``
+#: (jadx line 151-184, cross-checked against
+#: ``smali/…/AppProduct.smali:400-806``)::
+#:
+#:     String s = join(bytes).substring(0, (hasF17 ? 17 : 16) * 2);
+#:     if (!startData.f18Enabled) return s;              // 16/17 bytes
+#:     mask = Σ bits;                                    // table below
+#:     return hasF17 ? s + "0000" + hex(mask)            // 20 bytes
+#:                   : s + "000000" + hex(mask);         // 20 bytes
+#:
+#: i.e. the blob is padded to exactly 20 bytes and the mask is the
+#: **last** one, at offset 19 — *not* at 17 as the ``IntakeF18``
+#: capability name suggests. No bundled XML declares ``Argument="F18"``,
+#: ``F19`` or ``F20``, and the string ``"F18"`` does not occur in the
+#: APK's smali outside the capability name, so the name looks
+#: historical. **APK-derived, never seen on a wire.**
+PRESELECT_MASK_OFFSET = 19
+PRESELECT_BLOB_BYTES = 20
+
+#: Mask bit each preselection contributes on an ``IntakeF18`` machine.
+#: From the ``Pair`` table in ``AppProduct.c``. ``fakesweetfoam`` is
+#: deliberately absent — it is in the enum but not in that table, so it
+#: contributes nothing (and ``0x20`` is unused). **APK-derived,
+#: untested.**
+PRESELECT_MASK_BITS: dict[str, int] = {
+    "powder": 0x01,
+    "xtrashot": 0x02,
+    "sweetfoam": 0x04,
+    "lightbrew": 0x08,
+    "coldbrew": 0x10,
+    "double": 0x40,
+    "strongcoldbrew": 0x80,
+}
+
+#: Old-T-protocol encoding: preselections that are **not** a mask bit but
+#: a fixed byte written over the recipe blob, ``name -> (offset, value)``.
+#: These are the ``(a, b)`` payloads of the ``PreselectArgument`` enum
+#: (``…/shared_model/interfaces/PreselectArgument.java:76-96``), applied
+#: by ``AppProduct.c`` *after* the recipe parameters and therefore
+#: overwriting them: powder blanks the coffee-strength byte (F3),
+#: cold/light brew replace the temperature byte (F7) with an
+#: out-of-band value, extra shot writes the stroke byte (F8).
+#: **APK-derived, untested.**
+PRESELECT_LEGACY_BYTES: dict[str, tuple[int, int]] = {
+    "powder": (2, 0x00),
+    "coldbrew": (6, 0x80),
+    "lightbrew": (6, 0x81),
+    "xtrashot": (7, 0x02),
+}
+
+# Anything in neither table has **no wire representation** for that
+# machine generation and is refused rather than silently dropped:
+# sweetfoam / fakesweetfoam / strongcoldbrew on an old-T-protocol
+# machine (J.O.E. shows them and then sends nothing), and
+# fakesweetfoam / chocolate / xl / pmodeadjust on an IntakeF18 one.
+
+
+def canonical_preselection(name: str) -> str:
+    """Normalise a user-supplied preselection name.
+
+    Accepts the XML spelling (``"xtrashot"``) and the friendly aliases
+    in :data:`PRESELECTION_ALIASES` (``"extra_shot"``). Raises
+    :class:`ValueError` for anything else.
+    """
+    key = name.strip().lower().replace("-", "_")
+    key = PRESELECTION_ALIASES.get(key, key.replace("_", ""))
+    if key not in PRESELECTION_NAMES:
+        raise ValueError(
+            f"unknown preselection {name!r}. Known: {', '.join(PRESELECTION_NAMES)}"
+        )
+    return key
+
+
+def _parse_preselection(product: ET.Element) -> tuple[frozenset[str], int | None]:
+    """Parse a PRODUCT's ``<PRESELECTION>`` child.
+
+    Returns ``(supported, double_code)`` where ``supported`` holds the
+    preselection names the product declares — the ``"true"`` flags, plus
+    ``"double"`` when the product names a double product code — and
+    ``double_code`` is that code (``None`` when the attribute is absent
+    or ``"00"``).
+
+    ``double="00"`` is read as **"this product has no double"**: every
+    bundled XML that uses it does so for products that cannot sensibly
+    be doubled (milk foam, hot water, pot), *including* machines with
+    ``IntakeF18="true"``. Jura's own comment allows ``00`` to also mean
+    "double via the F18 argument" on new-protocol machines, but no
+    bundled profile demonstrates that, so we do not guess it.
+    """
+    el = product.find("{*}PRESELECTION")
+    if el is None:
+        return frozenset(), None
+    supported: set[str] = set()
+    double_code: int | None = None
+    for raw_key, raw_value in el.attrib.items():
+        key = raw_key.strip().lower()
+        if key not in PRESELECTION_NAMES:
+            continue
+        value = raw_value.strip()
+        if key == "double":
+            try:
+                code = int(value, 16)
+            except ValueError:
+                continue
+            if code:
+                double_code = code
+                supported.add(key)
+            continue
+        if value.lower() == "true":
+            supported.add(key)
+    return frozenset(supported), double_code
+
+
+def _parse_combinations(root: ET.Element) -> tuple[frozenset[str], ...]:
+    """Parse ``<MULTIPLE_PRESELECTS><COMBINATION …/></…>`` rows.
+
+    Each row lists preselections that may be active **at the same
+    time**; attributes explicitly set ``"false"`` are not part of the
+    row. Rows with fewer than two members carry no information (a lone
+    preselection is always allowed) and are dropped, as are duplicates.
+    A machine with no ``MULTIPLE_PRESELECTS`` section allows no
+    combinations at all — one preselection at a time.
+    """
+    rows: list[frozenset[str]] = []
+    for el in root.findall(".//{*}COMBINATION"):
+        members = frozenset(
+            key
+            for raw_key, raw_value in el.attrib.items()
+            if (key := raw_key.strip().lower()) in PRESELECTION_NAMES
+            and raw_value.strip().lower() == "true"
+        )
+        if len(members) >= 2 and members not in rows:
+            rows.append(members)
+    return tuple(rows)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreselectionPlan:
+    """How a set of requested preselections reaches the machine.
+
+    Produced by :meth:`MachineProfile.plan_preselections`; feed it to
+    :meth:`build_recipe_hex` to get the wire blob.
+
+    * :attr:`product` — the product to actually brew. On an
+      old-T-protocol machine a ``double`` **swaps the product** for the
+      catalogue's double product (``espresso`` → ``2 Espressi``, code
+      ``0x31`` on the S8 EB) rather than touching the blob.
+    * :attr:`mask` — the preselection mask byte for an ``IntakeF18``
+      machine (blob offset :data:`PRESELECT_MASK_OFFSET`), or ``None``
+      when this machine does not use one.
+    * :attr:`byte_overwrites` — ``(offset, value)`` pairs written over
+      the recipe blob on an old-T-protocol machine.
+    """
+
+    product: ProductDef
+    requested: tuple[str, ...]
+    mask: int | None = None
+    byte_overwrites: tuple[tuple[int, int], ...] = ()
+
+    def build_recipe_hex(self, overrides: dict[str, int | str] | None = None) -> str:
+        """The ``@TP:`` blob for this plan (see
+        :meth:`ProductDef.build_recipe_hex`)."""
+        return self.product.build_recipe_hex(
+            overrides,
+            preselect_mask=self.mask,
+            preselect_bytes=self.byte_overwrites,
+        )
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ProductParam:
     """One recipe parameter of a PRODUCT entry (WATER_AMOUNT, …).
@@ -396,6 +622,12 @@ class ProductDef:
     # in the catalogue (the machine still reports counters for them) but
     # a UI should not offer them as brewable.
     active: bool = True
+    # Preselections this product declares in <PRESELECTION> (the "true"
+    # flags, plus "double" when the product names a double product).
+    # See :data:`PRESELECTION_NAMES`.
+    preselections: frozenset[str] = frozenset()
+    # Product code of this product's double (old T-protocol), or None.
+    double_code: int | None = None
 
     def param(self, kind: str) -> ProductParam | None:
         """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
@@ -404,7 +636,21 @@ class ProductDef:
                 return p
         return None
 
-    def build_recipe_hex(self, overrides: dict[str, int | str] | None = None) -> str:
+    def supports_preselection(self, name: str) -> bool:
+        """Whether the XML declares ``name`` for this product.
+
+        ``name`` is normalised via :func:`canonical_preselection`, so
+        both ``"extra_shot"`` and ``"xtrashot"`` work.
+        """
+        return canonical_preselection(name) in self.preselections
+
+    def build_recipe_hex(
+        self,
+        overrides: dict[str, int | str] | None = None,
+        *,
+        preselect_mask: int | None = None,
+        preselect_bytes: tuple[tuple[int, int], ...] = (),
+    ) -> str:
         """Build the 16-byte ``@TP:`` recipe blob for this product.
 
         Blob layout — **live-verified by physically brewing** on a JURA
@@ -447,20 +693,49 @@ class ProductDef:
         with 00-padding that byte would be ``0x00`` = **no water**, so
         rather than silently brew a dry/short shot this is refused —
         pass an explicit amount.
+
+        ``preselect_mask`` / ``preselect_bytes`` carry preselections and
+        normally come from a :class:`PreselectionPlan` — use
+        :meth:`MachineProfile.plan_preselections` rather than passing
+        them by hand. A mask grows the blob to
+        :data:`PRESELECT_BLOB_BYTES` with the mask as its last byte;
+        ``preselect_bytes`` overwrite recipe bytes in place. **Both are
+        APK-derived and have never been seen on a wire** — see
+        PROTOCOL.md §5.13.
+
+        A preselection that would overwrite a parameter the caller set
+        explicitly is refused: on an old-T-protocol machine ``powder``
+        blanks the coffee-strength byte and ``coldbrew`` replaces the
+        temperature byte, so ``powder`` + ``strength=7`` is a
+        contradiction rather than something to silently resolve.
         """
+        explicit = set(overrides or ())
         overrides = dict(overrides or {})
-        blob = ["00"] * RECIPE_BLOB_BYTES
+        size = RECIPE_BLOB_BYTES
+        if preselect_mask is not None:
+            if not 0 <= preselect_mask <= 0xFF:
+                raise ValueError(
+                    f"preselect_mask: {preselect_mask} does not fit a wire byte"
+                )
+            size = max(size, PRESELECT_BLOB_BYTES)
+        blob = ["00"] * size
         blob[0] = f"{self.code:02X}"
         # Fixed structural byte required for the machine to brew; set
         # before the param loop so a (hypothetical, currently
         # non-existent) F9 param would take precedence rather than be
         # clobbered.
         blob[_RECIPE_VALID_BYTE_INDEX] = _RECIPE_VALID_BYTE
+        if preselect_mask is not None:
+            blob[PRESELECT_MASK_OFFSET] = f"{preselect_mask:02X}"
         for p in self.params:
-            if not 0 < p.offset < RECIPE_BLOB_BYTES:
+            # Bound against the *actual* blob length: a preselection mask
+            # grows it to 20 bytes, which is exactly the window J.O.E.
+            # uses for such machines (it keeps the F17 grinder-freeness
+            # byte at offset 16 when the product has one).
+            if not 0 < p.offset < size:
                 raise ValueError(
                     f"{self.name}: parameter {p.kind} has offset {p.offset} "
-                    f"outside the {RECIPE_BLOB_BYTES}-byte recipe blob"
+                    f"outside the {size}-byte recipe blob"
                 )
             value = overrides.pop(p.kind, p.default)
             if value is None:
@@ -478,6 +753,21 @@ class ProductDef:
                 f"{self.name}: unknown recipe parameter(s) "
                 f"{', '.join(sorted(overrides))}. This product accepts: {known}"
             )
+        # Preselection byte overwrites land last — J.O.E. applies them
+        # after the recipe parameters — but never silently over a value
+        # the caller asked for.
+        for offset, value in preselect_bytes:
+            clash = next(
+                (p for p in self.params if p.offset == offset and p.kind in explicit),
+                None,
+            )
+            if clash is not None:
+                raise ValueError(
+                    f"{self.name}: this preselection forces blob byte {offset} "
+                    f"to 0x{value:02X}, which is the {clash.kind!r} you set "
+                    f"explicitly. Drop one of the two."
+                )
+            blob[offset] = f"{value:02X}"
         return "".join(blob)
 
 
@@ -500,6 +790,14 @@ class MachineProfile:
     # declares "@TR:32"; a subset also declares overflow / special /
     # barista banks. See docs/PROTOCOL.md §5.5.
     counter_banks: tuple[str, ...] = ()
+    # <MACHINEMANIFEST><CAPABILITIES …/> attributes verbatim (keys keep
+    # the XML's CamelCase: "IntakeF18", "LanguageDownload", …). Empty for
+    # the 66 profiles with no manifest — every old T-protocol machine,
+    # the maintainer's EF1091 among them.
+    capabilities: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Sets of preselections the machine allows simultaneously, from
+    # <MULTIPLE_PRESELECTS>. Empty means "one preselection at a time".
+    preselect_combinations: tuple[frozenset[str], ...] = ()
 
     # Derived lookup tables, populated in __post_init__. The default
     # factories keep ty happy with the declared dict types; frozen=True
@@ -518,6 +816,158 @@ class MachineProfile:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
         object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
+
+    @property
+    def intake_f18(self) -> bool:
+        """Whether the manifest declares ``<CAPABILITIES IntakeF18="true"/>``.
+
+        23 of the 89 bundled profiles do. On those machines J.O.E.
+        carries preselections in the ``F18`` blob argument instead of
+        (or in addition to) swapping in a double product code — but see
+        :meth:`plan_preselections`: that encoding is unresolved here.
+        """
+        return (self.capabilities.get("IntakeF18") or "").strip().lower() == "true"
+
+    def combination_allowed(self, names: Iterable[str]) -> bool:
+        """Whether ``names`` may be preselected at the same time.
+
+        Zero or one preselection is always allowed. Two or more must fit
+        inside one ``<COMBINATION>`` row (a subset of a legal row is
+        legal: if three may be active together, so may any two of them).
+        Names are normalised via :func:`canonical_preselection`.
+        """
+        wanted = {canonical_preselection(n) for n in names}
+        if len(wanted) < 2:
+            return True
+        return any(wanted <= row for row in self.preselect_combinations)
+
+    def plan_preselections(
+        self,
+        product: ProductDef,
+        names: Iterable[str] = (),
+        *,
+        mask: int | None = None,
+    ) -> PreselectionPlan:
+        """Work out how to apply ``names`` to ``product``.
+
+        Validates, in order, that every name is a known preselection,
+        that the product's ``<PRESELECTION>`` element declares it, that
+        the requested set is a legal ``<COMBINATION>``, and that this
+        machine generation can actually express it. All of that happens
+        **before** anything goes on the wire.
+
+        The two machine generations encode preselections differently.
+        J.O.E. picks between them on the ``IntakeF18`` capability alone
+        (``AppProduct.c``), and so does this method:
+
+        * **Old T-protocol** (no ``<MACHINEMANIFEST>``; the maintainer's
+          S8 EB / EF1091 is one). A ``double`` is a *different product*:
+          the XML's ``<PRESELECTION double="31"/>`` names its code, so
+          the plan swaps :attr:`~PreselectionPlan.product` for that
+          catalogue entry — consistent with §5.5 of PROTOCOL.md, where
+          the S8 EB counts its doubles at the separate slots ``0x31`` /
+          ``0x36``. ``powder``, ``coldbrew``, ``lightbrew`` and
+          ``xtrashot`` overwrite one recipe byte each
+          (:data:`PRESELECT_LEGACY_BYTES`). Everything else —
+          ``sweetfoam``, ``fakesweetfoam``, ``strongcoldbrew`` — has no
+          wire representation at all: J.O.E. offers those toggles on
+          such machines and then sends nothing for them, so they are
+          refused here rather than silently dropped.
+        * **New protocol** (``IntakeF18="true"``). Nothing is
+          overwritten and no product swap happens; every preselection is
+          one bit of a **mask byte appended to the blob**
+          (:data:`PRESELECT_MASK_BITS`, offset
+          :data:`PRESELECT_MASK_OFFSET`). ``double`` is bit ``0x40``
+          there, not a product code.
+
+        Note that a ``double`` product is usually marked
+        ``Active="false"`` in the XML (it is not a menu entry), and that
+        it carries its *own* recipe parameters — often none at all — so
+        overrides valid for the single product may not be valid for its
+        double.
+
+        ``mask`` overrides the computed mask byte verbatim (an escape
+        hatch for firmware that numbers the bits differently); it is
+        only meaningful on an ``IntakeF18`` machine.
+
+        **None of the encoding is hardware-verified.** It is transcribed
+        from the APK — see PROTOCOL.md §5.13, and check a real machine
+        before trusting it. Raises :class:`ValueError` on every
+        rejection.
+        """
+        requested: list[str] = []
+        for raw in names:
+            name = canonical_preselection(raw)
+            if name not in requested:
+                requested.append(name)
+        for name in requested:
+            if name not in product.preselections:
+                supported = ", ".join(sorted(product.preselections)) or "(none)"
+                raise ValueError(
+                    f"{product.name}: preselection {name!r} is not supported on "
+                    f"{self.code}. This product supports: {supported}"
+                )
+        if not self.combination_allowed(requested):
+            rows = (
+                "; ".join("+".join(sorted(row)) for row in self.preselect_combinations)
+                or "(none — one preselection at a time)"
+            )
+            raise ValueError(
+                f"{self.code}: {' + '.join(requested)} is not a legal preselection "
+                f"combination. Allowed combinations: {rows}"
+            )
+
+        if self.intake_f18:
+            bits = 0
+            for name in requested:
+                bit = PRESELECT_MASK_BITS.get(name)
+                if bit is None:
+                    raise ValueError(
+                        f"{self.code}: preselection {name!r} has no bit in the "
+                        f"preselection mask this machine uses, so it cannot be "
+                        f"sent. Encodable here: "
+                        f"{', '.join(sorted(PRESELECT_MASK_BITS))}"
+                    )
+                bits |= bit
+            return PreselectionPlan(
+                product=product,
+                requested=tuple(requested),
+                mask=bits if mask is None else mask,
+            )
+
+        target = product
+        overwrites: list[tuple[int, int]] = []
+        for name in requested:
+            if name == "double":
+                if product.double_code is None:
+                    raise ValueError(
+                        f"{product.name}: {self.code} declares no double product "
+                        f"code, so a double cannot be started on this machine."
+                    )
+                double = self.product_by_code.get(product.double_code)
+                if double is None:
+                    raise ValueError(
+                        f"{product.name}: the {self.code} XML declares double "
+                        f"product 0x{product.double_code:02X} but no such product "
+                        f"is in its catalogue — the double cannot be brewed."
+                    )
+                target = double
+                continue
+            legacy = PRESELECT_LEGACY_BYTES.get(name)
+            if legacy is None:
+                raise ValueError(
+                    f"{self.code}: preselection {name!r} has no wire encoding on "
+                    f"this machine generation — J.O.E. shows it and sends nothing. "
+                    f"Encodable here: double, "
+                    f"{', '.join(sorted(PRESELECT_LEGACY_BYTES))}"
+                )
+            overwrites.append(legacy)
+        return PreselectionPlan(
+            product=target,
+            requested=tuple(requested),
+            mask=mask,
+            byte_overwrites=tuple(overwrites),
+        )
 
     def setting_by_arg(self, p_argument: str) -> SettingDef | None:
         """Find the :class:`SettingDef` for a ``P_Argument`` hex code
@@ -586,6 +1036,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         # Inactive products are kept in the catalogue (the machine still
         # reports their counters) but flagged so a UI can hide them.
         active = (product.get("Active") or "").strip().lower() != "false"
+        preselections, double_code = _parse_preselection(product)
         products.append(
             ProductDef(
                 code=code_int,
@@ -593,6 +1044,8 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 raw_name=raw_name,
                 params=_parse_product_params(product),
                 active=active,
+                preselections=preselections,
+                double_code=double_code,
             )
         )
 
@@ -606,6 +1059,9 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
 
     settings = _parse_machine_settings(root)
 
+    capabilities_el = root.find(".//{*}MACHINEMANIFEST/{*}CAPABILITIES")
+    capabilities = {} if capabilities_el is None else dict(capabilities_el.attrib)
+
     return MachineProfile(
         code=code,
         version=version,
@@ -614,6 +1070,8 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         settings=settings,
         has_pmode=has_pmode,
         counter_banks=counter_banks,
+        capabilities=capabilities,
+        preselect_combinations=_parse_combinations(root),
     )
 
 
@@ -634,7 +1092,8 @@ def _parse_product_params(product: ET.Element) -> tuple[ProductParam, ...]:
     Every direct child carrying an ``Argument="F<n>"`` attribute is a
     recipe parameter (WATER_AMOUNT, COFFEE_STRENGTH, TEMPERATURE,
     MILK_FOAM_AMOUNT, BYPASS, MILK_BREAK, …). Children without an
-    F-numbered Argument (e.g. PRESELECTION) are skipped.
+    F-numbered Argument are skipped; PRESELECTION is one of those and is
+    parsed separately by :func:`_parse_preselection`.
     """
     params: list[ProductParam] = []
     for el in product:

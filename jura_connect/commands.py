@@ -367,18 +367,40 @@ def _r_brew(_spec, client, args, timeout):
       for firmware variants with a different layout.
 
     Optional ``param=value`` args override the XML defaults, e.g.
-    ``water=220 strength=6 temp=high``. Values are validated against
+    ``water=220 strength=6 temp=high``. Bare words are preselections
+    (``brew espresso double``, ``brew cappuccino extra_shot``) —
+    validated against the product's ``<PRESELECTION>`` element and the
+    machine's legal ``<COMBINATION>`` rows. Values are validated against
     the profile's catalogue before anything goes on the wire.
     """
     target = _ascii_arg("product", args[0])
     overrides: dict[str, int | str] = {}
+    preselections: list[str] = []
+    preselect_mask: int | None = None
     for raw in args[1:]:
         key, sep, value = raw.partition("=")
         if not sep or not value:
-            raise CommandError(
-                f"brew: expected param=value (e.g. water=220), got {raw!r}"
-            )
-        kind = _BREW_KEY_TO_KIND.get(key.strip().lower())
+            # A bare word is a preselection, not a malformed override.
+            try:
+                preselections.append(profile.canonical_preselection(raw))
+            except ValueError as exc:
+                raise CommandError(
+                    f"brew: {raw!r} is neither a known preselection nor a "
+                    f"param=value override (e.g. water=220). {exc}"
+                ) from exc
+            continue
+        key = key.strip().lower()
+        if key in ("mask", "preselect_mask"):
+            # Raw escape hatch for the preselection mask byte of
+            # IntakeF18 machines — UNVERIFIED, see PROTOCOL.md §5.13.
+            try:
+                preselect_mask = int(value.strip(), 16)
+            except ValueError as exc:
+                raise CommandError(
+                    f"brew: {key} expects a hex byte (e.g. mask=41), got {value!r}"
+                ) from exc
+            continue
+        kind = _BREW_KEY_TO_KIND.get(key)
         if kind is None:
             known = ", ".join(sorted(_BREW_KEY_TO_KIND))
             raise CommandError(f"brew: unknown parameter {key!r}. Known: {known}")
@@ -392,10 +414,11 @@ def _r_brew(_spec, client, args, timeout):
         and len(target) >= _VERBATIM_BLOB_MIN_HEX
     )
     if is_blob:
-        if overrides:
+        if overrides or preselections or preselect_mask is not None:
             raise CommandError(
-                "brew: param=value overrides cannot be combined with a "
-                "raw recipe blob — bake the values into the blob instead."
+                "brew: param=value overrides and preselections cannot be "
+                "combined with a raw recipe blob — bake the values into the "
+                "blob instead."
             )
         return client.request(f"@TP:{target}", timeout=timeout)
     if client.profile is None:
@@ -407,7 +430,13 @@ def _r_brew(_spec, client, args, timeout):
         )
     try:
         definition = client.resolve_product(target)
-        recipe = definition.build_recipe_hex(overrides)
+        if preselections or preselect_mask is not None:
+            plan = client.profile.plan_preselections(
+                definition, preselections, mask=preselect_mask
+            )
+            recipe = plan.build_recipe_hex(overrides)
+        else:
+            recipe = definition.build_recipe_hex(overrides)
     except ValueError as exc:
         raise CommandError(str(exc)) from exc
     return client.request(f"@TP:{recipe}", timeout=timeout)
@@ -511,18 +540,46 @@ class ParamInfo:
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ProductInfo:
-    """One brewable product and its recipe parameters."""
+    """One brewable product, its recipe parameters and preselections.
+
+    ``preselections`` are the bare-word toggles the machine XML declares
+    for this product, sorted — ``brew <name> <toggle>``. Some of them
+    have no wire encoding on the connected machine's protocol
+    generation (J.O.E. shows them and sends nothing); those are listed
+    in ``unsendable`` and are refused by ``brew`` rather than silently
+    dropped. ``double_code`` / ``double_product`` name the product a
+    ``double`` actually brews on an old-T-protocol machine — a
+    *different* product, with its own parameters.
+    """
 
     code: int
     name: str  # resolvable snake_case name (what ``brew <name>`` accepts)
     raw_name: str
     params: tuple[ParamInfo, ...]
+    preselections: tuple[str, ...] = ()
+    unsendable: tuple[str, ...] = ()
+    double_code: int | None = None
+    double_product: str | None = None
+
+    def _preselect_line(self) -> str:
+        if not self.preselections:
+            return "    preselections: (none)"
+        shown = []
+        for name in self.preselections:
+            if name in self.unsendable:
+                shown.append(f"{name} (declared, but not sendable on this machine)")
+            elif name == "double" and self.double_product is not None:
+                shown.append(
+                    f"double (brews {self.double_product} / 0x{self.double_code:02X})"
+                )
+            else:
+                shown.append(name)
+        return f"    preselections: {', '.join(shown)}"
 
     def format(self) -> str:
         head = f"{self.name}  (0x{self.code:02X})"
-        if not self.params:
-            return head + "\n    (no adjustable parameters)"
-        return "\n".join([head, *(p.format() for p in self.params)])
+        body = [p.format() for p in self.params] or ["    (no adjustable parameters)"]
+        return "\n".join([head, *body, self._preselect_line()])
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -530,6 +587,12 @@ class ProductInfo:
             "name": self.name,
             "raw_name": self.raw_name,
             "params": [p.to_dict() for p in self.params],
+            "preselections": list(self.preselections),
+            "unsendable_preselections": list(self.unsendable),
+            "double_code": (
+                None if self.double_code is None else f"{self.double_code:02X}"
+            ),
+            "double_product": self.double_product,
         }
 
 
@@ -545,16 +608,28 @@ class ProductCatalogue:
 
     machine_code: str
     products: tuple[ProductInfo, ...]
+    #: Preselection sets the machine allows simultaneously
+    #: (``<MULTIPLE_PRESELECTS>``). Empty means one at a time.
+    preselect_combinations: tuple[tuple[str, ...], ...] = ()
 
     def format(self) -> str:
         header = f"{self.machine_code} — {len(self.products)} brewable product(s)"
         blocks = [p.format() for p in self.products]
-        return "\n\n".join([header, *blocks])
+        if self.preselect_combinations:
+            combos = "; ".join("+".join(row) for row in self.preselect_combinations)
+        else:
+            combos = "(none — one preselection at a time)"
+        return "\n\n".join(
+            [header, *blocks, f"allowed preselect combinations: {combos}"]
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "machine_code": self.machine_code,
             "products": [p.to_dict() for p in self.products],
+            "preselect_combinations": [
+                list(row) for row in self.preselect_combinations
+            ],
         }
 
 
@@ -604,6 +679,36 @@ def _param_info(param) -> ParamInfo:
     )
 
 
+def _double_product_name(prof: profile.MachineProfile, code: int | None) -> str | None:
+    """Resolvable name of the product a ``double`` preselection brews."""
+    if code is None:
+        return None
+    double = prof.product_by_code.get(code)
+    return None if double is None else double.name
+
+
+def _unsendable_preselections(
+    prof: profile.MachineProfile, product: profile.ProductDef
+) -> tuple[str, ...]:
+    """Preselections the XML declares that this machine cannot express.
+
+    Mirrors the refusals in
+    :meth:`~jura_connect.profile.MachineProfile.plan_preselections`, so
+    ``products`` never advertises something ``brew`` will reject.
+    """
+    out = []
+    for name in sorted(product.preselections):
+        if prof.intake_f18:
+            ok = name in profile.PRESELECT_MASK_BITS
+        elif name == "double":
+            ok = product.double_code in prof.product_by_code
+        else:
+            ok = name in profile.PRESELECT_LEGACY_BYTES
+        if not ok:
+            out.append(name)
+    return tuple(out)
+
+
 def _r_products(_spec, client, _args, _timeout):
     prof = client.profile
     if prof is None:
@@ -618,11 +723,21 @@ def _r_products(_spec, client, _args, _timeout):
             name=p.name,
             raw_name=p.raw_name,
             params=tuple(_param_info(pp) for pp in p.params),
+            preselections=tuple(sorted(p.preselections)),
+            unsendable=_unsendable_preselections(prof, p),
+            double_code=p.double_code,
+            double_product=_double_product_name(prof, p.double_code),
         )
         for p in prof.products
         if p.active
     )
-    return ProductCatalogue(machine_code=prof.code, products=products)
+    return ProductCatalogue(
+        machine_code=prof.code,
+        products=products,
+        preselect_combinations=tuple(
+            tuple(sorted(row)) for row in prof.preselect_combinations
+        ),
+    )
 
 
 def _r_set_pin(_spec, client, args, timeout):
@@ -964,11 +1079,14 @@ _SPECS: tuple[CommandSpec, ...] = (
                 "Run 'products' to list valid names",
             ),
             Argument(
-                "param=value",
+                "param=value|preselection",
                 "recipe override(s): water=<ml> strength=<level> "
                 "temp=<low|normal|high> milk=<s> milk_break=<s> "
-                "bypass=<ml>; defaults come from the machine XML. Run "
-                "'products' for each product's allowed values",
+                "bypass=<ml>; defaults come from the machine XML. Bare "
+                "words are preselections (double, extra_shot, powder, "
+                "cold_brew, light_brew, sweet_foam); mask=<hex> forces "
+                "the raw preselection mask byte. Run 'products' for "
+                "each product's allowed values and preselections",
                 optional=True,
                 variadic=True,
             ),

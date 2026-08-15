@@ -39,7 +39,7 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 
 from . import profile, protocol
 from .profile import MachineProfile, ProductDef, SettingDef
@@ -885,6 +885,8 @@ class JuraClient:
         milk_foam: int | None = None,
         milk_break: int | None = None,
         bypass: int | None = None,
+        preselections: Sequence[str] = (),
+        preselect_mask: int | None = None,
         substring: bool = False,
         retry: bool = False,
         timeout: float = 6.0,
@@ -916,6 +918,20 @@ class JuraClient:
         TT237W-family WiFi firmware, and an unset water byte means 255
         ticks ≈ 1.3 l, so always send the full validated blob.
 
+        ``preselections`` names the extra-shot / double / powder /
+        cold-brew / light-brew / sweet-foam toggles to apply, validated
+        against what the product's ``<PRESELECTION>`` element declares
+        and against the machine's legal ``<COMBINATION>`` rows. On an
+        old-T-protocol machine (the S8 EB among them) a ``double``
+        **selects a different product** — the recipe is then built from
+        that double product, whose parameters may differ. See
+        :meth:`~jura_connect.profile.MachineProfile.plan_preselections`
+        for what each machine generation can express;
+        ``preselect_mask`` forces the mask byte of an ``IntakeF18``
+        machine verbatim. **Preselection encoding is APK-derived and has
+        never been seen on a wire — it may misbrew** (PROTOCOL.md
+        §5.13).
+
         ``retry=True`` sends the blob a second time if the first reply
         is not an ``@tp`` accept: a machine in ``energy_safe`` wakes on
         the first ``@TP:`` but may ignore it (see PROTOCOL.md §5.9).
@@ -925,6 +941,14 @@ class JuraClient:
         observable via :meth:`iter_frames`.
         """
         definition = self.resolve_product(product, substring=substring)
+        prof = self.profile
+        plan: profile.PreselectionPlan | None = None
+        if (preselections or preselect_mask is not None) and prof is not None:
+            # resolve_product already refused a missing profile.
+            plan = prof.plan_preselections(
+                definition, preselections, mask=preselect_mask
+            )
+            definition = plan.product
         overrides: dict[str, int | str] = {}
         for kind, value in (
             (profile.KIND_WATER_AMOUNT, ml),
@@ -937,7 +961,11 @@ class JuraClient:
         ):
             if value is not None:
                 overrides[kind] = value
-        recipe = definition.build_recipe_hex(overrides)
+        recipe = (
+            definition.build_recipe_hex(overrides)
+            if plan is None
+            else plan.build_recipe_hex(overrides)
+        )
         reply = self.request(f"@TP:{recipe}", timeout=timeout)
         if retry and not _is_brew_accept(reply):
             # Energy-safe wake-up: the first @TP: only woke the machine;
