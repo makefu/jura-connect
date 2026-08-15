@@ -2455,11 +2455,14 @@ machine.
 | `jura_connect/crypto.py`        | per-nibble permutation, escape handling |
 | `jura_connect/protocol.py`      | frame writer/reader on top of `crypto` |
 | `jura_connect/discovery.py`     | UDP scan probe, broadcast-reply parser, TCP fallback sweep |
-| `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 88 bundled XMLs + `JOE_MACHINES.TXT` |
+| `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 89 bundled XMLs + `JOE_MACHINES.TXT`; also parses processes/states (§5.11), preselections (§5.13), settings banks (§5.7) and the `<CAPABILITIES>` manifest |
 | `jura_connect/data/`            | vendored XMLs + `JOE_MACHINES.TXT`; shipped as `package-data` so installed wheels load profiles via `importlib.resources` |
-| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers |
+| `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers; thin entry points into `progress` / `process` / `language` / `firmware` |
 | `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / `progress` / …) used by CLI and library |
 | `jura_connect/progress.py`      | `@TV:` product-progress decoder — `ProgressState` / `ProgressType` / `ProductProgress` (§5.10) |
+| `jura_connect/process.py`       | interactive maintenance-process state machine — `MachineProcess` / `ProcessStep` / `ProcessRunner` / `ProcessRun` over `@TG:01` / `@TG:04` / `@TG:10` (§5.11) |
+| `jura_connect/language.py`      | language-download sequencer — S-record parsing, `@TS:F1` lock, `@TT:00/01/02/03/08`, `@TV:81/82` display lines (§5.14) |
+| `jura_connect/firmware.py`      | dongle OTA sequencer (`@HB` / `@HO:` / `@HD:` / `@HE`), `@HT:3` restart and the milk cooler (`@HU` / `@HU?`); every mutating entry point gated on `acknowledge_bricking_risk=True` (§5.15) |
 | `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600); `machine_type` field |
 | `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
 | `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds` / `machine-types` / `set-machine-type`) |
@@ -2500,3 +2503,50 @@ breaks both halves of the test-suite simultaneously.
   rather than 11), a milk drink (states `31`–`37`), a `41` frame from
   a recipe with bypass (to confirm the `BYPASS_WATER_VOLUME` branch),
   and any `8F` extended-window frame — we have never seen one.
+* **18 of EF1091's 83 `<STATE>` entries have no `ProgressState`
+  counterpart** in the app's own enum (§5.11) — including `26` "Press
+  Rinse", the state a cleaning cycle parks on. Either J.O.E. never
+  renders those frames (it reads the XML for the label and the enum
+  only for behaviour), or the machine never emits them. A capture of a
+  real cleaning cycle settles it; until then `process.py` leans on the
+  XML table and treats the enum as advisory.
+* **The state *ordering* inside a maintenance cycle is a
+  reconstruction** (§5.11). The XMLs declare which states exist and
+  which need an `AcceptCommand`, never the sequence.
+  `SimulatorConfig.process_sequences` is a plausible guess, so a
+  `ProcessRunner` run is only as realistic as that guess.
+* **`@TV:84` (§5.12): clock or label?** The frame carries the coffee
+  timer's *target* time, hex-encoded per character, and J.O.E. sends it
+  *after* the schedule rather than before — so it is not a prerequisite
+  clock sync. Whether the machine sets its own clock from it or only
+  renders "ready at 07:30" is unknown; nothing in the app reads a clock
+  back. Related and equally open: whether `@TG:FF` cancels a *pending*
+  timer or only a running brew.
+* **The trailing 16-bit field on `@tt:0x` success replies** (§5.14). A
+  successful `@TT:02` / `@TT:08` / `@TT:03` answers
+  `@tt:0x,FF,<4 hex>`; the error codes carry no such field and J.O.E.
+  never reads it. A running CRC over the selected block fits the
+  evidence (`@TT:03` can fail with `FE = CRC_NOT_MATCHING`), but bytes
+  remaining and next-expected-address are not ruled out. The library
+  surfaces the field and interprets nothing.
+* **The `@hd:` success body** (§5.15). J.O.E.'s matcher is
+  `@hd:((error)|(.*))` — anything that is not the literal `error`
+  counts as an ack — so what a real dongle puts there (an echoed
+  offset? a chunk CRC? nothing at all?) is unrecorded. `firmware.py`
+  follows the app and treats any non-`error` body as success, which
+  means a body that *encodes* a failure would be missed. Not probeable
+  without risking the dongle.
+* **Does an `IntakeF18` machine require the 20-byte `@TP:` blob
+  unconditionally?** (§5.13). J.O.E. always sends 20 bytes to such a
+  machine; `jura-connect` keeps sending the live-verified 16-byte blob
+  unless a preselection is requested. EF1091 has no manifest at all, so
+  the maintainer's machine cannot answer this. If a preselection-free
+  `@TP:` comes back `@tp:00` on an `IntakeF18` machine, the 20-byte
+  form is the first thing to try.
+* **The batch settings read `@TM:00,FC` (§5.7) has a guessed reply
+  layout.** The XML declares the command on 57 of 89 profiles but
+  J.O.E. never issues it, so nothing pins the response shape.
+  `read_all_settings()` falls back to per-setting reads on any
+  mismatch, which makes this the cheapest open question to close: it is
+  read-only — send `@TM:00,FC` once and diff it against four single
+  `@TM:<arg>` reads.
