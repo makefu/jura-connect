@@ -1016,6 +1016,55 @@ class ProductDef:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
+class MachineCapabilities:
+    """``<MACHINEMANIFEST><CAPABILITIES …/>`` flags.
+
+    Only 23 of the 89 bundled XMLs carry a ``<MACHINEMANIFEST>`` at all;
+    the older "T-protocol" machines (EF1091 / the maintainer's S8 EB
+    among them) have none, in which case every flag stays at its
+    J.O.E. default and :attr:`declared` is ``False``.
+
+    Defaults mirror the APK's ``CMCapabilities`` constructor, including
+    the counter-intuitive one: when the element exists but omits
+    ``BinaryLanguageDownload``, J.O.E. assumes **binary** transfers.
+    """
+
+    intake_f18: bool = False
+    language_download: bool = False
+    # NB: defaults to True when the attribute is absent (CMCapabilities).
+    binary_language_download: bool = True
+    # Slot index (hex, 2 chars) that a downloaded language occupies —
+    # the argument of @TT:01 and the index into the @TT:00 list.
+    language_download_block: str = "0B"
+    coffee_timer_grinder_freeness_setting: bool = False
+    # False when the XML carried no <CAPABILITIES> element at all.
+    declared: bool = False
+    # The element's attributes verbatim, keys in the XML's own CamelCase
+    # ({"IntakeF18": "true", …}). Empty when nothing was declared. Kept
+    # alongside the typed flags because the manifest is a moving target:
+    # a machine may advertise an attribute this library has not learned
+    # to decode yet, and dropping it would hide that from a caller.
+    raw: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        """Read one capability attribute verbatim, ``dict.get`` style."""
+        return self.raw.get(name, default)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "declared": self.declared,
+            "intake_f18": self.intake_f18,
+            "language_download": self.language_download,
+            "binary_language_download": self.binary_language_download,
+            "language_download_block": self.language_download_block,
+            "coffee_timer_grinder_freeness_setting": (
+                self.coffee_timer_grinder_freeness_setting
+            ),
+            "raw": dict(self.raw),
+        }
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
 class MachineProfile:
     """Static description of one machine variant.
 
@@ -1079,11 +1128,15 @@ class MachineProfile:
     # declared (5 profiles). ``None`` = not declared; ask the machine
     # via ``@TM:50`` instead.
     pmode_slot_count: int | None = None
-    # <MACHINEMANIFEST><CAPABILITIES …/> attributes verbatim (keys keep
-    # the XML's CamelCase: "IntakeF18", "LanguageDownload", …). Empty for
-    # the 66 profiles with no manifest — every old T-protocol machine,
-    # the maintainer's EF1091 among them.
-    capabilities: dict[str, str] = dataclasses.field(default_factory=dict)
+    # <MACHINEMANIFEST><CAPABILITIES …/>, decoded into typed flags with
+    # J.O.E.'s defaults. Only 23 of the 89 bundled profiles carry the
+    # element at all — every old T-protocol machine (the maintainer's
+    # EF1091 among them) leaves ``capabilities.declared`` False. The
+    # verbatim attributes stay available as ``capabilities.raw``.
+    # See :class:`MachineCapabilities` and docs/PROTOCOL.md §5.14.
+    capabilities: MachineCapabilities = dataclasses.field(
+        default_factory=MachineCapabilities
+    )
     # Sets of preselections the machine allows simultaneously, from
     # <MULTIPLE_PRESELECTS>. Empty means "one preselection at a time".
     preselect_combinations: tuple[frozenset[str], ...] = ()
@@ -1137,7 +1190,7 @@ class MachineProfile:
         six zero bytes to the blob on IntakeF18 machines even when the
         product declares no F17.
         """
-        return (self.capabilities.get("IntakeF18") or "").strip().lower() == "true"
+        return self.capabilities.intake_f18
 
     def combination_allowed(self, names: Iterable[str]) -> bool:
         """Whether ``names`` may be preselected at the same time.
@@ -1406,9 +1459,6 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
     settings = _parse_machine_settings(root)
     settings_bank = _parse_settings_bank(root)
 
-    capabilities_el = root.find(".//{*}MACHINEMANIFEST/{*}CAPABILITIES")
-    capabilities = {} if capabilities_el is None else dict(capabilities_el.attrib)
-
     return MachineProfile(
         code=code,
         version=version,
@@ -1426,8 +1476,39 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         pmode_slot_count=pmode_slot_count,
         processes=_parse_processes(root),
         states=_parse_states(root),
-        capabilities=capabilities,
+        capabilities=_parse_capabilities(root),
         preselect_combinations=_parse_combinations(root),
+    )
+
+
+def _bool_attr(el: ET.Element, name: str, default: bool) -> bool:
+    """Read an XML ``"true"``/``"false"`` attribute, J.O.E. style."""
+    raw = el.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() == "true"
+
+
+def _parse_capabilities(root: ET.Element) -> MachineCapabilities:
+    """Parse ``<MACHINEMANIFEST><CAPABILITIES/>`` into flags.
+
+    Scoped to the manifest on purpose: the documented template profile
+    (EF0000) mentions the element in prose elsewhere in the file.
+    """
+    el = root.find(".//{*}MACHINEMANIFEST/{*}CAPABILITIES")
+    if el is None:
+        return MachineCapabilities()
+    block = (el.get("LanguageDownloadBlock") or "").strip().upper()
+    return MachineCapabilities(
+        intake_f18=_bool_attr(el, "IntakeF18", False),
+        language_download=_bool_attr(el, "LanguageDownload", False),
+        binary_language_download=_bool_attr(el, "BinaryLanguageDownload", True),
+        language_download_block=block or "0B",
+        coffee_timer_grinder_freeness_setting=_bool_attr(
+            el, "CoffeeTimerGrinderFreenessSetting", False
+        ),
+        declared=True,
+        raw=dict(el.attrib),
     )
 
 

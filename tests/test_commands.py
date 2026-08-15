@@ -501,6 +501,14 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("process-next", []),
     # Same verbatim-blob escape hatch, so no profile is needed.
     ("coffee-timer", ["28000709000001000109000000000000", "30m"]),
+    ("language-lock", []),
+    ("language-display", ["Updating", "language"]),
+    # 'language-download' is gated the same way but returns a structured
+    # LanguageDownloadResult rather than the raw reply string these two
+    # parametrised tests assert on; its own both-paths gating tests live
+    # in tests/test_language_download.py. (It also drives a multi-step
+    # transfer that raises against a simulator with the download turned
+    # off, instead of handing back the @an:error the wire test wants.)
 ]
 
 

@@ -31,7 +31,7 @@ import dataclasses
 import re
 from collections.abc import Callable, Sequence
 
-from . import profile
+from . import language, profile
 from .client import (
     BARISTA_COUNTER_BANK,
     DAILY_BARISTA_COUNTER_BANK,
@@ -89,6 +89,17 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     # because they cannot make the machine do anything physical; this
     # one can.
     b"@TM:3C,",
+    # Language download (§5.14). Listed verb by verb on purpose: the
+    # reads of the same families — @TT:00 (slot inventory) and @TM:23
+    # (max languages) — must stay ungated, and this tuple is matched by
+    # byte prefix.
+    b"@TS:F1",  # lock the keypad for a language download
+    b"@TT:01",  # select the language block that gets overwritten
+    b"@TT:02",  # transfer a language record (ASCII)
+    b"@TT:03",  # finish the language download
+    b"@TT:08",  # transfer a language record (binary)
+    b"@TV:81",  # overwrite display line 1
+    b"@TV:82",  # overwrite display line 2
 )
 
 
@@ -1256,6 +1267,55 @@ def _r_coffee_timer_time(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Language-download runners (docs/PROTOCOL.md §5.14)
+# --------------------------------------------------------------------- #
+
+
+def _r_languages(_spec, client, _args, timeout):
+    return client.read_language_inventory(timeout=timeout)
+
+
+def _r_language_lock(_spec, client, _args, timeout):
+    return client.language_lock(timeout=timeout)
+
+
+def _r_language_display(_spec, client, args, timeout):
+    line1 = _ascii_arg("line1", args[0])
+    line2 = _ascii_arg("line2", args[1]) if len(args) > 1 else ""
+    replies = client.set_language_display(line1, line2, timeout=timeout)
+    return " ".join(replies)
+
+
+def _load_language_payload(source: str) -> language.LanguagePayload:
+    """Accept a path to an S-record file, or an inline S-record blob.
+
+    Tries the filesystem first — a path is by far the common case, and
+    an inline blob is never a readable file name.
+    """
+    try:
+        with open(source, encoding="ascii") as fh:
+            text = fh.read()
+    except (OSError, ValueError):
+        text = source
+    try:
+        return language.LanguagePayload.from_srec(text, name=source)
+    except ValueError as exc:
+        raise CommandError(
+            f"language-download: {source!r} is neither a readable S-record "
+            f"file nor an S-record blob: {exc}"
+        ) from exc
+
+
+def _r_language_download(_spec, client, args, timeout):
+    payload = _load_language_payload(args[0])
+    block = args[1].upper() if len(args) > 1 else None
+    try:
+        return client.download_language(payload, block=block, timeout=timeout)
+    except language.LanguageDownloadError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -1881,6 +1941,76 @@ _SPECS: tuple[CommandSpec, ...] = (
             "from the J.O.E. APK and has never been confirmed on real "
             "hardware, so the machine may also brew something other "
             "than what you asked for."
+        ),
+    ),
+    # ---- language download ----------------------------------------------
+    CommandSpec(
+        name="languages",
+        description=(
+            "list the machine's language slots (@TT:00) and its "
+            "language-download support (@TM:23 + profile capabilities)"
+        ),
+        arguments=(),
+        runner=_r_languages,
+    ),
+    CommandSpec(
+        name="language-lock",
+        description="[destructive] lock the keypad for a language download (@TS:F1)",
+        arguments=(),
+        runner=_r_language_lock,
+        destructive=True,
+        danger=(
+            "locks the machine's keypad for a language download. Unlike "
+            "the plain 'lock', this puts the machine into download mode; "
+            "if the session dies before 'unlock' (@TS:00) the display "
+            "stays locked until the machine is power-cycled."
+        ),
+    ),
+    CommandSpec(
+        name="language-display",
+        description=(
+            "[destructive] overwrite the two display lines shown during a "
+            "language download (@TV:81 / @TV:82)"
+        ),
+        arguments=(
+            Argument("line1", "first display line, truncated to 19 chars"),
+            Argument("line2", "second display line", optional=True),
+        ),
+        runner=_r_language_display,
+        destructive=True,
+        danger=(
+            "overwrites what the machine is showing on its own display. "
+            "Harmless but visible to whoever is standing at the machine; "
+            "send it again with a blank line to clear it."
+        ),
+    ),
+    CommandSpec(
+        name="language-download",
+        description=(
+            "[destructive] push a language image into the machine "
+            "(@TS:F1 / @TT:01 / @TT:02 or @TT:08 / @TT:03); takes an "
+            "S-record file or blob. APK-derived, never hardware-tested"
+        ),
+        arguments=(
+            Argument("source", "path to an S-record file, or an inline S-record blob"),
+            Argument(
+                "block",
+                "language slot to overwrite (2 hex chars); defaults to the "
+                "profile's LanguageDownloadBlock capability",
+                optional=True,
+            ),
+        ),
+        runner=_r_language_download,
+        destructive=True,
+        danger=(
+            "rewrites one of the machine's UI language slots and locks its "
+            "keypad for the whole transfer (minutes). A transfer that "
+            "aborts part-way leaves that slot half-written, so the machine "
+            "may show garbage until a full, successful download replaces "
+            "it — and if the run dies before the trailing @TS:00, the "
+            "display stays locked until a power cycle. The wire format is "
+            "derived from the J.O.E. APK and has never been run against "
+            "real hardware."
         ),
     ),
 )

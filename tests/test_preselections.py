@@ -68,7 +68,8 @@ def _paired(sim, code: str | None = None) -> JuraClient:
 def test_ef1091_preselections_parsed_old_t_protocol() -> None:
     """EF1091 (S8 EB) has no manifest: doubles are product codes."""
     prof = load_profile("EF1091")
-    assert prof.capabilities == {}
+    assert prof.capabilities.raw == {}
+    assert prof.capabilities.declared is False
     assert prof.intake_f18 is False
 
     espresso = prof.product_by_code[0x02]
@@ -103,7 +104,7 @@ def test_ef1120_intake_f18_capability_parsed() -> None:
     double product code — the two mechanisms are not exclusive in the
     bundled XMLs."""
     prof = load_profile("EF1120")
-    assert prof.capabilities == {"IntakeF18": "true"}
+    assert prof.capabilities.raw == {"IntakeF18": "true"}
     assert prof.intake_f18 is True
 
     espresso = prof.product_by_code[0x02]
@@ -209,7 +210,7 @@ def test_dangling_double_is_refused_not_crashed() -> None:
 def test_capability_parsing_covers_every_manifest_machine() -> None:
     """23 of the bundled profiles carry <CAPABILITIES>; all of them set
     IntakeF18 and the property agrees with the raw attribute."""
-    with_caps = [p for p in iter_profiles() if p.capabilities]
+    with_caps = [p for p in iter_profiles() if p.capabilities.raw]
     assert len(with_caps) == 23
     for prof in with_caps:
         assert prof.intake_f18 == (prof.capabilities.get("IntakeF18") == "true")

@@ -2166,3 +2166,187 @@ deliberately *not* in `DESTRUCTIVE_PREFIXES` (see §5.8: it aborts a
 step rather than resetting anything), so `cancel` reaches it without
 the gate. Whether it actually clears a *pending* timer (as opposed to
 aborting a running brew) is untested.
+
+---
+
+### 5.14 Language download (`@TS:F1` / `@TT:xx` / `@TV:8x`)
+
+**APK-derived, never run against hardware.** Every byte below comes
+from the J.O.E. 4.6.10 APK — the `WifiCommand*` classes under
+`connection/command/language_download/`, their `parser/language_download/`
+counterparts, and `CoffeeMachineAdapter.downloadLanguage` (readable only
+in smali; jadx bails out of the coroutine body). `jura_connect.language`
+implements it and `jura_connect.simulator` models it, but no S8 EB has
+ever been asked to swallow a language image. Treat the whole section as
+a hypothesis until someone verifies it on a machine that declares the
+capability.
+
+#### Capability gating
+
+Only machines whose XML carries a `<MACHINEMANIFEST>` can do this:
+
+```xml
+<CAPABILITIES IntakeF18="true" LanguageDownload="true"
+              BinaryLanguageDownload="true" LanguageDownloadBlock="0B"/>
+```
+
+Six of the 89 bundled profiles declare `LanguageDownload="true"`:
+`EF0000` (the documented template), `EF1106`, `EF1123`, `EF1125`,
+`EF1171`, `EF1208`. `EF1091` (the maintainer's S8 EB) has no manifest
+at all, so the feature is refused there before anything reaches the
+wire. Attribute semantics, mirroring the APK's `CMCapabilities`:
+
+| Attribute | Meaning | Default when absent |
+| --------- | ------- | ------------------- |
+| `LanguageDownload` | feature exists at all | `false` |
+| `BinaryLanguageDownload` | use `@TT:08` instead of `@TT:02` | **`true`** |
+| `LanguageDownloadBlock` | slot the download overwrites (hex) | `"0B"` |
+
+`MachineProfile.capabilities` parses these
+(`jura_connect.profile.MachineCapabilities`); the block doubles as the
+index into the `@TT:00` list, which is how J.O.E.'s
+`getDownloadedLanguage()` shows what is currently installed.
+
+#### Commands
+
+| Wire | Reply regex | Meaning |
+| ---- | ----------- | ------- |
+| `@TS:F1` | `@ts` | lock the keypad for the download |
+| `@TS:00` | `@ts` | release it (same verb as the display unlock) |
+| `@TM:23` | `@tm:23` / `@tm:23,0C<xx>` / `@tm:A3` / `@tm:00` | max-languages probe |
+| `@TT:00` | `@tt:00(,[0-9A-F]{6})+` | slot inventory |
+| `@TT:01,<block>` | `@tt:01,[0-9A-F]{2}` | select the slot to overwrite |
+| `@TT:02,<addr8><data>` | `@tt:02,[A-F]{2}(,[0-9A-F]{4})?` | ASCII record transfer |
+| `@TT:08,<binary>` | `@tt:08,[A-F]{2}(,[0-9A-F]{4})?` | binary record transfer |
+| `@TT:03` | `@tt:03,[A-F]{2}(,[0-9A-F]{4})?` | finish the block |
+| `@TV:81,<text><csum>` | `@tv:81` | display line 1 |
+| `@TV:82,<text><csum>` | `@tv:82` | display line 2 |
+
+`@TM:23` and `@TT:00` are reads; everything else in this table mutates
+the machine and is in `DESTRUCTIVE_PREFIXES` verb by verb (the tuple is
+prefix-matched, so `@TT:00` must not be gated by a blanket `@TT:`).
+
+Status bytes, from the parser classes:
+
+| Byte | `@tt:01` select | `@tt:02` / `@tt:08` transfer | `@tt:03` finish |
+| ---- | --------------- | ---------------------------- | --------------- |
+| `FF` | success | success | success |
+| `FE` | block not available | write error | CRC not matching |
+| `FD` | — | wrong syntax | — |
+| `FC` | execution in progress | wrong length | — |
+| `FB` | wrong content | wrong content | — |
+| `FA` | — | wrong logic | — |
+
+`@TM:23` decodes as `@tm:23` → supported, `@tm:23,0C<xx>` → a language
+is already set, `@tm:A3` → not supported, `@tm:00` → checksum false.
+(J.O.E.'s own parser tests the bare `@tm:23` pattern first with a
+*substring* match, so its `LANGUAGE_SET` branch is unreachable; we check
+the longer form first, which is evidently what was meant.)
+
+The `@tt:00` inventory is a list of 6-hex-char groups: 2 chars of slot
+index followed by 2 ASCII bytes of language code, with `FFFF` marking an
+empty slot. J.O.E. reads 14 slots (0..13).
+
+#### The 16-bit field on success — unknown
+
+A successful transfer or finish answers `@tt:0x,FF,<4 hex>`; the error
+codes carry no such field. J.O.E. never looks at it: every parser only
+switches on the status byte. Since `@TT:03` can fail with
+`FE = COMMON_ERROR_CRC_NOT_MATCHING`, the reading that fits is a
+**running CRC the machine keeps over the selected block**, echoed back
+so the app could verify it. Other candidates (bytes remaining, next
+expected address) are not ruled out. `jura_connect` surfaces the field
+and interprets nothing; the simulator answers a CRC-16/CCITT-FALSE over
+the bytes it has accepted so far, purely so the shape is exercised.
+
+#### Payload format
+
+Jura's language images are Motorola S-records. J.O.E. parses each line
+by dropping the first 4 characters (`S3` + length byte) and the last 2
+(the record checksum), then splits the remainder into an 8-hex-char
+address and up to 128 hex chars of data — i.e. **`S3` records with
+64-byte payloads**. `jura_connect.language.LanguagePayload.from_srec`
+parses the same files properly (`S1`/`S2`/`S3`, checksum verified,
+`S0`/`S5`/`S7`/`S8`/`S9` skipped); `from_bytes` covers callers that hold
+a flat image plus its base address.
+
+For the **binary** transfer J.O.E. merges pairs of adjacent records
+(`addr[i] + 0x40 == addr[i+1]`) into single 128-byte writes.
+`LanguagePayload.merged()` does the same, generalised to "the next
+record starts exactly where this one ends, and both fit in 128 bytes".
+
+#### Record encoding
+
+ASCII (`@TT:02`) is plain text:
+
+```
+@TT:02,<address:8 hex><data hex>          # no length field
+```
+
+Binary (`@TT:08`) is a *raw byte* command — `WifiCommand` is constructed
+with `binaryData=true`, so its body is emitted as bytes rather than
+ASCII:
+
+```
+"@TT:08," <esc(address:4)> <esc(length:2)> <esc(data)>
+```
+
+where `esc()` replaces each `0x00`, `0x0A`, `0x0D` and `0x1B` with
+`0x1B <byte + 0x80>` (`CoffeeMachineAdapterBle2.Companion.a`). This
+escaping is a **separate layer** from the transport's reserved-byte
+escaping in §1.2/§2.4 — the machine's line parser would otherwise choke
+on an embedded CR/LF or NUL. `length` is the data byte count, so unlike
+`@TT:02` the binary form is self-delimiting.
+
+Display lines carry their own checksum: `@TV:81,<text><csum>` where
+`csum` is the low byte of the sum of the text's characters, two hex
+chars (`ByteOperations.e`). Note this is **not** the `ByteOperations.d`
+checksum the `@TM:` setting writes use (§5.7) — different function, same
+family. Both lines are truncated to 19 characters.
+
+#### Sequence
+
+```
+@TV:81,<line1><csum>     optional: paint the machine display
+@TV:82,<line2><csum>
+@TS:F1                   lock the keypad for the whole download
+@TT:00                   read the slot inventory
+@TM:23                   support probe
+@TT:01,<block>           select the slot to overwrite
+@TT:02,<addr><data>      one per record, 80 ms apart in J.O.E.
+   …
+@TT:03                   finish; the machine verifies its checksum
+@TS:00                   release the keypad
+@TV:81,' ' @TV:82,' '    blank the display lines
+```
+
+Error handling, as implemented in `CoffeeMachineAdapter`:
+
+* Any `@TT:01` failure → J.O.E. sends `@TT:03` first (its
+  `downloadLanguage` calls `finishLanguageDownload` before it even
+  inspects the status byte), closing whatever session the machine
+  thinks is open. Only then does it look at the code: `FC` (execution
+  in progress) retries the select **once**, anything else gives up.
+  `jura_connect` mirrors both halves (`select_retries=1`).
+* A refused record aborts the transfer immediately; `@TT:03` is **not**
+  sent, and the run ends with `@TS:00` only. `jura_connect` releases the
+  lock from a `finally`, because a leaked `@TS:F1` leaves the display
+  locked until a power cycle (§9).
+* J.O.E. continues into the transfer after a *non*-`FC` select failure
+  (its `selectLanguageBlock failed:` branch falls through). That looks
+  like an oversight; `jura_connect` aborts instead.
+
+After a **successful** download J.O.E. additionally writes several PMode
+entries — `@TM:24` (a packed download date built by
+`LanguageDownloadHelper`, plus the language code taken from the file
+name), `@TM:25,01`, `@TM:09,FF` (language setting = "the downloaded
+one"), `@TM:22` and `@TM:23,0C`. `jura_connect` does **not** write
+these: they are app-level bookkeeping we cannot verify, and `@TM:09` is
+already reachable through the ordinary settings API (§5.7). A machine
+may therefore hold the new image without switching to it.
+
+#### What this library does *not* do
+
+Fetching the language blobs. J.O.E. downloads them from Jura's CDN over
+HTTPS (`ServerDocumentsRepository`); `jura-connect` takes whatever bytes
+the caller supplies and pushes them. No network dependency was added.
