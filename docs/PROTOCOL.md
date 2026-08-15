@@ -292,7 +292,10 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | Prefix     | Meaning |
 | ---------- | ------- |
 | `@TF:<hex>` | full machine status snapshot — alert bits, same layout as the discovery tail |
-| `@TV:<hex>` | brewing-in-progress / product progress |
+| `@TV:<hex>` | brewing-in-progress / product progress — decoded, see §5.10 |
+| `@TV:81,<text>` / `@TV:82,<text>` | language-download display lines — **not** progress |
+| `@TV:84,<time>` | coffee-timer clock sync — **not** progress |
+| `@TB` | brew started (sent right after an accepted `@TP:`) |
 | `@hu:<code>` | heartbeat acknowledgement: `ok` / `wait` / `busy` / `abort` / `error` |
 
 ### 5.3 Maintenance counter layout (`@TG:43`)
@@ -778,6 +781,182 @@ I/O. Use it to discover exactly what `brew` accepts.
 
 ---
 
+### 5.10 Product progress (`@TV:`) — the live state machine
+
+Unsolicited frames the machine pushes while it is doing something:
+brewing, running a maintenance process, counting a coffee timer down,
+showing an aroma preselection. This is what turns "an alert bit is
+set" into "brewing, 60 %".
+
+```
+@TV:<hex payload>
+```
+
+**Provenance.** The layout below is **APK-derived** — decompiled from
+`Progress`, `ProgressParser`, `ProgressState`, `ProductProgressState`
+and `ProductArgument` in J.O.E. 4.6.10 — and is **not** hardware
+verified as a whole. Two parts *do* match the live S8 EB capture in
+§5.9 and are marked **[live]** below; everything else is
+**[APK, untested]**.
+
+#### Payload layout
+
+Byte indexes are into the hex payload (`byte(i)` = hex chars
+`2i..2i+2`).
+
+| byte | meaning |
+| ---- | ------- |
+| 0 | progress-state code (table below) |
+| 1 | product code (product frames) or process code (process frames) |
+| 2 | either the `8F` window marker, or the first value byte |
+
+The **value window** is byte 2 onward, or byte 3 onward when byte 2 is
+`8F` *and* the frame is a product/process frame. All indexes below
+index the window, not the payload:
+
+| idx | slot (`ProductArgument`) |
+| --- | ------------------------ |
+| 0 / 1 | actual / max coffee strength |
+| 2 / 3 | actual / max water volume |
+| 4 / 5 | actual / max milk time |
+| 6 / 7 | actual / max milk-foam time — doubles as steam temperature and as bypass water |
+| 8 | max water temperature |
+| 9 / 10 | actual / max pause time |
+| 11 | `INTAKE_PERCENTAGE` (**not** what the app reads) |
+| 12 | percentage 0x00–0x64 — J.O.E. reads the percent from **12**, not 11. Mirror the app; do not "fix" it |
+| 13 | invalid / padding |
+
+A 16-byte payload (2 head + 14 window) therefore puts the percentage
+at payload byte 14, the second-to-last byte — which is exactly where
+the live capture in §5.9 saw it, and window slots 2/3 land on payload
+bytes 4/5, exactly where §5.9 saw "current tick / target ticks".
+**[live]** The frame is decoded defensively: any slot the payload is
+too short to reach decodes as `None` rather than raising.
+
+#### Which slots a state reports
+
+Only some states carry a live value pair; for the rest the decoder
+falls back to "window slot 0 is the value" (plus slot 1 as the maximum
+in an `8F` frame). **[APK, untested]**
+
+| state | reports | actual idx | max idx |
+| ----- | ------- | ---------- | ------- |
+| `19` | SMART_ALERT_PAUSE | 0 | 1 |
+| `31` | MILK_FOAM_BEAN_AMOUNT | 0 | 1 |
+| `32` | MILK_FOAM_MILK_VOLUME | 4 | 5 |
+| `33` | MILK_FOAM_PAUSE | 9 | 10 |
+| `34` | MILK_FOAM_VOLUME | 6 | 7 |
+| `37` | MILK_FOAM_WATER_VOLUME | 2 | 3 |
+| `39` | COFFEE_BEAN_AMOUNT | 0 | 1 |
+| `3C` | COFFEE_WATER_AMOUNT | 2 | 3 |
+| `40` | HOTWATER_TEMPERATURE | 8 | 8 |
+| `41` | HOTWATER_VOLUME | 2 | 3 |
+| `41` | BYPASS_WATER_VOLUME (see below) | 6 | 7 |
+| `43` | STEAM_TEMPERATURE | 6 | 7 |
+
+**The `41` disambiguation.** State `41` is overloaded. The app reads
+it as `HOTWATER_VOLUME` (slots 2/3) **only when window slot 6 is
+`0xFF`**, and as `BYPASS_WATER_VOLUME` (slots 6/7) otherwise —
+including when the payload is too short to contain slot 6. Slot 6 is
+the bypass-water slot, so `0xFF` reads as "no bypass in this recipe,
+the water figure is the real one". The live S8 EB brew in §5.9 showed
+tick/target at payload bytes 4/5 — i.e. the `HOTWATER_VOLUME`
+reading — so on that firmware slot 6 was `0xFF`. **[live for the
+`0xFF` branch, APK-only for the bypass branch]**
+
+#### Frame type
+
+J.O.E. classifies each frame; the order is odd but deliberate and the
+decoder mirrors it exactly:
+
+1. state in {`C0`, `C1`, `C4`, `C5`} → `COFFEE_TIMER`;
+2. state `7E` → `QUALITY_ASSISTANT`;
+3. state ≠ `FE` **and** byte 1 is a known product code → `PRODUCT`;
+4. byte 1 is a known process code → `PROCESS`;
+5. state `FE` → `AROMA_PRESELECTION`;
+6. state `FF` → `P_MODE`;
+7. otherwise → `NONE`.
+
+"Known product code" means the loaded `MachineProfile` has it — so
+this is profile-dependent: with no profile (or the wrong EF code) a
+product frame classifies as `NONE`, while the value window still
+decodes. "Known process code" is the tail of a `<PROCESS
+ExecuteCommand="@TG:xx">` element; all 89 bundled XMLs use only
+`21` CappuClean, `22` CoffeeRinse, `23` CappuRinse, `24` Cleaning,
+`25` Decalc, `26` FilterChange, so `jura_connect.progress.PROCESS_CODES`
+hard-codes those six.
+
+#### `ProgressState` — all 87 codes **[APK, untested]**
+
+```
+01 INSERT_TRAY                  02 FILL_WATERTANK               03 EMPTY_GROUNDS
+04 EMPTY_TRAY                   08 INSERT_GROUNDS_BOX           09 CLOSE_NOZZLE_COVER
+0A CLOSE_BEAN_COVER             0C CLOSE_TAP                    0D OPEN_TAP
+0E ALARM                        0F CLOSE_POWDER_COVER           10 ADD_POWDER_COFFEE
+11 FILLING_PROCESS              12 SYSTEM_EMPTYING              13 ADD_BEANS
+14 NOT_ENOUGH_POWDER            15 WAITING                      16 REMOVE_WATERTANK
+17 MOUNT_SIRUP_CONTAINER        18 REMOVE_SIRUP_CONTAINER       19 SMART_ALERT
+1E PLACE_CUP_FOR_COFFEE         1F PLACE_CUP_FOR_CLEANING       20 STARTUP
+21 HEATING_UP                   23 RINSE_PROCESS                30 POPUP_WINDOW
+31 MILK_FOAM_BEAN_AMOUNT        32 MILK_FOAM_MILK_VOLUME        33 MILK_FOAM_PAUSE
+34 MILK_FOAM_VOLUME             37 MILK_FOAM_WATER_VOLUME       38 MILK_FOAM_NO_ADJUSTMENT
+39 COFFEE_BEAN_AMOUNT           3C COFFEE_WATER_AMOUNT          3D COFFEE_NO_ADJUSTMENT
+3E ENJOY                        40 HOTWATER_TEMPERATURE         41 HOTWATER_VOLUME
+42 STEAM_TIME                   43 STEAM_TEMPERATURE            49 LAST_PROGRESS_STATE
+4B GRINDER_SETTING_REQUEST      50 DESCALIFY_START              51 DESCALIFY_MATERIALS
+52 DESCALIFY_EMPTY_TRAY         53 DESCALIFY_ADD_FLUID          54 DESCALIFY_PROCESS
+55 DESCALIFY_RINSE_WATERTANK    56 DESCALIFY_FINISH             5A DESCALIFY_CONNECT_THE_MILK_TUBE
+60 FILTER_RINSE_START           61 FILTER_RINSE_MATERIALS       62 FILTER_RINSE_CHANGE
+63 FILTER_RINSE_PROCESS         65 FILTER_RINSE_FINISH          66 FILTER_RINSE_REMOVE_FILTER
+67 FILTER_RINSE_INSERT          70 CLEANING_START               71 CLEANING_MATERIALS
+72 CLEANING_EMPTY_TRAY          73 CLEANING_PRESS_ROTARY        74 CLEANING_PROCESS
+75 CLEANING_ADD_TABLET          76 CLEANING_FINISH              7E QUALITY_ASSISTANT
+90 CAPPU_CLEAN_START            91 CAPPU_CLEAN_MATERIALS        92 CAPPU_CLEAN_ADD_CLEANER
+93 CAPPU_CLEAN_PROCESS          94 CAPPU_CLEAN_ADD_WATER        95 CAPPU_CLEAN_FINISH
+9A CAPPU_CLEAN_RINSE_PROCESS    C0 COFFEE_TIMER_SCREEN_SAVER    C1 COFFEE_TIMER_STATUS_SCREEN
+C4 COFFEE_TIMER                 C5 COFFEE_TIMER_PMODE_COUNTDOWN E1 WARNING
+E2 ACTION                       E3 INFO                         E4 FILTER_ERROR
+E5 FILTER_THANKS                E6 TOO_HOT                      EF WIFI_CONFIGURATION
+FE AROMA_PRESELECT              FF P_MODE                       00 INVALID
+```
+
+`3E` (`ENJOY`) ends a product — the live capture in §5.9 saw exactly
+that frame when the cup was done. **[live]**
+
+#### `@TV:` frames that are *not* progress
+
+`@TV:81,<text>` and `@TV:82,<text>` are language-download display
+lines and `@TV:84,<time>` is the coffee-timer clock sync. They must
+never be fed to the progress decoder;
+`jura_connect.progress.is_progress_frame()` rejects them (both the
+comma-delimited form and any payload whose head byte is `81`/`82`/`84`)
+and `ProductProgress.parse()` raises `ValueError` on them.
+
+#### Library entry points
+
+```python
+p = ProductProgress.parse("@TV:41280000091E0000FF00000000003200", profile)
+p.state          # ProgressState.HOTWATER_VOLUME (None for unknown codes)
+p.progress_type  # ProgressType.PRODUCT
+p.product        # "cafe_barista" — resolved via the MachineProfile
+p.actual, p.maximum, p.percent, p.fraction
+p.is_complete    # True only on the ENJOY frame
+p.format(); p.to_dict()
+
+for update in client.iter_progress(timeout=120):   # decoded stream
+    ...
+client.follow_progress(timeout=120)                 # collect until ENJOY
+client.brew("espresso", follow=True)                # brew, then follow
+```
+
+The named `progress` command watches the stream and prints the decoded
+lines; it is read-only (it sends nothing). The simulator models the
+whole chain — `@tp` → `@TB` → rising `@TV:41…` frames → `@TV:3E…` —
+behind `SimulatorConfig(allow_brew=True)`, which is off by default so
+an accidental `@TP:` in a test still gets refused with `@an:error`.
+
+---
+
 ## 6. Machine variants (`MachineProfile`)
 
 The 88 machine XML files extracted from the J.O.E. APK
@@ -923,7 +1102,8 @@ machine.
 | `jura_connect/profile.py`       | per-machine `MachineProfile` registry built from the 88 bundled XMLs + `JOE_MACHINES.TXT` |
 | `jura_connect/data/`            | vendored XMLs + `JOE_MACHINES.TXT`; shipped as `package-data` so installed wheels load profiles via `importlib.resources` |
 | `jura_connect/client.py`        | `JuraClient` + structured read results + handshake state machine; profile-aware status / brew / pmode parsers |
-| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / …) used by CLI and library |
+| `jura_connect/commands.py`      | named-command registry (`info` / `counters` / `brews` / `pmode` / `mem-read` / `progress` / …) used by CLI and library |
+| `jura_connect/progress.py`      | `@TV:` product-progress decoder — `ProgressState` / `ProgressType` / `ProductProgress` (§5.10) |
 | `jura_connect/credentials.py`   | XDG-located JSON persistence (atomic write, 0600); `machine_type` field |
 | `jura_connect/simulator.py`     | TCP server speaking the *same* protocol; used by tests |
 | `jura_connect/__main__.py`      | CLI (`discover` / `probe` / `pair` / `command` / `creds` / `machine-types` / `set-machine-type`) |
@@ -950,3 +1130,10 @@ breaks both halves of the test-suite simultaneously.
   slot count via `@TM:50` but answers `@tm:C2` for every index. A
   TT237W variant with a populated `<PROGRAMMODE>` XML section is
   needed to validate the configured-slot decode path.
+* `@TV:` decoding (§5.10) is APK-derived and verified only against the
+  simulator plus the two live observations recorded in §5.9. Wanted
+  from real hardware: a full raw capture of a brew (to pin the frame
+  *length* and confirm the percentage really sits at window slot 12
+  rather than 11), a milk drink (states `31`–`37`), a `41` frame from
+  a recipe with bypass (to confirm the `BYPASS_WATER_VOLUME` branch),
+  and any `8F` extended-window frame — we have never seen one.

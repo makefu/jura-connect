@@ -13,6 +13,8 @@ APK. Layered as:
   structured read commands.
 * :mod:`jura_connect.commands`   -- named-command registry; the entry point
   for "send the *counters* command" without hard-coding ``@TG:43``.
+* :mod:`jura_connect.progress`   -- decoder for the unsolicited ``@TV:``
+  product-progress frames ("brewing, 60 %", "empty the grounds").
 * :mod:`jura_connect.simulator`  -- TCP server speaking the same protocol;
   used by the test-suite to exercise the client end-to-end without a
   physical machine.
@@ -71,6 +73,16 @@ from .commands import (
     list_commands,
     run_named,
 )
+from .progress import (
+    PROCESS_CODES,
+    PRODUCT_ARGUMENTS,
+    ProductProgress,
+    ProductProgressState,
+    ProgressLog,
+    ProgressState,
+    ProgressType,
+    is_progress_frame,
+)
 from .credentials import CredentialStore, MachineCredentials
 from .crypto import decode, encode
 from .discovery import Machine, discover, probe, scan_tcp, tcp_probe
@@ -104,13 +116,20 @@ __all__ = [
     "MachineStatus",
     "MaintenanceCounters",
     "MaintenancePercent",
+    "PROCESS_CODES",
+    "PRODUCT_ARGUMENTS",
     "PRODUCT_NAMES",
     "PModeSlot",
     "PairingTimeout",
     "ProductCounters",
     "ProductDef",
     "ProductParam",
+    "ProductProgress",
+    "ProductProgressState",
     "ProgramModeSlots",
+    "ProgressLog",
+    "ProgressState",
+    "ProgressType",
     "SettingDef",
     "SettingItem",
     "SettingValue",
@@ -119,6 +138,7 @@ __all__ = [
     "discover",
     "encode",
     "get_command",
+    "is_progress_frame",
     "iter_profiles",
     "known_machine_names",
     "list_commands",
