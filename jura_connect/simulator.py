@@ -37,7 +37,7 @@ import time
 from collections.abc import Iterator
 
 from . import protocol
-from .client import _settings_checksum
+from .client import COFFEE_TIMER_BLOB_HEX_LEN, _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
 
 log = logging.getLogger(__name__)
@@ -142,6 +142,23 @@ class SimulatorConfig:
     # the real EF1091 firmware that reports slots but doesn't expose
     # them over WiFi.
     pmode_slots: dict[int, int] = dataclasses.field(default_factory=dict)
+
+    # Coffee timer (@TM:3C schedule + @TV:84 wall clock). Off by
+    # default: an accepted schedule makes the machine brew unattended,
+    # so it stays behind the same refuse-by-default guardrail as the
+    # other destructive paths and a test has to opt in. With the flag
+    # off, @TM:3C is caught by DESTRUCTIVE_PREFIXES and answered
+    # "@an:error" like every other destructive frame.
+    coffee_timer: bool = False
+    # Model a firmware that knows the command but declines it: answer
+    # the "@tm:00" rejection token instead of accepting. J.O.E.'s
+    # matcher ("@tm:.*") lets that through, so the client has to tell
+    # the two apart itself.
+    coffee_timer_reject: bool = False
+    # What an accepted schedule stored, for tests to assert against.
+    coffee_timer_blob: str | None = None
+    coffee_timer_delay: int | None = None
+    coffee_timer_clock: str | None = None
 
     # Machine settings: P_Argument (uppercase hex) -> stored hex value.
     # Defaults populated to mirror EF1091's <MACHINESETTINGS> defaults
@@ -315,6 +332,14 @@ class Simulator:
 
     # -- read commands -------------------------------------------------
     def _handle_command(self, cmd: str) -> str | None:
+        if self.config.coffee_timer:
+            # Runs ahead of the destructive scan on purpose: @TM:3C is
+            # in DESTRUCTIVE_PREFIXES, and this flag is the opt-in that
+            # lets a test exercise the wire format instead of the
+            # refusal. Everything else still falls through to the scan.
+            reply = self._handle_coffee_timer(cmd)
+            if reply is not None:
+                return reply
         b = cmd.encode("ascii")
         for prefix in DESTRUCTIVE_PREFIXES:
             if b.startswith(prefix):
@@ -431,6 +456,51 @@ class Simulator:
         if cmd.startswith("@TG:7E") or cmd.startswith("@TG:FF"):
             return "@an:error"  # destructive guard already caught these
         # Unknown -> dongle stays silent
+        return None
+
+    # -- coffee timer --------------------------------------------------
+    def _handle_coffee_timer(self, cmd: str) -> str | None:
+        """Model ``@TM:3C`` (schedule) and ``@TV:84`` (wall clock).
+
+        Both shapes are APK-derived and have never been seen on a real
+        dongle, so the replies here are modelled, not observed: an
+        accepted schedule echoes ``@tm:3c`` the way every other
+        ``@TM:`` write echoes its argument, and the clock frame answers
+        the literal ``@tv:84`` J.O.E.'s matcher waits for.
+        """
+        if cmd.startswith("@TM:3C,"):
+            body = cmd[len("@TM:3C,") :]
+            if len(body) < 3:
+                return "@an:error"
+            payload, csum = body[:-2], body[-2:]
+            expected = _settings_checksum(f"3C,{payload}")
+            if csum.upper() != expected:
+                log.warning(
+                    "simulator: bad coffee-timer checksum for %s (got %s, expected %s)",
+                    cmd,
+                    csum,
+                    expected,
+                )
+                return "@an:error"
+            if len(payload) != COFFEE_TIMER_BLOB_HEX_LEN + 4:
+                # Blob + 16-bit delay is the only layout the machine takes.
+                return "@tm:00"
+            if self.config.coffee_timer_reject:
+                return "@tm:00"
+            self.config.coffee_timer_blob = payload[:COFFEE_TIMER_BLOB_HEX_LEN].upper()
+            self.config.coffee_timer_delay = int(
+                payload[COFFEE_TIMER_BLOB_HEX_LEN:], 16
+            )
+            return "@tm:3c"
+        if cmd.startswith("@TV:84,"):
+            try:
+                text = bytes.fromhex(cmd[len("@TV:84,") :]).decode("ascii")
+            except (ValueError, UnicodeDecodeError):
+                return "@an:error"
+            if self.config.coffee_timer_reject:
+                return "@tv:00"
+            self.config.coffee_timer_clock = text
+            return "@tv:84"
         return None
 
     # -- status emission -----------------------------------------------

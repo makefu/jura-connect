@@ -396,6 +396,14 @@ class ProductDef:
     # in the catalogue (the machine still reports counters for them) but
     # a UI should not offer them as brewable.
     active: bool = True
+    # Whether the machine XML lets this product be scheduled through the
+    # coffee timer (``Coffeetimer="false"`` on the PRODUCT element).
+    # J.O.E.'s ``Product`` model stores the attribute as a *nullable*
+    # Boolean and defaults a missing one to true
+    # (``shouldBeShownInCoffeeTimer = bool ?: true``), so only an
+    # explicit "false" makes a product ineligible. Six of the 89
+    # bundled profiles carry the attribute at all. See PROTOCOL.md §5.12.
+    coffee_timer: bool = True
 
     def param(self, kind: str) -> ProductParam | None:
         """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
@@ -586,6 +594,9 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         # Inactive products are kept in the catalogue (the machine still
         # reports their counters) but flagged so a UI can hide them.
         active = (product.get("Active") or "").strip().lower() != "false"
+        # Same "absent means allowed" rule J.O.E. applies to
+        # shouldBeShownInCoffeeTimer.
+        coffee_timer = (product.get("Coffeetimer") or "").strip().lower() != "false"
         products.append(
             ProductDef(
                 code=code_int,
@@ -593,6 +604,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 raw_name=raw_name,
                 params=_parse_product_params(product),
                 active=active,
+                coffee_timer=coffee_timer,
             )
         )
 

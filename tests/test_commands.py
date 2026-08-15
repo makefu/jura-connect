@@ -480,6 +480,8 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("set-ssid", ["mywifi"]),
     ("set-password", ["s3cret"]),
     ("set-name", ["Kaffeebert"]),
+    # Same verbatim-blob escape hatch, so no profile is needed.
+    ("coffee-timer", ["28000709000001000109000000000000", "30m"]),
 ]
 
 
@@ -508,11 +510,13 @@ def test_destructive_command_reaches_wire_with_flag(sim, name, args) -> None:
     finally:
         c.close()
     # Either we get @an:error (simulator's wire-level refusal) or, for
-    # restart/power-off, the connection-closed sentinel.
-    assert isinstance(result.value, str)
-    assert (
-        result.value.startswith("@an:error") or "connection closed" in result.value
-    ), f"unexpected reply for {name!r}: {result.value!r}"
+    # restart/power-off, the connection-closed sentinel. Commands whose
+    # runner returns a structured result (coffee-timer) render the same
+    # reply through format().
+    rendered = result.format()
+    assert "@an:error" in rendered or "connection closed" in rendered, (
+        f"unexpected reply for {name!r}: {rendered!r}"
+    )
 
 
 def test_raw_payload_destructive_prefix_blocked_without_flag(sim) -> None:

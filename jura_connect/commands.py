@@ -53,6 +53,14 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     b"@AN:02",  # power off
     b"@TP:",  # start product (brewing)
     b"@HW:",  # write (PIN / SSID / password / dongle name)
+    # Coffee timer: schedules an unattended brew. The trailing comma
+    # matters — the tuple is byte-prefix matched and the @TM: read
+    # space overlaps, so this must catch the *write* form
+    # ("@TM:3C,<blob><delay><csum>") without swallowing a plain
+    # "@TM:3C" register read. Settings writes are not listed here
+    # because they cannot make the machine do anything physical; this
+    # one can.
+    b"@TM:3C,",
 )
 
 
@@ -742,6 +750,93 @@ def _r_setting(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Coffee timer runners
+# --------------------------------------------------------------------- #
+
+#: ``<when>`` given as a plain number, or a number plus a unit suffix.
+#: A bare number means minutes — the unit a human reaches for when they
+#: say "coffee in 45".
+_WHEN_DELAY_RE = re.compile(r"^(\d+)\s*(s|m|h)?$", re.IGNORECASE)
+_WHEN_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600}
+
+
+def _parse_coffee_timer_when(text: str) -> dict[str, object]:
+    """Turn the CLI's ``<when>`` into a :meth:`JuraClient.schedule_brew` kwarg.
+
+    ``"07:30"`` is a wall-clock target; ``"45"`` / ``"45m"`` / ``"2h"``
+    / ``"900s"`` are relative delays.
+    """
+    value = text.strip()
+    if ":" in value:
+        return {"at": value}
+    m = _WHEN_DELAY_RE.match(value)
+    if m is None:
+        raise CommandError(
+            f"coffee-timer: <when> must be a wall-clock time ('07:30') or a "
+            f"delay ('45', '45m', '2h', '900s'); got {text!r}"
+        )
+    return {"delay": int(m.group(1)) * _WHEN_UNIT_SECONDS[(m.group(2) or "m").lower()]}
+
+
+def _r_coffee_timer(_spec, client, args, timeout):
+    """Schedule a product for later. ``<product>`` takes the same three
+    forms ``brew`` does (profile name, 2-hex code, or a full recipe blob
+    used verbatim); ``<when>`` is a wall-clock time or a relative delay.
+    """
+    target = _ascii_arg("product", args[0])
+    when = _parse_coffee_timer_when(_ascii_arg("when", args[1]))
+    overrides: dict[str, int | str] = {}
+    for raw in args[2:]:
+        key, sep, value = raw.partition("=")
+        if not sep or not value:
+            raise CommandError(
+                f"coffee-timer: expected param=value (e.g. water=220), got {raw!r}"
+            )
+        kind = _BREW_KEY_TO_KIND.get(key.strip().lower())
+        if kind is None:
+            known = ", ".join(sorted(_BREW_KEY_TO_KIND))
+            raise CommandError(
+                f"coffee-timer: unknown parameter {key!r}. Known: {known}"
+            )
+        overrides[kind] = value.strip()
+
+    is_blob = (
+        bool(re.fullmatch(r"[0-9A-Fa-f]+", target))
+        and len(target) % 2 == 0
+        and len(target) >= _VERBATIM_BLOB_MIN_HEX
+    )
+    if is_blob and overrides:
+        raise CommandError(
+            "coffee-timer: param=value overrides cannot be combined with a "
+            "raw recipe blob — bake the values into the blob instead."
+        )
+    if not is_blob and client.profile is None:
+        raise CommandError(
+            "coffee-timer: product names and codes need a machine profile. "
+            "Pair with --machine-type <EF_code> (or pass --machine-type to "
+            "'command'); see 'jura-connect machine-types'. A full 32-hex "
+            "recipe blob is accepted without a profile as an escape hatch."
+        )
+    try:
+        if is_blob:
+            return client.schedule_brew(recipe=target, timeout=timeout, **when)
+        return client.schedule_brew(
+            target, overrides=overrides, timeout=timeout, **when
+        )
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+def _r_coffee_timer_time(_spec, client, args, timeout):
+    try:
+        return client.send_coffee_timer_time(
+            _ascii_arg("time", args[0]), timeout=timeout
+        )
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -1029,6 +1124,58 @@ _SPECS: tuple[CommandSpec, ...] = (
         danger=(
             "renames the dongle. Persistent across reboots; cosmetic only "
             "but still a write to the device, so behind the gate by default."
+        ),
+    ),
+    # ---- coffee timer ----
+    CommandSpec(
+        name="coffee-timer-time",
+        description=(
+            "tell the machine the wall-clock time a coffee timer refers to "
+            "(@TV:84); APK-derived, untested on hardware"
+        ),
+        arguments=(Argument("time", "wall-clock time, 'HH:MM'"),),
+        runner=_r_coffee_timer_time,
+    ),
+    CommandSpec(
+        name="coffee-timer",
+        description=(
+            "[destructive] schedule a product for later (@TM:3C + @TV:84); "
+            "APK-derived, untested on hardware"
+        ),
+        arguments=(
+            Argument(
+                "product",
+                "profile product name ('espresso'; prefix OK), 2-hex "
+                "product code, or a full recipe blob (32+ hex). Run "
+                "'products' to list valid names",
+            ),
+            Argument(
+                "when",
+                "wall-clock target ('07:30', rolls to tomorrow once past) "
+                "or a delay ('45' minutes, '45m', '2h', '900s'); 1 minute "
+                "to 16 hours out",
+            ),
+            Argument(
+                "param=value",
+                "recipe override(s), same keys as 'brew': water=<ml> "
+                "strength=<level> temp=<low|normal|high> milk=<s>",
+                optional=True,
+                variadic=True,
+            ),
+        ),
+        runner=_r_coffee_timer,
+        destructive=True,
+        danger=(
+            "schedules an unattended brew: the machine pours later, on "
+            "its own, with nobody present. At the scheduled moment it heats up, "
+            "grinds and dispenses whether or not a cup is under the "
+            "spout — expect coffee on the drip tray, or over the "
+            "counter if the tray is full. There is no cancel command "
+            "in this library yet: once accepted, the only way to stop "
+            "it is at the machine itself. The wire format is derived "
+            "from the J.O.E. APK and has never been confirmed on real "
+            "hardware, so the machine may also brew something other "
+            "than what you asked for."
         ),
     ),
 )
