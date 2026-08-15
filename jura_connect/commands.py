@@ -32,7 +32,14 @@ import re
 from collections.abc import Callable, Sequence
 
 from . import profile
-from .client import JuraClient
+from .client import (
+    BARISTA_COUNTER_BANK,
+    DAILY_BARISTA_COUNTER_BANK,
+    DAILY_COUNTER_RESET,
+    DAILY_PRODUCT_COUNTER_BANK,
+    SPECIAL_COUNTER_BANK,
+    JuraClient,
+)
 from .profile import RECIPE_BLOB_BYTES
 from .progress import ProgressLog
 
@@ -54,6 +61,7 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     # ``skip-quality-step`` danger string. Gated under either reading.
     b"@TG:7E",
     b"@TF:02",  # restart machine
+    b"@TF:05",  # zero the <DAILYCOUNTER> banks (irreversible)
     b"@AN:02",  # power off
     b"@TP:",  # start product (brewing)
     b"@HW:",  # write (PIN / SSID / password / dongle name)
@@ -798,6 +806,50 @@ def _r_setting(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Counter banks beyond @TR:32 (see docs/PROTOCOL.md §5.5)
+# --------------------------------------------------------------------- #
+
+
+def _read_bank(client: JuraClient, bank: str, timeout: float) -> object:
+    """Read one counter bank, or explain why there is nothing to read.
+
+    ``JuraClient.read_counter_bank`` returns ``None`` both for "your
+    machine's profile does not declare this bank" and for "the machine
+    answered @tr:00". Neither is an error — most machines have most of
+    these banks missing — so the command reports it as text instead of
+    raising.
+    """
+    result = client.read_counter_bank(bank, timeout_per_page=timeout)
+    if result is not None:
+        return result
+    machine = client.profile.code if client.profile is not None else "this machine"
+    return (
+        f"{machine} does not implement the {bank} counter bank "
+        f"(not declared in its XML, or answered @tr:00)"
+    )
+
+
+def _r_special_counters(_spec, client, _args, timeout):
+    return _read_bank(client, SPECIAL_COUNTER_BANK, timeout)
+
+
+def _r_barista_counters(_spec, client, _args, timeout):
+    return _read_bank(client, BARISTA_COUNTER_BANK, timeout)
+
+
+def _r_daily_brews(_spec, client, _args, timeout):
+    return _read_bank(client, DAILY_PRODUCT_COUNTER_BANK, timeout)
+
+
+def _r_daily_barista_counters(_spec, client, _args, timeout):
+    return _read_bank(client, DAILY_BARISTA_COUNTER_BANK, timeout)
+
+
+def _r_reset_daily_counters(_spec, client, _args, timeout):
+    return client.request(DAILY_COUNTER_RESET, timeout=timeout)
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -1126,6 +1178,58 @@ _SPECS: tuple[CommandSpec, ...] = (
             ),
         ),
         runner=_r_progress,
+    ),
+    # ---- counter banks beyond @TR:32 ------------------------------------
+    CommandSpec(
+        name="special-counters",
+        description=(
+            "special counter bank (@TR:52 paginated; 4 pages) — cold brew, "
+            "sweet foam & friends; declared by 14 of the 89 profiles"
+        ),
+        arguments=(),
+        runner=_r_special_counters,
+    ),
+    CommandSpec(
+        name="barista-counters",
+        description=(
+            "barista counter bank (@TR:34 paginated) — declared by 4 "
+            "profiles; not read by the J.O.E. app, so untested on hardware"
+        ),
+        arguments=(),
+        runner=_r_barista_counters,
+    ),
+    CommandSpec(
+        name="daily-brews",
+        description=(
+            "per-product brew counters since the last daily reset "
+            "(@TR:42 paginated); not read by the J.O.E. app"
+        ),
+        arguments=(),
+        runner=_r_daily_brews,
+    ),
+    CommandSpec(
+        name="daily-barista-counters",
+        description=(
+            "barista counters since the last daily reset (@TR:44 "
+            "paginated); not read by the J.O.E. app"
+        ),
+        arguments=(),
+        runner=_r_daily_barista_counters,
+    ),
+    CommandSpec(
+        name="reset-daily-counters",
+        description="[destructive] zero the daily counter banks (@TF:05)",
+        arguments=(),
+        runner=_r_reset_daily_counters,
+        destructive=True,
+        danger=(
+            "irreversibly zeroes every <DAILYCOUNTER> bank (@TR:42..@TR:45 "
+            "— today's brews per product). The machine keeps its lifetime "
+            "counters, but the daily numbers are gone with no undo: read "
+            "'daily-brews' first if you want to keep them. The command is "
+            "the XML's own Reset verb; no J.O.E. code path sends it, so "
+            "what a real machine does with it has never been observed."
+        ),
     ),
 )
 

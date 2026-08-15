@@ -478,6 +478,7 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("skip-quality-step", []),
     ("skip-quality-step", ["all"]),
     ("restart", []),
+    ("reset-daily-counters", []),
     ("power-off", []),
     # A full 32-hex @TP: blob reaches the wire without a profile.
     ("brew", ["28000709000001000109000000000000"]),

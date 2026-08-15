@@ -545,38 +545,110 @@ class JuraClient:
         survive. Machines that declare no such bank — every S8/Z10
         profile among them — issue one bank read as before.
         """
+        spec = counter_bank_spec(PRODUCT_COUNTER_BANK)
         slots = self._read_counter_bank(
-            "@TR:32", bytes_per_value=2, timeout_per_page=timeout_per_page
+            spec.command,
+            bytes_per_value=spec.bytes_per_value,
+            timeout_per_page=timeout_per_page,
+            pages=spec.pages,
         )
         if slots is None:
             raise ValueError("machine does not implement the @TR:32 counter bank")
-        overflow = None
-        if self.profile is not None and (
-            OVERFLOW_COUNTER_BANK in self.profile.counter_banks
-        ):
-            try:
-                overflow = self._read_counter_bank(
-                    OVERFLOW_COUNTER_BANK,
-                    bytes_per_value=1,
-                    timeout_per_page=timeout_per_page,
-                )
-            except (TimeoutError, ValueError) as exc:
-                # No machine here answers this bank, so treat any
-                # surprise — silence, a reply shape we don't know — as
-                # "no overflow data" rather than losing the base counts.
-                log.warning(
-                    "%s declares %s but the read failed (%s); "
-                    "reporting base counts only",
-                    self.profile.code,
-                    OVERFLOW_COUNTER_BANK,
-                    exc,
-                )
+        overflow = self._read_overflow_bank(spec, timeout_per_page=timeout_per_page)
         return ProductCounters.from_slots(
             slots, profile=self.profile, overflow=overflow
         )
 
+    def read_counter_bank(
+        self, bank: str, *, timeout_per_page: float = 6.0
+    ) -> "CounterBank | None":
+        """Read one counter bank other than ``@TR:32`` by wire command.
+
+        ``bank`` is a base bank command from :data:`COUNTER_BANK_SPECS`:
+        ``@TR:34`` (barista), ``@TR:52`` (special), ``@TR:42`` /
+        ``@TR:44`` (the daily pair). Overflow banks are folded into their
+        base bank and cannot be read on their own.
+
+        Returns ``None`` — never an exception — when this machine has no
+        such bank, which is the common case: either its profile does not
+        declare it (then nothing is sent at all) or the dongle answers
+        the bare ``@tr:00`` J.O.E.'s matcher treats as "not
+        implemented". Use :meth:`read_product_counters` for ``@TR:32``,
+        which every machine has.
+
+        Without a profile there is no declaration to consult, so the
+        bank is requested and the machine's own ``@tr:00`` decides.
+
+        Only the special bank is exercised by the official app; the
+        barista and daily banks are XML-derived and untested against
+        hardware (docs/PROTOCOL.md §5.5).
+        """
+        spec = counter_bank_spec(bank)
+        if spec.overflow_of is not None:
+            raise ValueError(
+                f"{spec.command} is the overflow bank of {spec.overflow_of}; "
+                f"read {spec.overflow_of} instead — its high bytes are "
+                "folded in automatically"
+            )
+        if self.profile is not None and not self.profile.declares_counter_bank(
+            spec.command
+        ):
+            log.debug(
+                "%s does not declare the %s bank; not reading it",
+                self.profile.code,
+                spec.command,
+            )
+            return None
+        slots = self._read_counter_bank(
+            spec.command,
+            bytes_per_value=spec.bytes_per_value,
+            timeout_per_page=timeout_per_page,
+            pages=spec.pages,
+        )
+        if slots is None:
+            return None
+        overflow = self._read_overflow_bank(spec, timeout_per_page=timeout_per_page)
+        return CounterBank.from_slots(
+            spec.command, slots, profile=self.profile, overflow=overflow
+        )
+
+    def _read_overflow_bank(
+        self, spec: "CounterBankSpec", *, timeout_per_page: float
+    ) -> list[int] | None:
+        """Read ``spec``'s overflow bank when the machine declares it.
+
+        Any surprise on that read — silence, a reply shape we don't know
+        — degrades to "no overflow data" rather than losing the base
+        counts we already have.
+        """
+        if spec.overflow is None or self.profile is None:
+            return None
+        if not self.profile.declares_counter_bank(spec.overflow):
+            return None
+        over = counter_bank_spec(spec.overflow)
+        try:
+            return self._read_counter_bank(
+                over.command,
+                bytes_per_value=over.bytes_per_value,
+                timeout_per_page=timeout_per_page,
+                pages=over.pages,
+            )
+        except (TimeoutError, ValueError) as exc:
+            log.warning(
+                "%s declares %s but the read failed (%s); reporting base counts only",
+                self.profile.code,
+                over.command,
+                exc,
+            )
+            return None
+
     def _read_counter_bank(
-        self, bank: str, *, bytes_per_value: int, timeout_per_page: float
+        self,
+        bank: str,
+        *,
+        bytes_per_value: int,
+        timeout_per_page: float,
+        pages: int = 16,
     ) -> list[int] | None:
         """Read one paginated counter bank (``@TR:32``, ``@TR:33``, …).
 
@@ -589,10 +661,13 @@ class JuraClient:
         banks differently (its special-counter read asks for 4 pages,
         the product counter for 16), so a shorter bank is a plausible
         firmware answer rather than an error.
+
+        ``pages`` is the bank's page count from its
+        :class:`CounterBankSpec`.
         """
         echo = bank.lower()
         values: list[int] = []
-        for page in range(16):
+        for page in range(pages):
             reply = self.request(
                 f"{bank},{page:02X}",
                 match=rf"^({re.escape(echo)},{page:02X}|@tr:00)",
@@ -1564,9 +1639,286 @@ PRODUCT_COUNT_UNUSED = 0xFFFF
 #: without it a per-product count wraps at 65535.
 OVERFLOW_COUNTER_BANK = "@TR:33"
 
+#: The lifetime product counter and the other banks a machine's XML may
+#: declare next to it. Names mirror the ``<BANK Name=…>`` attributes.
+PRODUCT_COUNTER_BANK = "@TR:32"
+BARISTA_COUNTER_BANK = "@TR:34"
+SPECIAL_COUNTER_BANK = "@TR:52"
+#: Counters since the last ``@TF:05`` reset, declared under
+#: ``<DAILYCOUNTER>``. J.O.E. never reads these — the XML comments them
+#: "Not available in JOE" — so they are XML-derived and untested against
+#: hardware. See docs/PROTOCOL.md §5.5.
+DAILY_PRODUCT_COUNTER_BANK = "@TR:42"
+DAILY_BARISTA_COUNTER_BANK = "@TR:44"
+
+#: Command that zeroes every ``<DAILYCOUNTER>`` bank. All 37 profiles
+#: declaring a daily section spell it ``@TF:05``; it is irreversible and
+#: therefore gated as a destructive command.
+DAILY_COUNTER_RESET = "@TF:05"
+
 # Overflow bytes that carry no high word. J.O.E. skips both: 0x00 is
 # "no overflow yet", 0xFF the same not-configured sentinel @TR:32 uses.
 OVERFLOW_COUNT_UNUSED = frozenset({0x00, 0xFF})
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class CounterBankSpec:
+    """How one ``@TR:<bank>`` counter bank is read off the wire.
+
+    ``pages`` and ``bytes_per_value`` are per bank, not per family:
+    J.O.E.'s WiFi composite asks for 16 pages of the product counter but
+    only 4 of the special counter, and every overflow bank packs one
+    byte per slot where its base bank packs two. See docs/PROTOCOL.md
+    §5.5 for the provenance of each row.
+    """
+
+    command: str
+    name: str  # snake_case identifier, e.g. "special_counter"
+    label: str  # human-readable label for format()
+    pages: int
+    bytes_per_value: int
+    #: Bank holding the high byte of every slot in this one, if any.
+    overflow: str | None = None
+    #: Set on overflow banks: the base bank they belong to. Overflow
+    #: banks are never read on their own — they are folded into the base.
+    overflow_of: str | None = None
+    #: True when slot N counts the product whose code is N (the ``@TR:32``
+    #: layout). False for the special counter, whose slots are fixed
+    #: functions rather than catalogue products.
+    product_indexed: bool = True
+    #: True for the ``<DAILYCOUNTER>`` banks, which ``@TF:05`` zeroes.
+    daily: bool = False
+
+
+#: Every counter bank the 89 bundled profiles declare, keyed by command.
+#:
+#: Page counts: ``@TR:32``/``@TR:33`` and ``@TR:52``/``@TR:53`` are
+#: J.O.E.'s (``WifiCommandProductCounterStatistics`` walks
+#: ``IntRange(0, 15)``, ``WifiCommandSpecialCounterStatistics``
+#: ``IntRange(0, 3)``). The barista and daily banks appear in no APK
+#: code path at all; they get the product counter's 16 pages because
+#: they index the same 64-slot product-code space, and a machine that
+#: serves fewer answers ``@tr:00`` early, which the reader honours.
+COUNTER_BANK_SPECS: dict[str, CounterBankSpec] = {
+    "@TR:32": CounterBankSpec(
+        command="@TR:32",
+        name="product_counter",
+        label="product counter",
+        pages=16,
+        bytes_per_value=2,
+        overflow="@TR:33",
+    ),
+    "@TR:33": CounterBankSpec(
+        command="@TR:33",
+        name="product_counter_overflow",
+        label="product counter overflow",
+        pages=16,
+        bytes_per_value=1,
+        overflow_of="@TR:32",
+    ),
+    "@TR:34": CounterBankSpec(
+        command="@TR:34",
+        name="barista_counter",
+        label="barista counter",
+        pages=16,
+        bytes_per_value=2,
+        overflow="@TR:35",
+    ),
+    "@TR:35": CounterBankSpec(
+        command="@TR:35",
+        name="barista_counter_overflow",
+        label="barista counter overflow",
+        pages=16,
+        bytes_per_value=1,
+        overflow_of="@TR:34",
+    ),
+    "@TR:42": CounterBankSpec(
+        command="@TR:42",
+        name="daily_product_counter",
+        label="daily product counter",
+        pages=16,
+        bytes_per_value=2,
+        overflow="@TR:43",
+        daily=True,
+    ),
+    "@TR:43": CounterBankSpec(
+        command="@TR:43",
+        name="daily_product_counter_overflow",
+        label="daily product counter overflow",
+        pages=16,
+        bytes_per_value=1,
+        overflow_of="@TR:42",
+        daily=True,
+    ),
+    "@TR:44": CounterBankSpec(
+        command="@TR:44",
+        name="daily_barista_counter",
+        label="daily barista counter",
+        pages=16,
+        bytes_per_value=2,
+        overflow="@TR:45",
+        daily=True,
+    ),
+    "@TR:45": CounterBankSpec(
+        command="@TR:45",
+        name="daily_barista_counter_overflow",
+        label="daily barista counter overflow",
+        pages=16,
+        bytes_per_value=1,
+        overflow_of="@TR:44",
+        daily=True,
+    ),
+    "@TR:52": CounterBankSpec(
+        command="@TR:52",
+        name="special_counter",
+        label="special counter",
+        pages=4,
+        bytes_per_value=2,
+        overflow="@TR:53",
+        product_indexed=False,
+    ),
+    "@TR:53": CounterBankSpec(
+        command="@TR:53",
+        name="special_counter_overflow",
+        label="special counter overflow",
+        pages=4,
+        bytes_per_value=1,
+        overflow_of="@TR:52",
+        product_indexed=False,
+    ),
+}
+
+#: Slot map of the special counter bank (``@TR:52``), lifted from
+#: J.O.E.'s ``SpecialCounterStatisticsParser.parse()``. Its slots are
+#: fixed functions, not catalogue product codes, and three of the five
+#: values are sums over neighbouring slots:
+#:
+#:     coldBrew   = h(4) + h(5) + h(6)
+#:     lightBrew  = h(12) + h(13) + h(14)
+#:     sweetFoam  = h(3)
+#:     strongCold = h(9)
+#:
+#: (``hotBrew`` reads slot 0 in the app — the same slot as the total —
+#: which looks like a copy/paste bug in J.O.E. and is not reproduced.)
+SPECIAL_COUNTER_SLOTS: dict[str, tuple[int, ...]] = {
+    "sweet_foam": (3,),
+    "cold_brew": (4, 5, 6),
+    "strong_cold_brew": (9,),
+    "light_brew": (12, 13, 14),
+}
+
+
+def _fold_overflow(slots: list[int], overflow: list[int] | None) -> list[int]:
+    """Fold an overflow bank's high bytes into its base bank's values.
+
+    J.O.E. computes ``value + (high << 16)`` per slot
+    (``StatisticStateEmit``), skipping the two neutral high bytes and
+    leaving slots the base table marks unused alone. Returns ``slots``
+    unchanged when there is no overflow data.
+    """
+    if not overflow:
+        return slots
+    merged = list(slots)
+    for index, high in enumerate(overflow[: len(merged)]):
+        if high in OVERFLOW_COUNT_UNUSED:
+            continue
+        if merged[index] == PRODUCT_COUNT_UNUSED:
+            continue
+        merged[index] += high << 16
+    return merged
+
+
+def _product_slot_names(
+    slots: list[int], profile: MachineProfile | None
+) -> dict[int, str]:
+    """Slot index -> product name for a product-code-indexed bank.
+
+    Profile catalogue names win over the package-wide
+    :data:`PRODUCT_NAMES` fallback, and :data:`COUNTER_SLOT_OVERRIDES`
+    moves a product to the slot its machine really counts it at.
+    """
+    if profile is None or not getattr(profile, "product_by_code", None):
+        return dict(PRODUCT_NAMES)
+    overrides = COUNTER_SLOT_OVERRIDES.get(getattr(profile, "code", ""), {})
+    code_to_name: dict[int, str] = {}
+    for code, product in profile.product_by_code.items():
+        slot = overrides.get(code, code)
+        if slot != code and (slot >= len(slots) or slots[slot] == PRODUCT_COUNT_UNUSED):
+            # The override target carries nothing on this firmware; fall
+            # back to the product's own code so a machine that does
+            # count there is still named.
+            slot = code
+        code_to_name[slot] = product.name
+    return code_to_name
+
+
+def _slots_by_code(slots: list[int]) -> dict[str, int]:
+    """Hex slot index -> count for every configured slot but the total."""
+    return {
+        f"{index:02X}": value
+        for index, value in enumerate(slots)
+        if index and value != PRODUCT_COUNT_UNUSED
+    }
+
+
+def _slots_by_name(slots: list[int], names: dict[int, str]) -> dict[str, int]:
+    """Named view of ``slots`` for a slot -> name map."""
+    by_name: dict[str, int] = {}
+    for index in range(1, len(slots)):
+        value = slots[index]
+        if value == PRODUCT_COUNT_UNUSED:
+            continue
+        name = names.get(index)
+        if name is not None:
+            by_name[name] = value
+    return by_name
+
+
+def _special_slots_by_name(slots: list[int]) -> dict[str, int]:
+    """Named view of the special counter bank (``@TR:52``).
+
+    Each name sums the slots J.O.E.'s ``SpecialCounterStatisticsParser``
+    sums for it (see :data:`SPECIAL_COUNTER_SLOTS`); unconfigured slots
+    count as zero, exactly like the app's ``h()`` helper, and a name
+    whose slots are *all* unconfigured is dropped rather than reported
+    as 0.
+    """
+    by_name: dict[str, int] = {}
+    for name, indices in SPECIAL_COUNTER_SLOTS.items():
+        present = [
+            slots[i]
+            for i in indices
+            if i < len(slots) and slots[i] != PRODUCT_COUNT_UNUSED
+        ]
+        if present:
+            by_name[name] = sum(present)
+    return by_name
+
+
+def _format_counter_slots(
+    header: str, by_name: dict[str, int], by_code: dict[str, int]
+) -> str:
+    """Shared pretty-printer for a decoded counter bank."""
+    lines = [header]
+    for name, count in by_name.items():
+        lines.append(f"  {name:20s}: {count}")
+    # An "unnamed" slot is one the active slot->name map didn't cover at
+    # parse time — i.e. by_code has an entry but by_name doesn't. We
+    # re-derive it here so both the fallback and the profile-aware case
+    # are covered without ever double-listing a slot.
+    named_counts = list(by_name.values())
+    unnamed: dict[str, int] = {}
+    for code_hex, count in by_code.items():
+        try:
+            named_counts.remove(count)
+        except ValueError:
+            unnamed[code_hex] = count
+    if unnamed:
+        lines.append(
+            "  (unnamed slots): "
+            + ", ".join(f"0x{code}={count}" for code, count in unnamed.items())
+        )
+    return "\n".join(lines)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -1613,43 +1965,10 @@ class ProductCounters:
         """
         if len(slots) < 1:
             raise ValueError("product counter table is empty")
-        if overflow:
-            merged = list(slots)
-            for code, high in enumerate(overflow[: len(merged)]):
-                if high in OVERFLOW_COUNT_UNUSED:
-                    continue
-                if merged[code] == PRODUCT_COUNT_UNUSED:
-                    continue
-                merged[code] += high << 16
-            slots = merged
+        slots = _fold_overflow(slots, overflow)
         total = slots[0]
-        by_name: dict[str, int] = {}
-        by_code: dict[str, int] = {}
-        code_to_name: dict[int, str]
-        if profile is not None and getattr(profile, "product_by_code", None):
-            overrides = COUNTER_SLOT_OVERRIDES.get(getattr(profile, "code", ""), {})
-            code_to_name = {}
-            for code, product in profile.product_by_code.items():
-                slot = overrides.get(code, code)
-                if slot != code and (
-                    slot >= len(slots) or slots[slot] == PRODUCT_COUNT_UNUSED
-                ):
-                    # The override target carries nothing on this
-                    # firmware; fall back to the product's own code so a
-                    # machine that does count there is still named.
-                    slot = code
-                code_to_name[slot] = product.name
-        else:
-            code_to_name = dict(PRODUCT_NAMES)
-        for code in range(1, len(slots)):
-            value = slots[code]
-            if value == PRODUCT_COUNT_UNUSED:
-                continue
-            code_hex = f"{code:02X}"
-            by_code[code_hex] = value
-            name = code_to_name.get(code)
-            if name is not None:
-                by_name[name] = value
+        by_code = _slots_by_code(slots)
+        by_name = _slots_by_name(slots, _product_slot_names(slots, profile))
         return cls(
             total=total,
             by_name=by_name,
@@ -1658,27 +1977,9 @@ class ProductCounters:
         )
 
     def format(self) -> str:
-        lines = [f"total brews : {self.total}"]
-        for name, count in self.by_name.items():
-            lines.append(f"  {name:20s}: {count}")
-        # An "unnamed" slot is one that the active code->name map didn't
-        # cover at parse time — i.e. by_code has an entry but by_name
-        # doesn't. We re-derive this here so both the EF536-baseline
-        # case and the profile-aware case are covered without ever
-        # double-listing a slot.
-        named_counts = list(self.by_name.values())
-        unnamed: dict[str, int] = {}
-        for code_hex, count in self.by_code.items():
-            try:
-                named_counts.remove(count)
-            except ValueError:
-                unnamed[code_hex] = count
-        if unnamed:
-            lines.append(
-                "  (unnamed slots): "
-                + ", ".join(f"0x{code}={count}" for code, count in unnamed.items())
-            )
-        return "\n".join(lines)
+        return _format_counter_slots(
+            f"total brews : {self.total}", self.by_name, self.by_code
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1686,6 +1987,89 @@ class ProductCounters:
             "by_name": dict(self.by_name),
             "by_code": dict(self.by_code),
         }
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class CounterBank:
+    """Decoded payload of any counter bank other than ``@TR:32``.
+
+    ``@TR:32`` keeps its own :class:`ProductCounters` type because
+    consumers (Home Assistant among them) depend on its shape. Every
+    other bank — special, barista, daily product, daily barista — shares
+    this one, which carries the bank command so a caller can tell them
+    apart in a single collection.
+
+    Slot 0 is the bank's own total. The remaining slots are indexed by
+    product code for the product-indexed banks (see
+    :class:`CounterBankSpec`), so profile catalogue names apply; the
+    special bank's slots are fixed functions instead and are named from
+    :data:`SPECIAL_COUNTER_SLOTS`. Slots no name covers always survive
+    in ``by_code``.
+    """
+
+    bank: str
+    name: str
+    total: int
+    by_name: dict[str, int]
+    by_code: dict[str, int]
+    raw_slots: tuple[int, ...]
+
+    @classmethod
+    def from_slots(
+        cls,
+        bank: str,
+        slots: list[int],
+        profile: MachineProfile | None = None,
+        overflow: list[int] | None = None,
+    ) -> CounterBank:
+        """Decode one bank's slot table, folding in ``overflow`` if read."""
+        spec = counter_bank_spec(bank)
+        if spec.overflow_of is not None:
+            raise ValueError(
+                f"{spec.command} is the overflow bank of {spec.overflow_of}; "
+                "decode it through its base bank"
+            )
+        if len(slots) < 1:
+            raise ValueError(f"{spec.command} counter table is empty")
+        slots = _fold_overflow(slots, overflow)
+        if spec.product_indexed:
+            by_name = _slots_by_name(slots, _product_slot_names(slots, profile))
+        else:
+            by_name = _special_slots_by_name(slots)
+        return cls(
+            bank=spec.command,
+            name=spec.name,
+            total=slots[0],
+            by_name=by_name,
+            by_code=_slots_by_code(slots),
+            raw_slots=tuple(slots),
+        )
+
+    def format(self) -> str:
+        spec = counter_bank_spec(self.bank)
+        return _format_counter_slots(
+            f"{spec.label} ({self.bank}) total: {self.total}",
+            self.by_name,
+            self.by_code,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bank": self.bank,
+            "name": self.name,
+            "total": self.total,
+            "by_name": dict(self.by_name),
+            "by_code": dict(self.by_code),
+        }
+
+
+def counter_bank_spec(bank: str) -> CounterBankSpec:
+    """Look up one :class:`CounterBankSpec` by wire command."""
+    try:
+        return COUNTER_BANK_SPECS[bank.strip().upper()]
+    except KeyError as exc:
+        known = ", ".join(sorted(COUNTER_BANK_SPECS))
+        raise ValueError(f"unknown counter bank {bank!r}. Known: {known}") from exc
 
 
 # --------------------------------------------------------------------- #

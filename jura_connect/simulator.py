@@ -17,6 +17,11 @@ The simulator models:
   ``@TG:FF`` (cancel the running product step),
   ``@HU?`` (milk-cooler update status — answered ``@hu:800``, *not* a
   status query).
+* Every paginated counter bank (``@TR:32``/``@TR:33`` product,
+  ``@TR:34``/``@TR:35`` barista, ``@TR:42``..``@TR:45`` daily,
+  ``@TR:52``/``@TR:53`` special). Each has its own
+  :class:`SimulatorConfig` table, and a table left at ``None`` models a
+  machine without that bank: it answers the bare ``@tr:00``.
 * Session teardown: an **empty frame**, which is what J.O.E.'s
   ``WifiCommandCloseConnection`` sends. ``@HE`` is accepted as a close
   too because real dongles answer it and older jura-connect releases
@@ -47,7 +52,7 @@ import time
 from collections.abc import Iterator
 
 from . import protocol
-from .client import _settings_checksum
+from .client import OVERFLOW_COUNTER_BANK, _settings_checksum
 from .commands import DESTRUCTIVE_PREFIXES
 from .profile import RECIPE_BLOB_BYTES
 from .progress import (
@@ -76,6 +81,24 @@ KAFFEEBERT_IDLE_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
 # Sentinel for "no count" inside an @TR:32 page.
 _PC_UNUSED = 0xFFFF
+
+# Every counter bank the simulator can serve:
+#   wire command -> (SimulatorConfig attribute, bytes per value, pad).
+# The pad is what a page shorter than 8 bytes is filled with: the
+# not-configured sentinel for a counter bank, "no overflow yet" for an
+# overflow bank. Mirrors jura_connect.client.COUNTER_BANK_SPECS.
+_COUNTER_BANK_TABLES: dict[str, tuple[str, int, int]] = {
+    "@TR:32": ("product_counters", 2, _PC_UNUSED),
+    "@TR:33": ("product_counter_overflow", 1, 0x00),
+    "@TR:34": ("barista_counters", 2, _PC_UNUSED),
+    "@TR:35": ("barista_counter_overflow", 1, 0x00),
+    "@TR:42": ("daily_product_counters", 2, _PC_UNUSED),
+    "@TR:43": ("daily_product_counter_overflow", 1, 0x00),
+    "@TR:44": ("daily_barista_counters", 2, _PC_UNUSED),
+    "@TR:45": ("daily_barista_counter_overflow", 1, 0x00),
+    "@TR:52": ("special_counters", 2, _PC_UNUSED),
+    "@TR:53": ("special_counter_overflow", 1, 0x00),
+}
 
 
 def _default_product_counters() -> list[int]:
@@ -151,6 +174,24 @@ class SimulatorConfig:
     # implemented"; tests override it to model a firmware that answers
     # something else entirely.
     overflow_bank_reply: str = "@tr:00"
+    # The remaining counter banks a machine XML may declare, with the
+    # same convention: a list of slot values, or None for a machine that
+    # answers the bare "@tr:00" (= bank not implemented). All default to
+    # None, matching the S8 EB, which declares @TR:32 alone.
+    #
+    # The special bank's slots are fixed functions, not product codes
+    # (see jura_connect.client.SPECIAL_COUNTER_SLOTS); the barista and
+    # daily banks index the same product-code space as @TR:32. Neither
+    # the barista nor the daily banks appear anywhere in the J.O.E. APK,
+    # so their wire behaviour here is XML-derived, not observed.
+    special_counters: list[int] | None = None
+    special_counter_overflow: list[int] | None = None
+    barista_counters: list[int] | None = None
+    barista_counter_overflow: list[int] | None = None
+    daily_product_counters: list[int] | None = None
+    daily_product_counter_overflow: list[int] | None = None
+    daily_barista_counters: list[int] | None = None
+    daily_barista_counter_overflow: list[int] | None = None
     # @TM:50 reply bytes (per-kind slot counts; summed = total slots).
     # Default matches Kaffeebert: 5 kinds × 4 slots = 20 reported.
     pmode_slot_bytes: bytes = bytes.fromhex("0404040404")
@@ -491,45 +532,8 @@ class Simulator:
                 return f"@tm:{arg.lower()},{stored}{csum}"
             # Unknown address — echo the high nibble like the real dongle.
             return f"@tm:{arg_full[:2].lower()}"
-        if cmd.startswith("@TR:32,"):
-            # Paginated product-counter read. Wire format:
-            #   request : @TR:32,<page_hex>
-            #   reply   : @tr:32,<page_hex>,<8 hex bytes>
-            # Each page covers 4 u16 slots from the configured table.
-            page_hex = cmd[len("@TR:32,") :].strip()
-            try:
-                page = int(page_hex, 16)
-            except ValueError:
-                return "@tr:00"
-            if not 0 <= page < 16:
-                return "@tr:00"
-            start = page * 4
-            slots = self.config.product_counters[start : start + 4]
-            while len(slots) < 4:
-                slots.append(_PC_UNUSED)
-            payload = "".join(f"{s & 0xFFFF:04X}" for s in slots)
-            return f"@tr:32,{page:02X},{payload}"
-        if cmd.startswith("@TR:33,"):
-            # Overflow bank: one byte per slot, 8 slots per page.
-            overflow = self.config.product_counter_overflow
-            if overflow is None:
-                return self.config.overflow_bank_reply
-            page_hex = cmd[len("@TR:33,") :].strip()
-            try:
-                page = int(page_hex, 16)
-            except ValueError:
-                return "@tr:00"
-            if not 0 <= page < 16:
-                return "@tr:00"
-            start = page * 8
-            if start >= len(overflow):
-                # Bank shorter than 16 pages — the dongle stops answering
-                # with data and falls back to the "no such bank" reply.
-                return "@tr:00"
-            highs = list(overflow[start : start + 8])
-            highs += [0x00] * (8 - len(highs))
-            payload = "".join(f"{h & 0xFF:02X}" for h in highs)
-            return f"@tr:33,{page:02X},{payload}"
+        if cmd.startswith("@TR:") and "," in cmd:
+            return self._counter_bank_page(cmd)
         if cmd.startswith("@TR:"):
             return f"@tr:{cmd[4:6]}00"
         # Unknown -> dongle stays silent
@@ -543,6 +547,50 @@ class Simulator:
             if self.config.brew_progress_interval > 0:
                 time.sleep(self.config.brew_progress_interval)
             self._send(conn, frame)
+
+    # -- counter banks -------------------------------------------------
+    def _counter_bank_page(self, cmd: str) -> str | None:
+        """Serve one page of a paginated counter bank.
+
+        Wire format, identical for every bank:
+
+            request : @TR:<bank>,<page_hex>
+            reply   : @tr:<bank>,<page_hex>,<8 hex bytes>
+
+        The 8-byte payload holds 4 ``u16`` slots for a counter bank or 8
+        ``u8`` high bytes for an overflow bank. A machine without the
+        bank answers the bare ``@tr:00`` J.O.E.'s matcher accepts as
+        "not implemented", and a bank shorter than the client's page
+        budget answers the same once its table runs out — the "bank ends
+        here" case the client keeps partial results for.
+        """
+        bank, _, page_hex = cmd.partition(",")
+        bank = bank.upper()
+        entry = _COUNTER_BANK_TABLES.get(bank)
+        if entry is None:
+            # Unknown bank — the dongle echoes it back with a 00 tail.
+            return f"@tr:{cmd[4:6]}00"
+        attr, width, pad = entry
+        table = getattr(self.config, attr)
+        if table is None:
+            return (
+                self.config.overflow_bank_reply
+                if bank == OVERFLOW_COUNTER_BANK
+                else "@tr:00"
+            )
+        try:
+            page = int(page_hex.strip(), 16)
+        except ValueError:
+            return "@tr:00"
+        per_page = 8 // width
+        start = page * per_page
+        if page < 0 or start >= len(table):
+            return "@tr:00"
+        values = list(table[start : start + per_page])
+        values += [pad] * (per_page - len(values))
+        mask = (1 << (8 * width)) - 1
+        payload = "".join(f"{v & mask:0{width * 2}X}" for v in values)
+        return f"@tr:{bank[4:6].lower()},{page:02X},{payload}"
 
     # -- status emission -----------------------------------------------
     def _emit_status(self, conn: socket.socket) -> None:
