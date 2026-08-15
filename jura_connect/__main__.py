@@ -598,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "explicitly permit destructive commands "
-            "(clean / descale / set-pin / set-ssid / reset-counters / …). "
+            "(clean / descale / set-pin / set-ssid / skip-quality-step / …). "
             "Without this flag any destructive command is refused with a "
             "warning. These can consume supplies, lock you out of the "
             "machine, or render the dongle unreachable; use only when you "

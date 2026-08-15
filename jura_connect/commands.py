@@ -47,8 +47,11 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     b"@TG:24",  # Cleaning
     b"@TG:25",  # Descale
     b"@TG:26",  # FilterChange
-    b"@TG:7E",  # reset maintenance counter (with or without arg)
-    b"@TG:FF",  # reset (broad)
+    # J.O.E. calls this WifiCommandCancelQualityAssistantStep (bare form
+    # skips one step, the 32×F argument skips all). On TT237W it was
+    # observed to zero the maintenance counters instead — see the
+    # ``skip-quality-step`` danger string. Gated under either reading.
+    b"@TG:7E",
     b"@TF:02",  # restart machine
     b"@AN:02",  # power off
     b"@TP:",  # start product (brewing)
@@ -278,6 +281,19 @@ def _r_register_read(_spec, client, args, timeout):
     return client.request(f"@TR:{bank}", match=r"^@tr", timeout=timeout)
 
 
+def _r_cancel(_spec, client, _args, timeout):
+    """Cancel the product step the machine is currently running.
+
+    ``@TG:FF`` is J.O.E.'s ``WifiCommandCancelProductStep``: the "abort
+    this brew / stop the running step" verb, which is why it is *not*
+    gated (earlier versions of this library mislabelled it a broad
+    reset). The app matches the acknowledgement as ``@tg:FF``; we accept
+    any ``@tg`` reply, case-insensitively, because firmware families
+    differ in case and trailing payload.
+    """
+    return client.request("@TG:FF", match=r"(?i)^@tg", timeout=timeout)
+
+
 def _r_raw(_spec, client, args, timeout):
     cmd = args[0]
     if not cmd.startswith("@"):
@@ -322,8 +338,27 @@ def _r_cappu_rinse(_spec, client, _args, timeout):
     return client.request("@TG:23", timeout=timeout)
 
 
-def _r_reset_counters(_spec, client, _args, timeout):
-    return client.request("@TG:7E", timeout=timeout)
+#: Argument J.O.E. appends to ``@TG:7E`` to skip *every* remaining
+#: quality-assistant step at once (32 hex F's).
+_SKIP_ALL_QUALITY_STEPS = "F" * 32
+
+
+def _r_skip_quality_step(_spec, client, args, timeout):
+    """Send ``@TG:7E`` — one quality-assistant step, or all of them.
+
+    ``scope`` is ``one`` (default, bare ``@TG:7E``) or ``all``
+    (``@TG:7E,FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF``), matching J.O.E.'s
+    ``WifiCommandCancelQualityAssistantStep``. Both forms are gated:
+    the same opcode has been observed zeroing the maintenance counters
+    on TT237W.
+    """
+    scope = (args[0] if args else "one").strip().lower()
+    if scope not in ("one", "all"):
+        raise CommandError(
+            f"skip-quality-step: scope must be 'one' or 'all', got {args[0]!r}"
+        )
+    cmd = "@TG:7E" if scope == "one" else f"@TG:7E,{_SKIP_ALL_QUALITY_STEPS}"
+    return client.request(cmd, timeout=timeout)
 
 
 def _r_restart(_spec, client, _args, timeout):
@@ -768,7 +803,7 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name="status",
-        description="parsed status / active alerts (@HU? -> @TF:)",
+        description="parsed status / active alerts (waits for a pushed @TF: frame)",
         arguments=(),
         runner=_r_status,
     ),
@@ -816,6 +851,12 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="read a register bank (@TR:<bank>); firmware-specific",
         arguments=(Argument("bank", "hex bank id, e.g. 32"),),
         runner=_r_register_read,
+    ),
+    CommandSpec(
+        name="cancel",
+        description="cancel the running product step (@TG:FF); the 'abort this brew' verb",
+        arguments=(),
+        runner=_r_cancel,
     ),
     CommandSpec(
         name="raw",
@@ -910,15 +951,33 @@ _SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
-        name="reset-counters",
-        description="[destructive] zero every maintenance counter (@TG:7E)",
-        arguments=(),
-        runner=_r_reset_counters,
+        name="skip-quality-step",
+        description=(
+            "[destructive] skip a quality-assistant step (@TG:7E); "
+            "'all' skips every remaining step. Has also been seen to "
+            "zero the maintenance counters"
+        ),
+        arguments=(
+            Argument(
+                "scope",
+                "'one' (default) sends bare @TG:7E; 'all' sends the "
+                "@TG:7E,FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF skip-everything form",
+                optional=True,
+            ),
+        ),
+        runner=_r_skip_quality_step,
         destructive=True,
         danger=(
-            "irreversibly resets every maintenance counter (cleaning / "
-            "descale / filter / etc.) to zero. The machine will then "
-            "'forget' when it was last serviced. There is no undo."
+            "@TG:7E has two known readings and we cannot tell them apart "
+            "without firing it. In the J.O.E. Android app it is "
+            "WifiCommandCancelQualityAssistantStep — it skips one "
+            "quality-assistant step ('all' skips every remaining one), "
+            "so the machine stops asking for a service it believes is "
+            "due. On a TT237W S8 EB an accidental @TG:7E instead zeroed "
+            "every maintenance counter (cleaning / descale / filter), "
+            "leaving the machine with no record of when it was last "
+            "serviced. Both outcomes are irreversible — there is no undo "
+            "and no way to restore the previous counter values."
         ),
     ),
     CommandSpec(

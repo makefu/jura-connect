@@ -14,10 +14,17 @@ The simulator models:
   on machine" pairing window for an empty hash.
 * Read commands ``@TG:43`` (maintenance counters), ``@TG:C0``
   (maintenance percent), ``@TS:01``/``@TS:00`` (lock/unlock display),
-  ``@HU?`` (status request that yields one ``@TF:`` frame),
-  ``@HE`` (graceful close).
+  ``@TG:FF`` (cancel the running product step),
+  ``@HU?`` (milk-cooler update status — answered ``@hu:800``, *not* a
+  status query).
+* Session teardown: an **empty frame**, which is what J.O.E.'s
+  ``WifiCommandCloseConnection`` sends. ``@HE`` is accepted as a close
+  too because real dongles answer it and older jura-connect releases
+  used it, but it is really the OTA-end verb (``WifiCommandOTAEnd``,
+  ``@he:ok``) and no longer sent by this library.
 * Periodic unsolicited ``@TF:<hex>`` status broadcasts on the
-  connection so reader code in the client can be exercised.
+  connection so reader code in the client can be exercised. This is the
+  only way status reaches a client — nothing requests it.
 
 It deliberately refuses to model write/process commands (``@TG:24``
 cleaning, ``@TG:25`` descale, etc.) -- it answers ``@an:error`` so
@@ -321,12 +328,25 @@ class Simulator:
                 log.warning("simulator: refusing destructive command %r", cmd)
                 return "@an:error"
 
+        if cmd == "":
+            # J.O.E.'s WifiCommandCloseConnection: an empty frame ends
+            # the session. This is what JuraClient.close() sends.
+            return "@@CLOSE"
         if cmd == "@HE":
+            # Really WifiCommandOTAEnd (firmware update), but dongles do
+            # answer it and pre-0.13 clients closed with it, so keep
+            # tearing the session down here.
             return "@@CLOSE"
         if cmd == "@HB":
             return None
-        if cmd in ("@HU?",):
-            return f"@TF:{self.config.status_payload.hex().upper()}"
+        if cmd == "@HU?":
+            # WifiCommandMilkCoolerUpdateStatus — matcher @hu:[0-9a-fA-F]{3}.
+            # Kaffeebert answers @hu:800. Status is NOT part of this
+            # reply; it arrives with the next unsolicited @TF: frame.
+            return "@hu:800"
+        if cmd == "@TG:FF":
+            # WifiCommandCancelProductStep — cancel the running step.
+            return "@tg:FF"
         if cmd == "@TG:43":
             return "@tg:43" + self.config.maint_counters.hex().upper()
         if cmd == "@TG:C0":
@@ -428,8 +448,6 @@ class Simulator:
             return f"@tr:33,{page:02X},{payload}"
         if cmd.startswith("@TR:"):
             return f"@tr:{cmd[4:6]}00"
-        if cmd.startswith("@TG:7E") or cmd.startswith("@TG:FF"):
-            return "@an:error"  # destructive guard already caught these
         # Unknown -> dongle stays silent
         return None
 

@@ -293,9 +293,19 @@ class JuraClient:
         return self._do_handshake(timeout=timeout)
 
     def close(self) -> None:
-        # Best-effort polite close. Some firmwares accept @HE, others ignore it.
+        """Hang up the way the J.O.E. app does: send an empty frame.
+
+        The app's ``WifiCommandCloseConnection`` puts a frame with an
+        empty payload on the wire and closes the socket. It does *not*
+        send ``@HE`` — that is ``WifiCommandOTAEnd`` (it expects
+        ``@he:ok`` and belongs to a firmware-update session), which
+        earlier versions of this client used as a "polite close".
+
+        Best-effort: a dongle that already went away must not turn
+        ``close()`` into an exception.
+        """
         try:
-            self.send_command("@HE")
+            self.send_command("")
         except Exception:  # noqa: BLE001
             pass
         self.conn.close()
@@ -358,15 +368,32 @@ class JuraClient:
         else:
             pattern = match
         self.conn.send_str(cmd)
+        return self._await_frame(pattern, timeout=timeout, what=f"reply to {cmd!r}")
+
+    def _await_frame(
+        self,
+        pattern: re.Pattern[str] | None,
+        *,
+        timeout: float,
+        what: str,
+    ) -> str:
+        """Read frames until one matches ``pattern`` (or the first non-status
+        frame when ``pattern`` is ``None``).
+
+        Sends nothing — :meth:`request` calls it after writing its
+        command, :meth:`read_status` calls it to sit and wait for the
+        dongle's next broadcast. ``what`` names the awaited thing in the
+        :class:`TimeoutError` message.
+        """
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"no reply to {cmd!r} within {timeout}s")
+                raise TimeoutError(f"no {what} within {timeout}s")
             try:
                 reply = self.conn.recv_str(timeout=remaining)
             except (TimeoutError, socket.timeout) as exc:
-                raise TimeoutError(f"no reply to {cmd!r} within {timeout}s") from exc
+                raise TimeoutError(f"no {what} within {timeout}s") from exc
             if reply.startswith(("@TF:", "@TV:")):
                 self.status_history.append(reply)
                 if pattern is None:
@@ -418,9 +445,30 @@ class JuraClient:
         reply = self.request("@TG:C0", match=r"^@tg:C0", timeout=timeout)
         return MaintenancePercent.parse(reply, profile=self.profile)
 
-    def read_status(self, *, timeout: float = 6.0) -> "MachineStatus":
-        """Wait for the next unsolicited ``@TF:`` status frame and parse it."""
-        reply = self.request("@HU?", match=r"^@TF:", timeout=timeout)
+    def read_status(
+        self, *, timeout: float = 6.0, nudge: bool = False
+    ) -> "MachineStatus":
+        """Wait for the machine's next ``@TF:`` status broadcast and parse it.
+
+        There is no "read status" request in the protocol: the dongle
+        pushes ``@TF:`` frames on its own and the J.O.E. app merely
+        routes them (``TCPReceiveHandler``). So this method sends
+        nothing and waits.
+
+        ``nudge=True`` sends ``@HU?`` first. That command is the app's
+        ``WifiCommandMilkCoolerUpdateStatus`` (answered with
+        ``@hu:<3 hex>``, e.g. ``@hu:800``) — *not* a status query. It is
+        kept only as an escape hatch for firmwares that want traffic on
+        the socket before they resume broadcasting; the status still
+        arrives as the next pushed ``@TF:`` frame either way.
+        """
+        if nudge:
+            self.send_command("@HU?")
+        reply = self._await_frame(
+            re.compile(r"^@TF:"),
+            timeout=timeout,
+            what="pushed @TF: status frame",
+        )
         return MachineStatus.parse(reply, profile=self.profile)
 
     def read_product_counters(

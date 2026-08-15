@@ -132,7 +132,7 @@ available commands:
     info                     full read-only snapshot (status + counters + percent)
     counters                 maintenance counters (@TG:43)
     percent                  maintenance percent indicators (@TG:C0)
-    status                   parsed status / active alerts (@HU? -> @TF:)
+    status                   parsed status / active alerts (waits for a pushed @TF: frame)
     brews                    per-product brew counters (@TR:32 paginated; 16 pages)
     products                 list brewable products + allowed 'brew' param=value values (profile-driven; no I/O)
     pmode                    programmable-recipe slots (@TM:50 + @TM:42,<slot>); per-machine
@@ -141,6 +141,7 @@ available commands:
     unlock                   unlock the front-panel display (@TS:00)
     mem-read <addr>          read a memory/setting slot (@TM:<addr>); firmware-specific
     register-read <bank>     read a register bank (@TR:<bank>); firmware-specific
+    cancel                   cancel the running product step (@TG:FF); the 'abort this brew' verb
     raw <frame>              send a verbatim '@…' command; payload checked against the destructive set
 
   destructive (require --allow-destructive-commands; see 'jura-connect command --help'):
@@ -149,7 +150,7 @@ available commands:
     filter-change            [destructive] run water-filter change procedure (@TG:26)
     cappu-clean              [destructive] start cappuccino-system cleaning (@TG:21)
     cappu-rinse              [destructive] rinse the milk system (@TG:23)
-    reset-counters           [destructive] zero every maintenance counter (@TG:7E)
+    skip-quality-step [<scope>]  [destructive] skip a quality-assistant step (@TG:7E); also seen zeroing the maintenance counters
     restart                  [destructive] reboot the WiFi dongle (@TF:02)
     power-off                [destructive] put the machine into standby (@AN:02)
     brew <product> [<param=value>…]  [destructive] start brewing a product (@TP:<recipe blob>)
@@ -438,7 +439,7 @@ does and have any required supplies / containers / cups in place:
 $ jura-connect command --name Kaffeebert --allow-destructive-commands clean
 ```
 
-The list of gated wire prefixes (`@TG:21/23/24/25/26/7E/FF`, `@TF:02`,
+The list of gated wire prefixes (`@TG:21/23/24/25/26/7E`, `@TF:02`,
 `@AN:02`, `@TP:`, `@HW:`) is exported as
 `jura_connect.DESTRUCTIVE_PREFIXES`. The `raw` escape hatch inspects its
 argument against the same list, so `command raw '@TG:24'` is gated
@@ -447,8 +448,13 @@ too — the bypass cannot be used by accident.
 Wrong values for `set-pin` / `set-ssid` / `set-password` can leave you
 locked out of the machine or unable to reach the dongle over WiFi;
 the only recovery is a **factory reset on the machine itself**.
-`reset-counters` is **irreversible** — there is no way to learn back
-when the machine was last serviced once it's been zeroed.
+`skip-quality-step` (`@TG:7E`) is **irreversible** under either of its
+two known meanings: the J.O.E. app uses it to skip a quality-assistant
+step, but on a TT237W S8 EB it zeroed every maintenance counter, and
+there is no way to learn back when the machine was last serviced once
+that has happened. `@TG:FF` — the `cancel` command — used to be listed
+here as a destructive "reset"; it is the app's cancel-product-step verb
+and is no longer gated.
 
 ### List / remove stored credentials
 
