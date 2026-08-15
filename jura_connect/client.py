@@ -33,6 +33,7 @@ subsequent runs to skip the on-machine confirmation.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import logging
 import re
 import socket
@@ -1597,6 +1598,164 @@ class JuraClient:
     @staticmethod
     def random_conn_id() -> str:
         return f"jura-connect-{uuid.uuid4().hex[:8]}"
+
+    # -- coffee timer ----------------------------------------------------
+    #
+    # Two commands, both lifted from the J.O.E. APK
+    # (``WifiCommandStartCoffeeTimer`` / ``WifiSendTimeForCoffeeTimer``,
+    # cross-checked against ``CoffeeMachineAdapterBle2``'s
+    # ``addCoffeeTimerCommand`` / ``sendTimeForCoffeeTimer``, which kept
+    # their method names through obfuscation). **APK-derived, untested
+    # on hardware** — see docs/PROTOCOL.md §5.12.
+
+    def send_coffee_timer_time(
+        self,
+        when: str | datetime.time | datetime.datetime,
+        *,
+        timeout: float = 3.0,
+    ) -> str:
+        """Tell the machine the wall-clock time of a coffee timer (``@TV:84``).
+
+        ``when`` is a ``"HH:MM"`` string, a :class:`datetime.time`, or a
+        :class:`datetime.datetime` (only the time-of-day is used). It is
+        normalised to ``"%02d:%02d"`` and hex-encoded character by
+        character — the same ``ExtensionsKt.c`` encoding the handshake
+        uses for the connection id — so ``07:30`` goes out as
+        ``@TV:84,30373A3330``.
+
+        J.O.E. sends this *after* :meth:`schedule_brew`, carrying the
+        wall-clock time the drink should be ready at (the countdown
+        itself is the ``@TM:3C`` delay field). Whether the machine
+        treats it as a clock sync or purely as a display string is
+        **not established** — see docs/PROTOCOL.md §5.12.
+
+        Returns the dongle's reply; ``"@tv:84"`` is the acknowledgement
+        J.O.E.'s matcher accepts.
+        """
+        payload = encode_coffee_timer_clock(when)
+        return self.request(f"@TV:84,{payload}", match=r"^@(tv:84|an)", timeout=timeout)
+
+    def schedule_brew(
+        self,
+        product: str | int | None = None,
+        *,
+        recipe: str | None = None,
+        at: str | datetime.time | datetime.datetime | None = None,
+        delay: int | None = None,
+        now: datetime.datetime | None = None,
+        ml: int | None = None,
+        strength: int | None = None,
+        temperature: int | str | None = None,
+        milk: int | None = None,
+        milk_foam: int | None = None,
+        milk_break: int | None = None,
+        bypass: int | None = None,
+        overrides: dict[str, int | str] | None = None,
+        substring: bool = False,
+        sync_time: bool = True,
+        timeout: float = 6.0,
+    ) -> CoffeeTimerSchedule:
+        """Schedule a brew for later (``@TM:3C`` + ``@TV:84``).
+
+        **Destructive**: the machine pours the drink at the scheduled
+        moment with nobody in front of it. Leave a cup under the spout,
+        or come back to coffee on the drip tray.
+
+        Pass either ``product`` (resolved through :meth:`resolve_product`,
+        with the same recipe overrides :meth:`brew` accepts) or a
+        verbatim 32-hex ``recipe`` blob as an escape hatch. The blob is
+        built by :meth:`~jura_connect.profile.ProductDef.build_recipe_hex`
+        — byte for byte the same payload ``@TP:`` takes — then
+        right-padded with ``"00"`` to 40 hex chars and followed by a
+        16-bit big-endian delay in seconds and the usual ``@TM:``
+        checksum.
+
+        Timing: pass either ``at`` (a ``"HH:MM"`` wall-clock target,
+        rolled to tomorrow when it has already passed today) or
+        ``delay`` (seconds from now). Either way the value is floored
+        to a whole minute — J.O.E. only ever sends multiples of 60 —
+        and must land in the
+        :data:`COFFEE_TIMER_MIN_DELAY_SECONDS` …
+        :data:`COFFEE_TIMER_MAX_DELAY_SECONDS` window the app enforces
+        (1 minute … 16 hours). ``now`` overrides the reference clock,
+        which makes the derivation testable.
+
+        Recipe values may also be passed as an ``overrides`` mapping of
+        ``KIND_*`` to value, the form
+        :meth:`~jura_connect.profile.ProductDef.build_recipe_hex` takes;
+        the named keywords win when both name the same parameter.
+
+        Products the machine XML marks ``Coffeetimer="false"`` are
+        refused client-side before anything reaches the wire.
+
+        With ``sync_time`` (the default) the wall-clock frame follows an
+        accepted schedule, mirroring J.O.E.'s order (``@TM:3C`` first,
+        then ``@TV:84``). It is skipped when the machine refused the
+        schedule, so a firmware without a coffee timer doesn't leave the
+        caller waiting on a reply that never comes.
+        """
+        if (product is None) == (recipe is None):
+            raise ValueError(
+                "schedule_brew: pass exactly one of product=<name/code> or "
+                "recipe=<32-hex blob>"
+            )
+        reference = (now or datetime.datetime.now()).replace(second=0, microsecond=0)
+        ready_at, delay_seconds = _coffee_timer_timing(at, delay, reference)
+
+        name: str | None = None
+        code: int | None = None
+        if product is None:
+            # ``recipe`` is the only other option the check above allows;
+            # an empty string is rejected by the validator.
+            recipe_hex = _validated_recipe_hex(recipe or "")
+        else:
+            definition = self.resolve_product(product, substring=substring)
+            if not definition.coffee_timer:
+                raise ValueError(
+                    f"{definition.name}: this machine's profile "
+                    f"({self.profile.code if self.profile else '?'}) marks the "
+                    f"product as ineligible for the coffee timer "
+                    f'(XML Coffeetimer="false").'
+                )
+            recipe_overrides: dict[str, int | str] = dict(overrides or {})
+            for kind, value in (
+                (profile.KIND_WATER_AMOUNT, ml),
+                (profile.KIND_COFFEE_STRENGTH, strength),
+                (profile.KIND_TEMPERATURE, temperature),
+                (profile.KIND_MILK_AMOUNT, milk),
+                (profile.KIND_MILK_FOAM_AMOUNT, milk_foam),
+                (profile.KIND_MILK_BREAK, milk_break),
+                (profile.KIND_BYPASS, bypass),
+            ):
+                if value is not None:
+                    recipe_overrides[kind] = value
+            recipe_hex = definition.build_recipe_hex(recipe_overrides)
+            name, code = definition.name, definition.code
+
+        command = build_coffee_timer_command(recipe_hex, delay_seconds)
+        reply = self.request(command, match=r"(?i)^@(tm|an)", timeout=timeout)
+        accepted = _is_coffee_timer_accept(reply)
+
+        time_command: str | None = None
+        time_reply: str | None = None
+        if sync_time and accepted:
+            time_command = f"@TV:84,{encode_coffee_timer_clock(ready_at)}"
+            time_reply = self.send_coffee_timer_time(ready_at, timeout=timeout)
+
+        body = command[len("@TM:3C,") : -2]
+        return CoffeeTimerSchedule(
+            product=name,
+            product_code=code,
+            recipe_hex=recipe_hex,
+            blob_hex=body[:COFFEE_TIMER_BLOB_HEX_LEN],
+            delay_seconds=delay_seconds,
+            ready_at=ready_at,
+            command=command,
+            reply=reply.strip(),
+            time_command=time_command,
+            time_reply=time_reply.strip() if time_reply is not None else None,
+            accepted=accepted,
+        )
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -3233,3 +3392,236 @@ def _parse_limit_load(reply: str, definition: ProductDef) -> ProductLimits:
         limits=tuple(limits),
         raw=body_all.upper(),
     )
+
+
+# --------------------------------------------------------------------- #
+# Coffee timer (@TM:3C schedule + @TV:84 wall clock)
+# --------------------------------------------------------------------- #
+#
+# APK-derived, **not** hardware-verified. Sources:
+#
+#   WifiCommandStartCoffeeTimer:
+#       strO = "3C," + take(40, appProduct.c(data) + repeat("00", 20))
+#                    + ExtensionsKt.e(seconds)
+#       cmd  = "@TM:" + strO + ByteOperations.d(strO)      matcher "@tm:.*"
+#   WifiSendTimeForCoffeeTimer:
+#       cmd  = "@TV:84," + ExtensionsKt.c(time)            matcher "@tv:84"
+#
+# with ExtensionsKt.e(i) = "%04X" % (i & 0xFFFF) and ExtensionsKt.c(s)
+# = the per-character "%02X" hex encoding also used for the handshake's
+# connection id. ``appProduct.c(data)`` is the very same builder
+# ``@TP:`` uses, i.e. ProductDef.build_recipe_hex(). The Bluetooth
+# adapter's addCoffeeTimerCommand / sendTimeForCoffeeTimer build byte
+# for byte the same strings. See docs/PROTOCOL.md §5.12.
+
+#: ``@TM:`` argument that carries a coffee-timer schedule.
+COFFEE_TIMER_ARG = "3C"
+
+#: The recipe blob is right-padded with ``"00"`` to this many hex
+#: characters (20 bytes) before the delay field — the APK appends 20
+#: ``"00"`` pairs and then takes the first 40 characters.
+COFFEE_TIMER_BLOB_HEX_LEN = 40
+
+#: Delay bounds J.O.E.'s coffee-timer screen enforces before it will
+#: send anything: at least one minute out, at most 16 hours. The wire
+#: field is 16 bits, so 16 h (57600 s) fits with room to spare.
+COFFEE_TIMER_MIN_DELAY_SECONDS = 60
+COFFEE_TIMER_MAX_DELAY_SECONDS = 16 * 3600
+
+#: J.O.E. only ever puts whole minutes on the wire: its delay is
+#: ``(millis_until_target // 60000) * 60``.
+COFFEE_TIMER_DELAY_GRANULARITY = 60
+
+_CLOCK_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _normalise_clock(value: str | datetime.time | datetime.datetime) -> str:
+    """Return ``"HH:MM"`` for a string / time / datetime.
+
+    Mirrors the APK's ``String.format("%02d:%02d", HOUR_OF_DAY, MINUTE)``.
+    """
+    if isinstance(value, datetime.datetime | datetime.time):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    m = _CLOCK_RE.match(value.strip())
+    if m is None:
+        raise ValueError(f"coffee timer clock: expected 'HH:MM', got {value!r}")
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"coffee timer clock: {value!r} is not a valid time of day")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def encode_coffee_timer_clock(value: str | datetime.time | datetime.datetime) -> str:
+    """Hex-encode a wall-clock time for ``@TV:84``.
+
+    ``"07:30"`` becomes ``"30373A3330"`` — one ``%02X`` per ASCII
+    character, the ``ExtensionsKt.c`` encoding.
+    """
+    return _conn_id_hex(_normalise_clock(value))
+
+
+def _validated_recipe_hex(recipe: str) -> str:
+    """Sanity-check a verbatim recipe blob before it goes on the wire."""
+    text = recipe.strip().upper()
+    if not re.fullmatch(r"(?:[0-9A-F]{2})+", text):
+        raise ValueError(
+            f"coffee timer: recipe blob must be an even number of hex "
+            f"characters, got {recipe!r}"
+        )
+    if len(text) > COFFEE_TIMER_BLOB_HEX_LEN:
+        raise ValueError(
+            f"coffee timer: recipe blob is {len(text)} hex chars but the "
+            f"command only carries {COFFEE_TIMER_BLOB_HEX_LEN}"
+        )
+    return text
+
+
+def build_coffee_timer_command(recipe_hex: str, delay_seconds: int) -> str:
+    """Build the ``@TM:3C`` frame for one scheduled brew.
+
+    ``recipe_hex`` is the ``@TP:`` recipe blob (32 hex chars from
+    :meth:`~jura_connect.profile.ProductDef.build_recipe_hex`); it is
+    right-padded with ``"00"`` to :data:`COFFEE_TIMER_BLOB_HEX_LEN` and
+    truncated there, exactly like the APK's
+    ``take(40, blob + repeat("00", 20))``.
+
+    ``delay_seconds`` is how far in the future the brew should start.
+    It must be a whole minute inside the
+    :data:`COFFEE_TIMER_MIN_DELAY_SECONDS` …
+    :data:`COFFEE_TIMER_MAX_DELAY_SECONDS` window; the value goes on
+    the wire as four upper-case hex chars (16-bit big-endian).
+
+    The trailing byte is the same ``ByteOperations.d`` checksum every
+    other ``@TM:`` write carries, computed over ``"3C,<blob><delay>"``.
+    """
+    _check_coffee_timer_delay(delay_seconds)
+    if delay_seconds % COFFEE_TIMER_DELAY_GRANULARITY:
+        raise ValueError(
+            f"coffee timer: delay {delay_seconds}s is not a whole minute; "
+            f"the app only ever sends multiples of "
+            f"{COFFEE_TIMER_DELAY_GRANULARITY}s"
+        )
+    padded = (recipe_hex.strip().upper() + "00" * 20)[:COFFEE_TIMER_BLOB_HEX_LEN]
+    body = f"{padded}{delay_seconds & 0xFFFF:04X}"
+    checksum = _settings_checksum(f"{COFFEE_TIMER_ARG},{body}")
+    return f"@TM:{COFFEE_TIMER_ARG},{body}{checksum}"
+
+
+def _check_coffee_timer_delay(delay_seconds: int) -> None:
+    if (
+        not COFFEE_TIMER_MIN_DELAY_SECONDS
+        <= delay_seconds
+        <= COFFEE_TIMER_MAX_DELAY_SECONDS
+    ):
+        raise ValueError(
+            f"coffee timer: delay {delay_seconds}s is outside the "
+            f"{COFFEE_TIMER_MIN_DELAY_SECONDS}..{COFFEE_TIMER_MAX_DELAY_SECONDS}s "
+            f"window J.O.E. allows (1 minute .. 16 hours)"
+        )
+
+
+def _is_coffee_timer_accept(reply: str) -> bool:
+    """True when an ``@TM:3C`` reply means the schedule was stored.
+
+    J.O.E.'s matcher is the permissive ``@tm:.*``, so the short
+    rejection tokens the ``@TM:`` family uses elsewhere — ``@tm:00``
+    ("rejected") and ``@tm:C2`` ("not supported by machine") — arrive
+    through the same door and must not be read as success.
+    """
+    r = reply.strip().lower()
+    if not r.startswith("@tm:"):
+        return False
+    return not r.startswith(("@tm:00", "@tm:c2"))
+
+
+def _coffee_timer_timing(
+    at: str | datetime.time | datetime.datetime | None,
+    delay: int | None,
+    reference: datetime.datetime,
+) -> tuple[str, int]:
+    """Resolve ``at``/``delay`` into ``(ready_at "HH:MM", delay seconds)``.
+
+    Exactly one of the two must be given. A wall-clock target that has
+    already passed today rolls over to tomorrow, matching J.O.E.'s
+    ``if (target.before(now)) target.add(DAY_OF_MONTH, 1)``. Both paths
+    floor to a whole minute so the wire value stays a multiple of 60.
+    """
+    if (at is None) == (delay is None):
+        raise ValueError(
+            "coffee timer: pass exactly one of at=<HH:MM> or delay=<seconds>"
+        )
+    if at is not None:
+        hour, minute = (int(part) for part in _normalise_clock(at).split(":"))
+        target = reference.replace(hour=hour, minute=minute)
+        if target < reference:
+            target += datetime.timedelta(days=1)
+        seconds = int((target - reference).total_seconds())
+    else:
+        seconds = int(delay or 0)
+    seconds -= seconds % COFFEE_TIMER_DELAY_GRANULARITY
+    _check_coffee_timer_delay(seconds)
+    ready = reference + datetime.timedelta(seconds=seconds)
+    return _normalise_clock(ready), seconds
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class CoffeeTimerSchedule:
+    """Outcome of one :meth:`JuraClient.schedule_brew` call.
+
+    ``accepted`` is the honest answer to "did the machine take it?" —
+    the ``@tm:00`` / ``@tm:C2`` rejection tokens come back through the
+    same permissive matcher a success does. ``time_command`` is
+    ``None`` when the wall-clock frame was skipped (schedule refused,
+    or ``sync_time=False``).
+    """
+
+    product: str | None  # None for a verbatim recipe blob
+    product_code: int | None
+    recipe_hex: str  # the 32-hex @TP: blob this was built from
+    blob_hex: str  # the same blob padded to 40 hex chars, as sent
+    delay_seconds: int
+    ready_at: str  # "HH:MM" the drink should be ready at
+    command: str  # the @TM:3C frame, verbatim
+    reply: str
+    time_command: str | None  # the @TV:84 frame, verbatim
+    time_reply: str | None
+    accepted: bool
+
+    def format(self) -> str:
+        who = self.product or f"recipe {self.recipe_hex}"
+        if self.product_code is not None:
+            who += f" (0x{self.product_code:02X})"
+        minutes, seconds = divmod(self.delay_seconds, 60)
+        verdict = "scheduled" if self.accepted else "REFUSED by machine"
+        lines = [
+            f"coffee timer: {who} — {verdict}",
+            f"  ready at   : {self.ready_at} (in {minutes}m{seconds:02d}s)",
+            f"  schedule   : {self.command} -> {self.reply}",
+        ]
+        if self.time_command is not None:
+            lines.append(f"  wall clock : {self.time_command} -> {self.time_reply}")
+        else:
+            lines.append("  wall clock : (not sent)")
+        if not self.accepted:
+            lines.append(
+                "  note       : the machine answered a rejection token; no "
+                "brew is scheduled."
+            )
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "product": self.product,
+            "product_code": (
+                None if self.product_code is None else f"{self.product_code:02X}"
+            ),
+            "recipe_hex": self.recipe_hex,
+            "blob_hex": self.blob_hex,
+            "delay_seconds": self.delay_seconds,
+            "ready_at": self.ready_at,
+            "command": self.command,
+            "reply": self.reply,
+            "time_command": self.time_command,
+            "time_reply": self.time_reply,
+            "accepted": self.accepted,
+        }

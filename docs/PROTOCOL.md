@@ -1977,3 +1977,192 @@ will reject. `MachineProfile.plan_preselections()` is the library entry
 point and returns a `PreselectionPlan` (which product to brew, the mask
 byte, the byte overwrites). `brew … mask=<hex>` forces the mask byte
 verbatim for firmware that numbers the bits differently.
+
+---
+
+### 5.12 Coffee timer (`@TM:3C` + `@TV:84`) — APK-derived, untested
+
+**Nothing in this section has been seen on a real machine.** It is
+read straight out of the J.O.E. APK (`WifiCommandStartCoffeeTimer`,
+`WifiSendTimeForCoffeeTimer`), cross-checked byte for byte against the
+Bluetooth adapter (`CoffeeMachineAdapterBle2.addCoffeeTimerCommand` /
+`.sendTimeForCoffeeTimer`, whose method names survived obfuscation),
+and verified only against the in-tree simulator.
+
+The coffee timer makes the machine brew **later, on its own**. Two
+frames, in this order:
+
+```
+-> @TM:3C,<blob:40 hex><delay:4 hex><csum:2 hex>     schedule
+<- @tm:…                                             matcher "@tm:.*"
+
+-> @TV:84,<"HH:MM" hex-encoded>                      wall clock
+<- @tv:84
+```
+
+#### The schedule frame
+
+```java
+// WifiCommandStartCoffeeTimer
+String strO = f.o("3C,", StringsKt.V(40, appProduct.c(data) + StringsKt.H(20, "00")),
+                  ExtensionsKt.e(seconds));
+super(priority, f.o("@TM:", strO, ByteOperations.d(strO)), …);
+f("@tm:.*");
+```
+
+* **`appProduct.c(data)` is the very same builder `@TP:` uses** —
+  `WifiCommandStartProduct` is `"@TP:".concat(appProduct.c(data))`. So
+  the payload is the 16-byte recipe blob of §5.9, unchanged:
+  `ProductDef.build_recipe_hex()`.
+* `StringsKt.H(20, "00")` is `"00".repeat(20)`, `StringsKt.V(40, s)` is
+  `s.take(40)` (both verified in the decompiled `kotlin/text/StringsKt`).
+  Net effect: **right-pad the 32-hex blob with `"00"` to 40 hex chars**
+  (20 bytes), truncating anything longer. The four extra bytes are
+  always zero for every bundled product — no product's blob is longer
+  than 16 bytes.
+* `ExtensionsKt.e(int)` is `String.format("%04X", i & 0xFFFF)` — a
+  **16-bit big-endian field, four upper-case hex chars**.
+* The trailing byte is the ordinary `@TM:` write checksum
+  (`ByteOperations.d`, `client._settings_checksum`) computed over
+  `"3C," + blob + delay` — the argument and its comma are *inside* the
+  checksummed string, exactly like a settings write.
+* Unlike a settings write, J.O.E. does **not** wrap this in the
+  `@TS:01` / `@TS:00` keypad lock — the command goes out on the
+  `PMODE`-class priority channel on its own.
+
+Worked example (EF1091 espresso, 90 minutes out):
+
+```
+@TM:3C,02000809000002000100000000000000000000001518F8
+       └────────────── 32 hex: the @TP: recipe blob ──┘└──────┘└──┘└┘
+                                                          │     │   └ checksum
+                                                          │     └ delay 0x1518 = 5400 s
+                                                          └ 8 hex of "00" padding
+```
+
+#### What the integer means
+
+`ExtensionsKt.e()`'s argument is **seconds until the brew starts**, not
+a slot index and not a weekday bitmap. Established from
+`CoffeeTimerViewModel$startCoffeeTimerProduct` and the edit screen's
+"set" handler (`n3/m0.java`), which compute it as:
+
+```java
+long delta = target.getTimeInMillis() - now.getTimeInMillis();   // sec/ms zeroed
+if (delta < 0) delta += 86400000;                                // roll to tomorrow
+stateFlow.setValue((int) (delta / 60000) * 60);                  // whole minutes × 60
+```
+
+so the value on the wire is always a **multiple of 60**. The same
+screen refuses to send at all outside `60000 ms … 57600000 ms`, i.e.
+**1 minute to 16 hours** — comfortably inside the 16-bit field
+(57600 = `0xE100`).
+
+What is *not* established: whether the machine reads the field as
+seconds or merely as "delay units that J.O.E. happens to fill with
+seconds". Every observed value is a multiple of 60, so a
+minutes-scaled firmware reading would be indistinguishable from the
+app's traffic alone. `jura-connect` sends what the app sends.
+
+#### The wall-clock frame
+
+```java
+// WifiSendTimeForCoffeeTimer
+super(priority, "@TV:84,".concat(ExtensionsKt.c(time)), …);
+f("@tv:84");
+```
+
+`ExtensionsKt.c(String)` hex-encodes **each character** as `%02X` — the
+same encoding the handshake uses for the connection id (§4.1). The
+string J.O.E. passes is `String.format("%02d:%02d", HOUR_OF_DAY,
+MINUTE)` of the **target** time, so `07:30` goes out as:
+
+```
+@TV:84,30373A3330        ("0"=30 "7"=37 ":"=3A "3"=33 "0"=30)
+```
+
+Two things worth being explicit about:
+
+* **J.O.E. sends this *after* the schedule, not before.** The order in
+  `startCoffeeTimerProduct` is `addCoffeeTimerCommand(...)` then
+  `sendTimeForCoffeeTimer(...)`. It is therefore *not* a prerequisite
+  clock sync — the countdown is carried by the `@TM:3C` delay field.
+* **The value is the target time, not the current time.** Whether the
+  machine uses it to set its own clock or only to render "ready at
+  07:30" on its display is **unknown**; nothing in the app reads a
+  clock back. It carries no checksum.
+
+`JuraClient.schedule_brew()` mirrors the app's order and skips the
+clock frame when the schedule was refused, so a firmware that doesn't
+implement the timer can't leave the caller blocked on a reply that
+never comes.
+
+#### Rejection tokens
+
+The matcher is the permissive `@tm:.*`, so the short `@TM:`-family
+rejections come back through the same door as a success and must not
+be read as one. `jura-connect` treats `@tm:00` (rejected) and
+`@tm:C2` ("product code, slot or function not supported by machine",
+§5.6) as failures, and anything else beginning `@tm:` as an accept.
+An `@an:error` is a failure too. This mirrors §5.9's `@tp` vs
+`@tp:00` lesson: a reply that *matches* is not a reply that *worked*.
+
+#### Which products may be scheduled
+
+`<PRODUCT … Coffeetimer="true|false">` marks eligibility. Only five of
+the 89 bundled profiles carry the attribute at all (EF1115, EF1115V2,
+EF1119, EF1121, EF1139); on every other machine — EF1091 included —
+it is simply absent. J.O.E.'s
+`Product` model stores it as a **nullable** Boolean and defaults a
+missing one to true:
+
+```java
+this.shouldBeShownInCoffeeTimer = bool != null ? bool.booleanValue() : true;
+```
+
+`ProductDef.coffee_timer` follows that rule exactly: only an explicit
+`Coffeetimer="false"` makes a product ineligible, and
+`schedule_brew()` refuses those client-side before anything reaches
+the wire. EF1121 is the interesting profile — it marks eight of its
+products (Americano, Lungo, Espresso doppio, all four milk drinks,
+Hot water) ineligible while leaving Espresso and Coffee schedulable.
+
+Two machines (EF1106, EF1119) additionally declare
+`<CAPABILITIES CoffeeTimerGrinderFreenessSetting="false"/>`, which
+gates whether the coffee-timer screen offers the grinder-freeness
+parameter (`Argument="F17"`). `jura-connect` never sets F17, so the
+capability is recorded here for completeness and not acted upon.
+
+#### Progress states
+
+While a timer is pending, the machine reports it through the
+`COFFEE_TIMER` family of progress states (`C0` screen saver, `C1`
+status screen, `C4` coffee timer, `C5` PMode countdown) already
+decoded in `jura_connect/progress.py`.
+
+#### Safety
+
+`@TM:3C,` is in `commands.DESTRUCTIVE_PREFIXES` — **with the trailing
+comma**. The tuple is byte-prefix matched and the `@TM:` space is
+shared with ordinary register reads, so listing the bare `@TM:3C`
+would also gate a harmless `mem-read 3C`. Settings and PMode writes
+stay out of the tuple entirely (they are gated per-command via
+`dynamic_danger`); the coffee timer is listed because, unlike them, it
+can make the machine physically pour.
+
+The simulator refuses `@TM:3C,` with `@an:error` like every other
+destructive frame; `SimulatorConfig(coffee_timer=True)` opts a test
+into the modelled wire path, and `coffee_timer_reject=True` models a
+firmware that answers the `@tm:00` rejection instead. The accept reply
+the simulator gives (`@tm:3c`) is **modelled, not observed** — it
+follows the echo-the-argument convention of every other `@TM:` write.
+
+There is no dedicated cancel command. J.O.E.'s
+`CoffeeTimerViewModel.cancelCoffeeTimer` sends
+`CoffeeMachineAdapter.cancelProductStep()` — plain **`@TG:FF`**, the
+generic "cancel the current product step" frame — and then clears its
+own room database. `@TG:FF` is the `cancel` command here — it is
+deliberately *not* in `DESTRUCTIVE_PREFIXES` (see §5.8: it aborts a
+step rather than resetting anything), so `cancel` reaches it without
+the gate. Whether it actually clears a *pending* timer (as opposed to
+aborting a running brew) is untested.

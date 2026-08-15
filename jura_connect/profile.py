@@ -801,6 +801,14 @@ class ProductDef:
     preselections: frozenset[str] = frozenset()
     # Product code of this product's double (old T-protocol), or None.
     double_code: int | None = None
+    # Whether the machine XML lets this product be scheduled through the
+    # coffee timer (``Coffeetimer="false"`` on the PRODUCT element).
+    # J.O.E.'s ``Product`` model stores the attribute as a *nullable*
+    # Boolean and defaults a missing one to true
+    # (``shouldBeShownInCoffeeTimer = bool ?: true``), so only an
+    # explicit "false" makes a product ineligible. Six of the 89
+    # bundled profiles carry the attribute at all. See PROTOCOL.md §5.12.
+    coffee_timer: bool = True
 
     def param(self, kind: str) -> ProductParam | None:
         """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
@@ -1357,6 +1365,9 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         # reports their counters) but flagged so a UI can hide them.
         active = (product.get("Active") or "").strip().lower() != "false"
         preselections, double_code = _parse_preselection(product)
+        # Same "absent means allowed" rule J.O.E. applies to
+        # shouldBeShownInCoffeeTimer.
+        coffee_timer = (product.get("Coffeetimer") or "").strip().lower() != "false"
         products.append(
             ProductDef(
                 code=code_int,
@@ -1370,6 +1381,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 kind=(product.get("P_Kind") or "").strip().upper(),
                 preselections=preselections,
                 double_code=double_code,
+                coffee_timer=coffee_timer,
             )
         )
 
