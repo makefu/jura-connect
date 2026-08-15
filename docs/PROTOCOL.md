@@ -275,8 +275,10 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | Send             | Reply prefix      | Decoded type | Notes |
 | ---------------- | ----------------- | ------------ | ----- |
 | `@HP:p,c,h`      | `@hp4` / `@hp5`   | `HandshakeResult` | authentication |
-| `@HE`            | _none_            | —            | polite close |
-| `@HU?`           | `@TF:<hex>` (status frame) | `MachineStatus` | status request — the dongle just emits the next status frame |
+| _(empty frame)_  | _none_            | —            | close the session — what J.O.E.'s `WifiCommandCloseConnection` sends, and what `JuraClient.close()` sends |
+| `@HE`            | `@he:ok`          | —            | **OTA end** (`WifiCommandOTAEnd`), not a close verb — see below |
+| `@HU?`           | `@hu:<3 hex>` (e.g. `@hu:800`) | — | milk-cooler update status (`WifiCommandMilkCoolerUpdateStatus`) — **not** a status request; see below |
+| `@TG:FF`         | `@tg:FF`          | str          | cancel the running product step (`WifiCommandCancelProductStep`) — the "abort this brew" verb |
 | `@TG:43`         | `@tg:43<12 bytes hex>` | `MaintenanceCounters` | 6 × big-endian u16 |
 | `@TG:C0`         | `@tg:C0<3 bytes hex>` | `MaintenancePercent` | 1 byte per cleaning / filter / descale (`0xFF` = N/A) |
 | `@TS:01`         | `@TB` then `@ts`  | str | lock the front-panel display |
@@ -287,13 +289,33 @@ PIN itself is never shown by `creds --json` (only `pin_stored: true`).
 | `@TM:50`         | `@tm:50,<num_slots><checksum>` | `int`        | programmable-recipe slot count — see §5.6 |
 | `@TM:42,<slot>`  | `@tm:42,<slot>,<product_code>...` | `PModeSlot` | per-slot product code; `@tm:C2` = not supported on this machine — see §5.6 |
 
+#### There is no "read status" command
+
+`@HU?` was long assumed to be a status request because probes that sent
+it usually saw a `@TF:` frame right after. The APK settles it: `@HU?` is
+`WifiCommandMilkCoolerUpdateStatus` and its matcher is
+`@hu:[0-9a-fA-F]{3}` — `@hu:800` *is* the answer to `@HU?`. The `@TF:`
+that followed was just the dongle's next periodic broadcast arriving.
+
+J.O.E. never polls for status at all: `TCPReceiveHandler` routes pushed
+`@TF:` frames as they land. `JuraClient.read_status()` does the same —
+it sends nothing and returns the next broadcast. `read_status(nudge=True)`
+still emits `@HU?` first, as an escape hatch for firmwares that want
+traffic on the socket, but the status always comes from the pushed
+`@TF:` frame.
+
+The same class of mislabel applies to `@HE`: it is `WifiCommandOTAEnd`
+(expects `@he:ok`, part of a firmware-update session), not "polite
+close". The app closes a session with an **empty frame** — a frame whose
+cleartext body is just the inner CRLF. `JuraClient.close()` sends that.
+
 ### 5.2 Unsolicited frames (received)
 
 | Prefix     | Meaning |
 | ---------- | ------- |
-| `@TF:<hex>` | full machine status snapshot — alert bits, same layout as the discovery tail |
+| `@TF:<hex>` | full machine status snapshot — alert bits, same layout as the discovery tail; **pushed periodically, never requested** |
 | `@TV:<hex>` | brewing-in-progress / product progress |
-| `@hu:<code>` | heartbeat acknowledgement: `ok` / `wait` / `busy` / `abort` / `error` |
+| `@hu:<code>` | milk-cooler / OTA-family acknowledgement code — 3 hex chars (`800` seen on Kaffeebert); also carries `ok` / `wait` / `busy` / `abort` / `error` tails on other verbs |
 
 ### 5.3 Maintenance counter layout (`@TG:43`)
 
@@ -667,8 +689,7 @@ the same prefix check.
 | `@TG:24` | start `Cleaning` |
 | `@TG:25` | start descaling (`descale` command) |
 | `@TG:26` | start `FilterChange` |
-| `@TG:7E` | reset maintenance counters |
-| `@TG:FF` | reset (something) |
+| `@TG:7E` | skip a quality-assistant step (`WifiCommandCancelQualityAssistantStep`); bare = one step, `@TG:7E,FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF` = all. **Also observed zeroing every maintenance counter on TT237W** — see below |
 | `@TF:02` | restart machine |
 | `@AN:02` | power off |
 | `@TP:<recipe blob>` | start brewing a product — see §5.9 |
@@ -679,6 +700,20 @@ the same prefix check.
 
 Use these only via raw `JuraClient.request()` and only with explicit
 intent — running `@TG:24` will start a real cleaning cycle.
+
+**`@TG:7E` — two readings, both irreversible.** The APK names it
+`WifiCommandCancelQualityAssistantStep`, and that is how the app uses
+it. But an accidental `@TG:7E` during this project's early probing
+zeroed the maintenance counters on a real TT237W S8 EB, which is why it
+was named `reset-counters` here for a long time. Both behaviours may
+exist across firmware families; nobody should re-probe this on hardware
+to find out. The registry exposes it as `skip-quality-step [one|all]`,
+still gated, with a danger string that states both readings.
+
+**`@TG:FF` is not destructive.** It was listed here as "reset
+(something)"; the APK shows `WifiCommandCancelProductStep`, i.e. cancel
+whatever product step is running. It moved to §5.1 and to the
+non-gated `cancel` command.
 
 ### 5.9 Product start (`@TP:`) — the recipe blob (verified live)
 
@@ -903,8 +938,8 @@ machine.
 │          │           ┌─────────────┐@HP:<pin>,<conn_id>,<hash>┌───────────┐
 │          │           │ JuraClient  │ ───────────────────► │  dongle       │
 │          │           │             │ ◄─── @hp4 ──────────│               │
-│          │           │             │ @TG:43, @TG:C0, @HU? │               │
-│          │           │             │ ◄─── @tg:43..., @tg:C0..., @TF:... ──│
+│          │           │             │ @TG:43, @TG:C0       │               │
+│          │           │             │ ◄─ @tg:43…, @tg:C0…, pushed @TF:… ───│
 │          │           └─────────────┘                      └───────────────┘
 │          │
 │ <- output formatted MachineInfo
@@ -938,10 +973,11 @@ breaks both halves of the test-suite simultaneously.
 
 ## 9. Known unknowns / next steps
 
-* `@HU?` returned `@hu:800` in some probes but `@TF:<hex>` in others —
-  the dongle may have multiple response code paths for the same input
-  depending on internal state. Currently the client just waits for the
-  next `@TF:` and treats that as the status answer.
+* `@TG:7E` means "skip a quality-assistant step" in the APK but zeroed
+  the maintenance counters on a TT237W S8 EB. Whether that is a
+  firmware difference or a side effect of the skip is unresolved, and
+  **must not** be resolved by probing hardware — the counters cannot be
+  restored. See §5.8.
 * Locked-screen behaviour: `@TS:01` followed by `@TS:00` works
   cleanly, but issuing `@TS:01` and then disconnecting leaves the
   display locked until power cycle.

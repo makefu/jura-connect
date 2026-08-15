@@ -53,14 +53,14 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | Wire | J.O.E. class | `jura-connect` |
 | ---- | ------------ | -------------- |
 | `@HP:<pin>,<connid>,<hash>` | `WifiCommandConnectionSetup` | ✅ `JuraClient.connect` / `pair` |
-| *(empty frame)* | `WifiCommandCloseConnection` | ⚠ we send `@HE` instead |
-| `@HE` → `@he:ok` | `WifiCommandOTAEnd` | ⚠ used as "polite close" |
+| *(empty frame)* | `WifiCommandCloseConnection` | ✅ `JuraClient.close` |
+| `@HE` → `@he:ok` | `WifiCommandOTAEnd` | ❌ (no longer sent; simulator still accepts it) |
 | `@HB` → `@hb:ok` | `WifiCommandBootloaderMode` | ❌ |
 | `@HD:<payload>` | `WifiCommandSendApplicationBin` | ❌ |
 | `@HO:<payload>` → `@ho:ok` | `WifiCommandSendApplicationDat` | ❌ |
 | `@HT:3` → `@ht` | `WifiCommandRestartFrog` | ❌ (we restart the *machine*, not the dongle) |
 | `@HU` → `@hu:(ok\|wait\|busy\|abort\|error)` | `WifiCommandMilkCoolerUpdateStart` | ❌ |
-| `@HU?` → `@hu:<3 hex>` | `WifiCommandMilkCoolerUpdateStatus` | ⚠ used as the status poll |
+| `@HU?` → `@hu:<3 hex>` | `WifiCommandMilkCoolerUpdateStatus` | ❌ as such; sent only by `read_status(nudge=True)` |
 | `@HW:01,<pin>` | `WifiCommandSetPinCode` | ✅ `set-pin` |
 | `@HW:80,<ssid>` | `WifiCommandSetSSID` | ✅ `set-ssid` |
 | `@HW:81,<pwd>` | `WifiCommandSetPassword` | ✅ `set-password` |
@@ -68,8 +68,8 @@ Every `WifiCommand*` class in the APK, its wire form, and where we stand.
 | `@TF:02` → `@tf:02` | `WifiCommandRestartCoffeeMachine` | ✅ `restart` |
 | `@TG:01` → `@tg:(01\|00)` | `WiFiCommandNextProductStep` | ❌ |
 | `@TG:04` / `@TG:10` | `WifiCommandProcessAccept` | ❌ |
-| `@TG:7E` / `@TG:7E,FF×16` → `@tg:7E` | `WifiCommandCancelQualityAssistantStep` | ⚠ exposed as `reset-counters` |
-| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ⚠ exposed as destructive "reset (broad)" |
+| `@TG:7E` / `@TG:7E,FF×16` → `@tg:7E` | `WifiCommandCancelQualityAssistantStep` | ✅ `skip-quality-step [one\|all]` (gated — see §8.1) |
+| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ✅ `cancel` (not gated) |
 | `@TG:21/23/24/25/26` | `WifiCommandStartProcess` | ✅ fire-and-forget (`clean`, `descale`, …) |
 | `@TG:43` → `@tg:43…` | `WifiCommandReadMaintenanceCounter` | ✅ `counters` |
 | `@TG:C0` → `@tg:C0…` | `WifiCommandReadMaintenanceStatus` | ✅ `percent` |
@@ -264,30 +264,43 @@ These are the highest-value items, because they are *wrong today*, not
 merely absent. All were read out of the APK; none has been re-probed on
 hardware (and two of them must not be).
 
+**Items 1–4 are fixed** (see `PROTOCOL.md` §5.1 / §5.8); they stay here
+with their resolution because the reasoning is the interesting part.
+
 1. **`@TG:7E` is `WifiCommandCancelQualityAssistantStep`**, not
    "reset maintenance counters". The class sends bare `@TG:7E` to skip
    one quality-assistant step and `@TG:7E,FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF`
-   to skip all. We expose it as `reset-counters` with a "irreversible"
-   danger string. `AGENTS.md` records that an accidental `@TG:7E` *did*
-   reset counters on a real machine, so both behaviours may exist across
-   firmware — but the name and the danger text are at best incomplete.
-   **Do not re-probe this on hardware to find out.**
+   to skip all. `AGENTS.md` records that an accidental `@TG:7E` *did*
+   reset counters on a real TT237W, so both behaviours may exist across
+   firmware. **Do not re-probe this on hardware to find out.**
+   *Fixed:* renamed `reset-counters` → `skip-quality-step [one|all]`,
+   the skip-all argument is implemented, `@TG:7E` **stays** in
+   `DESTRUCTIVE_PREFIXES` and stays gated, and the danger string now
+   states both readings and that neither is reversible.
 2. **`@TG:FF` is `WifiCommandCancelProductStep`** — cancel the running
-   product step. We list it as a destructive "reset (broad)". Probably
-   harmless and probably useful (it is the natural "abort this brew").
+   product step, i.e. the natural "abort this brew".
+   *Fixed:* removed from `DESTRUCTIVE_PREFIXES` (so the `raw` escape
+   hatch stops gating it too) and exposed as the ungated `cancel`
+   command with a tolerant `(?i)^@tg` reply matcher; the simulator
+   answers `@tg:FF`.
 3. **`@HE` is `WifiCommandOTAEnd`** (expects `@he:ok`), while J.O.E.'s
-   `WifiCommandCloseConnection` sends an *empty* frame. `client.close()`
-   sends `@HE` as a "polite close" (`client.py:296`). Harmless in
-   practice — nothing observed it doing anything — but it is an OTA
+   `WifiCommandCloseConnection` sends an *empty* frame. It is an OTA
    verb, and sending it outside an OTA session is not obviously a no-op
    on every firmware.
+   *Fixed:* `JuraClient.close()` now sends the empty frame (still
+   best-effort / exception-safe). The simulator accepts both the empty
+   frame and `@HE` as session teardown.
 4. **`@HU?` is `WifiCommandMilkCoolerUpdateStatus`**, matching
    `@hu:[0-9a-fA-F]{3}`. This finally explains `PROTOCOL.md` §9's
    "`@HU?` returned `@hu:800` in some probes but `@TF:` in others": the
    `@hu:800` *is* the correct answer to `@HU?`, and the `@TF:` we key
    on is just the next unsolicited status frame arriving. J.O.E. never
    polls for status — `TCPReceiveHandler` routes pushed `@TF:` frames.
-   Our `read_status` works by accident.
+   *Fixed:* `read_status()` sends nothing and returns the next pushed
+   `@TF:` frame; `read_status(nudge=True)` still emits `@HU?` for
+   firmwares that want traffic on the socket, documented as a nudge
+   rather than a query. The simulator answers `@HU?` with `@hu:800`
+   and the §9 bullet is gone.
 5. **`@TG:43` field order is per-machine.** We hard-code
    `cleaning, filter_change, descale, cappu_rinse, coffee_rinse,
    cappu_clean`. J.O.E. reads the order from the XML's
@@ -331,10 +344,10 @@ protocol meaning:
 1. **Fix §8.5** (XML-driven `@TG:43` field order). Pure parsing, no
    hardware, fixes 21 machine families, testable against the bundled
    XMLs.
-2. **Re-label §8.1–8.4** in `commands.py` / `PROTOCOL.md`. Move
-   `@TG:FF` out of the destructive list (it is a cancel), keep `@TG:7E`
-   gated but document both readings, stop calling `@HE` a close, note
-   why `@HU?` works.
+2. ~~**Re-label §8.1–8.4**~~ — **done**: `@TG:FF` is out of the
+   destructive list and exposed as `cancel`, `@TG:7E` is still gated as
+   `skip-quality-step` with both readings documented, `close()` sends
+   the empty frame, and `read_status()` waits for the pushed `@TF:`.
 3. **Decode `@TV:`** into a `ProductProgress` dataclass with the
    `ProgressState` enum. Unlocks "is it done yet" for `brew` and is a
    prerequisite for anything interactive.
