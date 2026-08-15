@@ -491,6 +491,14 @@ _DESTRUCTIVE_INVOCATIONS = [
     # profile-driven paths.
     ("pmode-set-product", ["0202080900000200000000000000000004"]),
     ("pmode-set-slot", ["3", "0202080900000200000000000000000004"]),
+    # Interactive maintenance processes: starting one, confirming the
+    # step it parks on, and advancing to the next one all drive a real
+    # cycle. See docs/PROTOCOL.md §5.11.
+    ("process-start", ["cleaning"]),
+    ("process-run", ["cleaning"]),
+    ("process-accept", []),
+    ("process-accept", ["@TG:04"]),
+    ("process-next", []),
 ]
 
 

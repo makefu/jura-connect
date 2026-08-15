@@ -47,15 +47,132 @@ _XML_TYPE_TO_SEVERITY = {
 MAINTENANCE_COUNTER_BANK = "@TG:43"
 MAINTENANCE_PERCENT_BANK = "@TG:C0"
 
+#: Every product kind (J.O.E.'s ``Product.ProductGroup``) an ``<ALERT
+#: Blocked=…>`` token or a ``<PRODUCT P_Kind=…>`` attribute can name.
+#: ``A`` and ``NONE`` exist in the app's enum but appear in no bundled
+#: XML; the five kinds actually used are ``C``, ``M``, ``CM``, ``T``,
+#: ``P``.
+PRODUCT_KINDS: tuple[str, ...] = ("C", "M", "CM", "T", "TM", "P")
+
+
+def expand_blocked_kinds(token: str | None) -> tuple[str, ...]:
+    """Product kinds blocked by an ``<ALERT Blocked="…">`` token.
+
+    Jura's own XML comment (see ``EF0000/3.8.xml``) says only that
+    ``Blocked="CM"`` "block[s] products of Coffe, Milk and Coffe + Milk".
+    The app models the attribute as a single ``ProductGroup`` enum value
+    and the code that consumes it did not survive obfuscation, so the
+    expansion rule here is **our reading** of that comment: a token
+    blocks every kind that shares at least one letter with it. That makes
+    ``Blocked="M"`` (no milk) block ``M``, ``CM`` and ``TM`` — i.e. a
+    cappuccino is unbrewable when the milk runs out, which is what the
+    machine actually does. Returns ``()`` for ``None`` or an unknown
+    token.
+    """
+    if not token:
+        return ()
+    letters = {c for c in token.strip().upper() if c.isalpha()}
+    if not letters:
+        return ()
+    return tuple(kind for kind in PRODUCT_KINDS if letters & set(kind))
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class AlertDef:
-    """One ALERT entry from the machine XML."""
+    """One ALERT entry from the machine XML.
+
+    Beyond the bit and its name the XML carries what the alert *does*:
+    ``Type``/``Blocked`` say which products it stops (see
+    :attr:`blocked_kinds`) and ``Process`` names the maintenance process
+    that clears it (:attr:`process`, e.g. ``"cleaning"`` — the same
+    vocabulary as :data:`jura_connect.progress.PROCESS_CODES`). Every
+    field after ``raw_name`` defaults, so a profile that omits them still
+    constructs.
+    """
 
     bit: int
     name: str  # snake_case, derived from XML Name attribute
     severity: str  # "error" / "info" / "process"
     raw_name: str  # the original XML Name (with spaces)
+    # The raw XML Type: "block" (stops everything), "info", "ip"
+    # (in-process reminder), or None for a purely cosmetic alert.
+    raw_type: str | None = None
+    # The raw XML Blocked token ("C", "M", "CM", "TM", "P"), or None.
+    blocked: str | None = None
+    # Product kinds this alert blocks *right now* when it is active. For
+    # Type="block" that is every kind in PRODUCT_KINDS regardless of the
+    # Blocked attribute; otherwise it is expand_blocked_kinds(blocked).
+    blocked_kinds: tuple[str, ...] = ()
+    # Maintenance process that clears the alert, snake_case and
+    # normalised the same way ProcessDef.name is ("descale", not
+    # "Decalc"). None when the XML declares no Process.
+    process: str | None = None
+    process_button: str | None = None  # translation key of the button
+    title: str | None = None  # translation key (integer as a string)
+    message: str | None = None  # translation key
+    picture: str | None = None  # icon file name shipped with the app
+    cancel_button: str | None = None  # translation key, always "72"
+    # <ALERT Disabled="0406070A2E"> — individual product codes the alert
+    # disables, as opposed to whole kinds. Watch-only in J.O.E.
+    disabled_products: tuple[int, ...] = ()
+
+    @property
+    def blocks_everything(self) -> bool:
+        """True for ``Type="block"`` — no product can be started."""
+        return self.raw_type == "block"
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProcessDef:
+    """One ``<PROCESS>`` entry: a maintenance cycle the machine can run.
+
+    ``execute_command`` is the wire verb J.O.E.'s
+    ``WifiCommandStartProcess`` sends (``@TG:24`` for cleaning); the
+    machine answers with the lower-cased echo. ``name`` is the XML
+    ``Type`` normalised to snake_case with ``Decalc`` renamed
+    ``descale``, which makes it identical to the value
+    :data:`jura_connect.progress.PROCESS_CODES` gives for the same
+    command byte.
+    """
+
+    name: str  # "cleaning", "descale", "filter_change", …
+    raw_type: str  # the XML Type verbatim: "Cleaning", "Decalc", …
+    execute_command: str  # "@TG:24"
+    progress: bool  # Progress="true": the machine pushes @TV: frames
+    title: str | None = None  # translation key
+    picture: str | None = None
+    pdf_url: str | None = None
+    video_url: str | None = None
+
+    @property
+    def code(self) -> int:
+        """Command byte of :attr:`execute_command` (``0x24`` for cleaning)."""
+        return int(self.execute_command.rsplit(":", 1)[-1], 16)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class StateDef:
+    """One ``<STATE>`` entry: a step the machine can drive the client to.
+
+    Mirrors the app's ``StateArgument`` (value, name, title, hasProgress,
+    message, picture, acceptCommand). :attr:`value` is the same byte as
+    :attr:`jura_connect.progress.ProductProgress.state_code`, so a pushed
+    ``@TV:`` frame resolves against this table.
+    """
+
+    value: int  # state code, e.g. 0x26
+    name: str  # snake_case, e.g. "press_rinse"
+    raw_name: str  # the XML Name verbatim, e.g. "Press Rinse"
+    accept_command: str | None = None  # "@TG:10" / "@TG:04"
+    title: str | None = None  # translation key
+    message: str | None = None  # translation key
+    picture: str | None = None
+    progress: bool = False  # Progress="true"
+
+    @property
+    def needs_confirmation(self) -> bool:
+        """True when the machine waits for an explicit accept here."""
+        return self.accept_command is not None
 
 
 def _snake(name: str) -> str:
@@ -447,6 +564,11 @@ class ProductDef:
     # does not expose this product in the product-programming (PMode)
     # UI at all — J.O.E. never sends a ``@TM:41`` for it.
     product_settings: bool = True
+    # <PRODUCT P_Kind="…">: the product's kind, one of PRODUCT_KINDS
+    # ("C" coffee, "M" milk, "CM" coffee+milk, "T" tea/water, "P"
+    # powder). Empty when the XML omits it. What an active alert's
+    # AlertDef.blocked_kinds is matched against.
+    kind: str = ""
 
     def param(self, kind: str) -> ProductParam | None:
         """Find a recipe parameter by kind (e.g. ``"water_amount"``)."""
@@ -640,6 +762,14 @@ class MachineProfile:
     # XML carries one (57 of the 89 bundled profiles). See
     # :class:`SettingsBank` and docs/PROTOCOL.md §5.7.
     settings_bank: SettingsBank | None = None
+    # <PROCESSES><PROCESS> — the maintenance cycles this machine can run,
+    # in document order. Every bundled profile declares between four and
+    # six. See docs/PROTOCOL.md §5.11.
+    processes: tuple[ProcessDef, ...] = ()
+    # <PROGRESS_STATE_INTAKE><STATE> — the machine's step table (83
+    # entries in every bundled profile), keyed by the same byte the
+    # ``@TV:`` progress frames carry. See docs/PROTOCOL.md §5.11.
+    states: tuple[StateDef, ...] = ()
 
     # --- programmable-recipe (PMode) declarations ---------------------
     # ``<MACHINESETTINGS Productprogramming="true|false">``: the
@@ -668,11 +798,19 @@ class MachineProfile:
     setting_by_name: dict[str, SettingDef] = dataclasses.field(
         repr=False, default_factory=dict
     )
+    process_by_name: dict[str, ProcessDef] = dataclasses.field(
+        repr=False, default_factory=dict
+    )
+    state_by_value: dict[int, StateDef] = dataclasses.field(
+        repr=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alert_by_bit", {a.bit: a for a in self.alerts})
         object.__setattr__(self, "product_by_code", {p.code: p for p in self.products})
         object.__setattr__(self, "setting_by_name", {s.name: s for s in self.settings})
+        object.__setattr__(self, "process_by_name", {p.name: p for p in self.processes})
+        object.__setattr__(self, "state_by_value", {s.value: s for s in self.states})
 
     def declares_counter_bank(self, command: str) -> bool:
         """Whether the XML declares ``command`` as a counter bank.
@@ -720,12 +858,29 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         # The Jura XMLs spell the descaling alert "decalc alert"; expose
         # it under the consistent "descale" key the rest of the API uses.
         name = _snake(raw_name).replace("decalc", "descale")
+        blocked = alert.get("Blocked")
+        # Type="block" stops every product regardless of Blocked (which
+        # such alerts never carry); info/ip block only what Blocked names.
+        blocked_kinds = (
+            PRODUCT_KINDS if xml_type == "block" else expand_blocked_kinds(blocked)
+        )
+        raw_process = alert.get("Process")
         alerts.append(
             AlertDef(
                 bit=bit,
                 name=name,
                 severity=severity,
                 raw_name=raw_name,
+                raw_type=xml_type,
+                blocked=blocked,
+                blocked_kinds=blocked_kinds,
+                process=_process_name(raw_process),
+                process_button=alert.get("ProcessButton"),
+                title=alert.get("Title"),
+                message=alert.get("Message"),
+                picture=alert.get("Picture"),
+                cancel_button=alert.get("CancelButton"),
+                disabled_products=_hex_byte_list(alert.get("Disabled")),
             )
         )
 
@@ -762,6 +917,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
                 product_settings=_xml_bool(
                     product.get("ProductSettings"), default=True
                 ),
+                kind=(product.get("P_Kind") or "").strip().upper(),
             )
         )
 
@@ -806,7 +962,108 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         product_programming=product_programming,
         pmode_slot_count=pmode_slot_count,
         intake_f18=intake_f18,
+        processes=_parse_processes(root),
+        states=_parse_states(root),
     )
+
+
+def _process_name(raw_type: str | None) -> str | None:
+    """Normalise an XML process ``Type`` to the library's process name.
+
+    ``"Decalc"`` becomes ``"descale"`` for the same reason the alert
+    names do — the rest of the API (counters, percent bank, named
+    commands, :data:`jura_connect.progress.PROCESS_CODES`) says
+    "descale". Returns ``None`` for a missing/empty attribute.
+    """
+    if not raw_type or not raw_type.strip():
+        return None
+    return _snake(raw_type).replace("decalc", "descale")
+
+
+def _hex_byte_list(raw: str | None) -> tuple[int, ...]:
+    """Split a concatenated hex-byte attribute into ints.
+
+    ``Disabled="0406070A2E"`` names five product codes, exactly the way
+    the app's ``Alert`` constructor chops the string into two-character
+    substrings. A malformed value yields ``()`` rather than raising.
+    """
+    text = (raw or "").strip()
+    if not text or len(text) % 2:
+        return ()
+    try:
+        return tuple(bytes.fromhex(text))
+    except ValueError:
+        return ()
+
+
+def _parse_processes(root: ET.Element) -> tuple[ProcessDef, ...]:
+    """Parse ``<PROCESSES><PROCESS>`` into :class:`ProcessDef` entries.
+
+    Elements without a ``Type`` or an ``ExecuteCommand`` are skipped:
+    without the wire verb there is nothing to start. ``Progress="true"``
+    means the machine pushes ``@TV:`` frames while the cycle runs.
+    """
+    processes: list[ProcessDef] = []
+    seen: set[str] = set()
+    for el in root.findall(".//{*}PROCESS"):
+        name = _process_name(el.get("Type"))
+        command = (el.get("ExecuteCommand") or "").strip().upper()
+        if name is None or not command:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        processes.append(
+            ProcessDef(
+                name=name,
+                raw_type=(el.get("Type") or "").strip(),
+                execute_command=command,
+                progress=(el.get("Progress") or "").strip().lower() == "true",
+                title=el.get("Title"),
+                picture=el.get("Picture"),
+                pdf_url=el.get("PDFURL"),
+                video_url=el.get("VideoURL"),
+            )
+        )
+    return tuple(processes)
+
+
+def _parse_states(root: ET.Element) -> tuple[StateDef, ...]:
+    """Parse ``<PROGRESS_STATE_INTAKE><STATE>`` into :class:`StateDef`.
+
+    ``Value`` is a hex byte; entries with a missing/unparsable value or
+    an empty name are skipped. Note the XMLs contain ``<STATE Value="0E"
+    Name ="Alert"/>`` — a space before the ``=`` — which ElementTree
+    handles, so the attribute names here are the plain ones.
+    """
+    states: list[StateDef] = []
+    seen: set[int] = set()
+    for el in root.findall(".//{*}STATE"):
+        raw_name = (el.get("Name") or "").strip()
+        raw_value = (el.get("Value") or "").strip()
+        if not raw_name or not raw_value:
+            continue
+        try:
+            value = int(raw_value, 16)
+        except ValueError:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        accept = (el.get("AcceptCommand") or "").strip().upper() or None
+        states.append(
+            StateDef(
+                value=value,
+                name=_snake(raw_name),
+                raw_name=raw_name,
+                accept_command=accept,
+                title=el.get("Title"),
+                message=el.get("Message"),
+                picture=el.get("Picture"),
+                progress=(el.get("Progress") or "").strip().lower() == "true",
+            )
+        )
+    return tuple(states)
 
 
 def _bank_fields(root: ET.Element, command: str) -> tuple[str, ...]:

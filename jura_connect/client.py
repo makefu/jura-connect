@@ -42,6 +42,14 @@ import uuid
 from collections.abc import Callable, Iterator
 
 from . import profile, protocol
+from .process import (
+    ProcessRun,
+    ProcessRunner,
+    ProcessStep,
+    StepDecider,
+    resolve_process,
+    watch_states,
+)
 from .profile import PMODE_BLOB_BYTES, MachineProfile, ProductDef, SettingDef
 from .progress import ProductProgress, is_progress_frame
 
@@ -480,6 +488,60 @@ class JuraClient:
             if update.is_complete:
                 break
         return collected
+
+    # -- maintenance processes -----------------------------------------
+    def process_runner(self, name: str) -> ProcessRunner:
+        """Bind a maintenance process to this session (sends nothing).
+
+        ``name`` is a process name (``"cleaning"``, ``"descale"``,
+        ``"filter_change"``, ``"cappu_clean"``, ``"cappu_rinse"``,
+        ``"coffee_rinse"``); it is resolved against :attr:`profile` when
+        one is loaded, so a machine that does not declare the process
+        refuses instead of guessing. See
+        :class:`jura_connect.process.ProcessRunner` for the step-by-step
+        API — and note that every confirmation it sends advances a real
+        cycle on real hardware.
+        """
+        return ProcessRunner(self, resolve_process(name, self.profile))
+
+    def run_process(
+        self,
+        name: str,
+        *,
+        timeout: float = 900.0,
+        step_timeout: float = 120.0,
+        start_timeout: float = 6.0,
+        auto_accept: bool = False,
+        on_step: StepDecider | None = None,
+    ) -> ProcessRun:
+        """Start a maintenance process and follow it to the end.
+
+        Thin wrapper over :meth:`ProcessRunner.run`. **Destructive**: it
+        starts a real cycle (and, with ``auto_accept``, confirms every
+        prompt unattended). The named-command layer gates it; library
+        callers reaching for this are opting in.
+        """
+        return self.process_runner(name).run(
+            timeout=timeout,
+            step_timeout=step_timeout,
+            start_timeout=start_timeout,
+            auto_accept=auto_accept,
+            on_step=on_step,
+        )
+
+    def watch_process(
+        self,
+        *,
+        timeout: float = 60.0,
+        on_step: Callable[[ProcessStep], None] | None = None,
+    ) -> ProcessRun:
+        """Listen to the machine's state stream without sending anything.
+
+        Read-only counterpart of :meth:`run_process`: decodes the pushed
+        ``@TV:`` frames of a cycle somebody started elsewhere (front
+        panel, J.O.E. app) into named steps.
+        """
+        return watch_states(self, timeout=timeout, on_step=on_step)
 
     # -- structured reads ---------------------------------------------
     def read_maintenance_counter(
@@ -1831,6 +1893,15 @@ class MachineStatus:
     backwards compatibility — it's what older callers and the legacy
     ``status`` CLI output have always returned. Prefer ``errors`` to
     decide whether the machine is genuinely stuck.
+
+    With a profile the frame also answers "can I brew right now?": every
+    active alert contributes the product kinds it blocks
+    (:attr:`blocked_kinds`, and :attr:`blocked_products` for the
+    machine's own product names), and every active alert that declares a
+    maintenance ``Process`` contributes the process that clears it
+    (:attr:`alert_processes`). Those three fields stay empty without a
+    profile — the hard-coded fallback codebook carries no such metadata.
+    See docs/PROTOCOL.md §5.11.
     """
 
     raw: bytes
@@ -1838,6 +1909,33 @@ class MachineStatus:
     errors: tuple[str, ...]
     info: tuple[str, ...]
     process: tuple[str, ...]
+    # Product kinds ("C", "M", "CM", "T", "TM", "P") no product of which
+    # can be started while these alerts are active.
+    blocked_kinds: tuple[str, ...] = ()
+    # Names of the active alerts that block anything at all.
+    blocking_alerts: tuple[str, ...] = ()
+    # (alert name, maintenance process that clears it) for every active
+    # alert whose XML declares a Process — e.g.
+    # ("cleaning_alert", "cleaning"). Feed the process name to
+    # ``jura_connect.process.resolve_process``.
+    alert_processes: tuple[tuple[str, str], ...] = ()
+    # Profile product names currently blocked, derived from the profile's
+    # <PRODUCT P_Kind=…> against ``blocked_kinds``.
+    blocked_products: tuple[str, ...] = ()
+
+    def can_brew_kind(self, kind: str) -> bool:
+        """Whether a product of kind ``kind`` can be started right now.
+
+        ``kind`` is a P_Kind token ("C", "M", "CM", "T", "TM", "P").
+        Always True without a profile — the fallback codebook does not
+        know what any alert blocks, and claiming otherwise would be a
+        guess.
+        """
+        return kind.strip().upper() not in self.blocked_kinds
+
+    def can_brew(self, product: str) -> bool:
+        """Whether the named profile product can be started right now."""
+        return product.strip().lower() not in self.blocked_products
 
     @classmethod
     def parse(cls, reply: str, profile: MachineProfile | None = None) -> MachineStatus:
@@ -1854,44 +1952,75 @@ class MachineStatus:
         errors: list[str] = []
         info: list[str] = []
         process: list[str] = []
+        blocked_kinds: list[str] = []
+        blocking: list[str] = []
+        alert_processes: list[tuple[str, str]] = []
         bits: dict[int, tuple[str, str]]
-        if profile is not None and getattr(profile, "alert_by_bit", None):
-            bits = {
-                bit: (alert.name, alert.severity)
-                for bit, alert in profile.alert_by_bit.items()
-            }
+        alerts = profile.alert_by_bit if profile is not None else {}
+        if alerts:
+            bits = {bit: (a.name, a.severity) for bit, a in alerts.items()}
         else:
             bits = _STATUS_BITS
         for bit_index, (name, severity) in bits.items():
             # MSB-first within each byte, per the J.O.E. APK's
             # `Status.a()`: `(1 << (7 - (i%8))) & bArr[i/8]`.
             byte_i, bit_in_byte = divmod(bit_index, 8)
-            if byte_i < len(data) and (data[byte_i] >> (7 - bit_in_byte)) & 1:
-                active.append(name)
-                if severity == "error":
-                    errors.append(name)
-                elif severity == "process":
-                    process.append(name)
-                else:
-                    info.append(name)
+            if byte_i >= len(data) or not (data[byte_i] >> (7 - bit_in_byte)) & 1:
+                continue
+            active.append(name)
+            if severity == "error":
+                errors.append(name)
+            elif severity == "process":
+                process.append(name)
+            else:
+                info.append(name)
+            definition = alerts.get(bit_index)
+            if definition is None:
+                continue
+            if definition.blocked_kinds:
+                blocking.append(name)
+                blocked_kinds.extend(
+                    k for k in definition.blocked_kinds if k not in blocked_kinds
+                )
+            if definition.process is not None:
+                alert_processes.append((name, definition.process))
+        blocked_products: list[str] = []
+        if profile is not None and blocked_kinds:
+            blocked_products = [
+                p.name
+                for p in profile.products
+                if p.kind and p.kind in blocked_kinds and p.name not in blocked_products
+            ]
         return cls(
             raw=data,
             active_alerts=tuple(active),
             errors=tuple(errors),
             info=tuple(info),
             process=tuple(process),
+            blocked_kinds=tuple(blocked_kinds),
+            blocking_alerts=tuple(blocking),
+            alert_processes=tuple(alert_processes),
+            blocked_products=tuple(blocked_products),
         )
 
     def format(self) -> str:
         def _fmt(group: tuple[str, ...]) -> str:
             return ", ".join(group) if group else "(none)"
 
-        return (
-            f"bits={self.raw.hex().upper()}\n"
-            f"  errors  : {_fmt(self.errors)}\n"
-            f"  info    : {_fmt(self.info)}\n"
-            f"  process : {_fmt(self.process)}"
-        )
+        lines = [
+            f"bits={self.raw.hex().upper()}",
+            f"  errors  : {_fmt(self.errors)}",
+            f"  info    : {_fmt(self.info)}",
+            f"  process : {_fmt(self.process)}",
+        ]
+        if self.blocked_kinds:
+            lines.append(f"  blocked : {_fmt(self.blocked_kinds)}")
+        if self.alert_processes:
+            fixes = ", ".join(
+                f"{alert} -> {proc}" for alert, proc in self.alert_processes
+            )
+            lines.append(f"  clear by: {fixes}")
+        return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1900,6 +2029,10 @@ class MachineStatus:
             "errors": list(self.errors),
             "info": list(self.info),
             "process": list(self.process),
+            "blocked_kinds": list(self.blocked_kinds),
+            "blocking_alerts": list(self.blocking_alerts),
+            "alert_processes": dict(self.alert_processes),
+            "blocked_products": list(self.blocked_products),
         }
 
 

@@ -40,6 +40,14 @@ from .client import (
     SPECIAL_COUNTER_BANK,
     JuraClient,
 )
+from .process import (
+    NEXT_STEP_COMMAND,
+    PROCESS_REPLY_MATCH,
+    ProcessCatalogue,
+    ProcessError,
+    available_processes,
+    resolve_accept_command,
+)
 from .profile import RECIPE_BLOB_BYTES
 from .progress import ProgressLog
 
@@ -50,6 +58,14 @@ CommandRunner = Callable[["CommandSpec", JuraClient, "tuple[str, ...]", float], 
 # both :class:`~jura_connect.simulator.Simulator` refuses-by-default and
 # the registry refuses-by-default through the destructive gate.
 DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
+    # The interactive half of a maintenance process: both confirm the
+    # step the machine is parked on (WifiCommandProcessAccept) or move
+    # it to the next one (WiFiCommandNextProductStep), and both advance
+    # a physical cycle that consumes supplies. See docs/PROTOCOL.md
+    # §5.11.
+    b"@TG:01",  # next step
+    b"@TG:04",  # accept (10 of the 89 profiles)
+    b"@TG:10",  # accept (78 of the 89 profiles)
     b"@TG:21",  # CappuClean
     b"@TG:23",  # CappuRinse
     b"@TG:24",  # Cleaning
@@ -953,6 +969,83 @@ def _r_pmode_set_slot(_spec, client, args, timeout):
 
 
 # --------------------------------------------------------------------- #
+# Interactive maintenance processes (see docs/PROTOCOL.md §5.11)
+# --------------------------------------------------------------------- #
+
+
+def _seconds_arg(name: str, args: tuple[str, ...], default: float) -> float:
+    """Parse an optional trailing ``<seconds>`` argument."""
+    if not args or not args[0].strip():
+        return default
+    try:
+        seconds = float(args[0])
+    except ValueError as exc:
+        raise CommandError(
+            f"{name}: <seconds> must be a number, got {args[0]!r}"
+        ) from exc
+    if seconds <= 0:
+        raise CommandError(f"{name}: <seconds> must be > 0, got {args[0]!r}")
+    return seconds
+
+
+def _r_processes(_spec, client, _args, _timeout):
+    """List the maintenance processes the machine declares (no I/O)."""
+    return ProcessCatalogue(
+        processes=available_processes(client.profile),
+        machine=client.profile.code if client.profile is not None else None,
+    )
+
+
+def _r_process_watch(_spec, client, args, timeout):
+    """Decode the machine's pushed state stream. Sends nothing."""
+    seconds = _seconds_arg("process-watch", args, timeout)
+    return client.watch_process(timeout=seconds)
+
+
+def _r_process_start(_spec, client, args, timeout):
+    """Send one process's ExecuteCommand and hand back the raw reply.
+
+    Deliberately non-strict: a machine that refuses (``@an:error``) is
+    reported rather than raised on, so the caller sees what it said.
+    """
+    try:
+        runner = client.process_runner(args[0])
+        return runner.start(timeout=timeout, strict=False)
+    except ProcessError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+def _r_process_run(_spec, client, args, timeout):
+    """Start a process and drive it to the end, confirming every prompt."""
+    seconds = _seconds_arg("process-run", args[1:], max(timeout, 900.0))
+    try:
+        runner = client.process_runner(args[0])
+        reply = runner.start(timeout=timeout, strict=False)
+        if not runner.started:
+            # The machine refused the start; there is no cycle to follow.
+            return reply
+        return runner.follow(
+            timeout=seconds, step_timeout=min(seconds, 120.0), auto_accept=True
+        )
+    except ProcessError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+def _r_process_accept(_spec, client, args, timeout):
+    """Confirm the state the machine is parked on (``@TG:10``/``@TG:04``)."""
+    try:
+        wire = resolve_accept_command(args[0] if args else None, client.profile)
+    except ProcessError as exc:
+        raise CommandError(str(exc)) from exc
+    return client.request(wire, match=PROCESS_REPLY_MATCH, timeout=timeout)
+
+
+def _r_process_next(_spec, client, _args, timeout):
+    """Advance to the next step (``@TG:01``); ``@tg:00`` means rejected."""
+    return client.request(NEXT_STEP_COMMAND, match=PROCESS_REPLY_MATCH, timeout=timeout)
+
+
+# --------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------- #
 
@@ -1410,6 +1503,120 @@ _SPECS: tuple[CommandSpec, ...] = (
         runner=_r_pmode_set_slot,
         destructive=True,
         danger=_PMODE_WRITE_DANGER,
+    ),
+    # ---- interactive processes ----
+    CommandSpec(
+        name="processes",
+        description=(
+            "list the maintenance processes this machine declares "
+            "(from the machine profile; no machine I/O)"
+        ),
+        arguments=(),
+        runner=_r_processes,
+    ),
+    CommandSpec(
+        name="process-watch",
+        description=(
+            "decode the machine's pushed maintenance-state stream "
+            "(read-only; names each @TV: state via the machine XML)"
+        ),
+        arguments=(
+            Argument(
+                "seconds",
+                "how long to watch before giving up; defaults to the command timeout",
+                optional=True,
+            ),
+        ),
+        runner=_r_process_watch,
+    ),
+    CommandSpec(
+        name="process-start",
+        description=(
+            "[destructive] start a maintenance process and return the "
+            "machine's acknowledgement (run 'processes' for the names)"
+        ),
+        arguments=(
+            Argument(
+                "process",
+                "cleaning, descale, filter_change, cappu_clean, "
+                "cappu_rinse, coffee_rinse",
+            ),
+        ),
+        runner=_r_process_start,
+        destructive=True,
+        danger=(
+            "starts a real maintenance cycle on the machine. Depending on "
+            "the process this consumes a cleaning tablet or descaler, runs "
+            "for minutes with the machine locked, and dispenses hot liquid "
+            "— put a container under the spouts first. The machine then "
+            "waits for confirmations ('process-accept'); leaving it parked "
+            "mid-cycle can only be undone at the machine or with 'cancel'."
+        ),
+    ),
+    CommandSpec(
+        name="process-run",
+        description=(
+            "[destructive] start a maintenance process and follow its "
+            "state machine to the end, confirming every prompt"
+        ),
+        arguments=(
+            Argument("process", "cleaning, descale, filter_change, …"),
+            Argument(
+                "seconds",
+                "overall deadline for the run; defaults to 900",
+                optional=True,
+            ),
+        ),
+        runner=_r_process_run,
+        destructive=True,
+        danger=(
+            "starts a real maintenance cycle AND auto-confirms every step "
+            "it asks for, unattended. Every confirmation advances the "
+            "physical cycle — tablets and descaler are consumed, hot "
+            "liquid is dispensed, and there is no undo. Only run this with "
+            "the machine physically prepared (tray emptied, tablet in, "
+            "container under the spout)."
+        ),
+    ),
+    CommandSpec(
+        name="process-accept",
+        description=(
+            "[destructive] confirm the maintenance step the machine is "
+            "waiting on (@TG:10 / @TG:04, whichever its XML declares)"
+        ),
+        arguments=(
+            Argument(
+                "command",
+                "accept command (@TG:10 / @TG:04) or the hex state code to "
+                "confirm; omit to use what the machine profile declares",
+                optional=True,
+            ),
+        ),
+        runner=_r_process_accept,
+        destructive=True,
+        danger=(
+            "confirms the step a running maintenance cycle is parked on, "
+            "which advances the physical cycle: the machine will start "
+            "pumping, grinding or dispensing on the next step. Supplies "
+            "already in the machine (cleaning tablet, descaler) are "
+            "consumed by that step and cannot be recovered."
+        ),
+    ),
+    CommandSpec(
+        name="process-next",
+        description=(
+            "[destructive] advance the machine to the next step (@TG:01); "
+            "answers @tg:00 when there was nothing to advance"
+        ),
+        arguments=(),
+        runner=_r_process_next,
+        destructive=True,
+        danger=(
+            "advances whatever step the machine is currently on. During a "
+            "maintenance cycle that starts the next physical step (rinse, "
+            "pump, dispense) and consumes the supplies it needs; during a "
+            "product it moves the brew on. There is no way to step back."
+        ),
     ),
 )
 

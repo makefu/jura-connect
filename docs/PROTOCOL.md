@@ -1381,6 +1381,202 @@ whole chain — `@tp` → `@TB` → rising `@TV:41…` frames → `@TV:3E…` �
 behind `SimulatorConfig(allow_brew=True)`, which is off by default so
 an accidental `@TP:` in a test still gets refused with `@an:error`.
 
+### 5.11 Maintenance processes and the state machine — **APK/XML-derived, untested**
+
+Starting a cleaning cycle is a conversation, not a command. `@TG:24`
+only *opens* it; the machine then drives the client through its
+`<STATE>` table and waits for confirmations. Everything in this section
+comes from `WifiCommandStartProcess`, `WifiCommandProcessAccept`,
+`WiFiCommandNextProductStep` and `StateArgument` in the decompiled app
+plus the 89 bundled machine XMLs. **Nothing here has been run against
+hardware** — every confirmation advances a real cycle and consumes
+supplies, so it was verified against the simulator only.
+
+#### The four verbs
+
+| Wire | J.O.E. class | Reply matcher | Meaning |
+| ---- | ------------ | ------------- | ------- |
+| `@TG:21/22/23/24/25/26` | `WifiCommandStartProcess` | the command, lower-cased (`@tg:24`) | start the cycle |
+| `@TG:10` / `@TG:04` | `WifiCommandProcessAccept` | *(none — the app awaits no reply)* | confirm the state the machine is parked on |
+| `@TG:01` | `WiFiCommandNextProductStep` | `@tg:(01\|00)` | advance a step; `@tg:00` = rejected |
+| `@TG:FF` | `WifiCommandCancelProductStep` | `@tg:FF` | cancel the current step (§5.8) |
+
+`WifiCommandStartProcess` builds its matcher by lower-casing the
+command it was handed, so the acknowledgement is a pure echo. The
+accept command sets *no* matcher at all: the app fires it and moves on.
+This library still waits for a frame (anything that is not a pushed
+`@TF:`/`@TV:`), because a session that sends and never reads cannot tell
+a refusal from a success.
+
+#### `<PROCESSES>` — what a machine can run
+
+```xml
+<PROCESS Type="Cleaning" ExecuteCommand="@TG:24" Progress="true"
+         Title="221" Picture="geraet_reinigen.png"
+         PDFURL="…" VideoURL="…"/>
+```
+
+Six types exist across all 89 profiles, and each maps 1:1 onto a
+command byte — the same table `jura_connect.progress.PROCESS_CODES`
+uses to name the process byte of a `@TV:` frame:
+
+| Type | Command | Profiles declaring it | Library name |
+| ---- | ------- | --------------------- | ------------ |
+| `Cleaning` | `@TG:24` | 89 | `cleaning` |
+| `Decalc` | `@TG:25` | 88 | `descale` |
+| `FilterChange` | `@TG:26` | 83 | `filter_change` |
+| `CappuRinse` | `@TG:23` | 75 | `cappu_rinse` |
+| `CappuClean` | `@TG:21` | 74 | `cappu_clean` |
+| `CoffeeRinse` | `@TG:22` | 3 | `coffee_rinse` |
+
+`Progress="true"` means the machine pushes `@TV:` frames while the
+cycle runs. Every `Cleaning`, `Decalc`, `CappuRinse`, `CappuClean` and
+`CoffeeRinse` entry declares it; `FilterChange` declares
+`Progress="false"` on 78 of the 83 profiles that have it — those
+machines run the filter change entirely on their own front panel, so
+following one from here will see no states and simply time out.
+`MachineProcess.progress` carries the flag.
+
+#### `<PROGRESS_STATE_INTAKE>` — the state table
+
+83 `<STATE>` entries, identical in value and name across every bundled
+profile:
+
+```xml
+<STATE Value="26" Name="Press Rinse" Title="193"
+       Picture="pflege_druecken.png" AcceptCommand="@TG:10"/>
+```
+
+`Value` is **the same byte as `ProgressState`** (§5.10), i.e. the first
+byte of a pushed `@TV:` frame, so the frame resolves straight into the
+machine's own label for the step.
+
+The XML table is not redundant with the enum: **18 of EF1091's 83
+states are missing from `ProgressState` entirely** — among them `22`
+"Press Rotary or Next", `24` "Coffee Ready", `2D` "No milk", `9B` "Dock
+Cappu Outlet" and, crucially, **`26` "Press Rinse", the state a
+cleaning cycle parks on**. Without the profile the decoder reports that
+frame as `UNKNOWN(0x26)` and nothing knows a confirmation is due. Load
+the machine profile.
+
+Only four states ever carry an `AcceptCommand`:
+
+| State | Name | Accept | Profiles |
+| ----- | ---- | ------ | -------- |
+| `26` | Press Rinse | `@TG:10` | 78 |
+| `92` | Cappu Clean add cleaner | `@TG:04` | 10 |
+| `94` | Cappu Clean add water | `@TG:04` | 10 |
+| `75` | Cleaning add tablet | `@TG:10` | 9 |
+
+So a profile uses `@TG:10`, `@TG:04`, or both — never anything else
+(pinned by a test over all 89 XMLs). Five states end a cycle, again
+identically everywhere: `0B` Cappurinse finished, `56` Descale
+finished, `65` Filter Rinse finished, `76` Cleaning Process finished,
+`95` Cappu Clean finish. `jura_connect.process.PROCESS_FINISH_STATES`
+maps each process to its own; `TERMINAL_STATE_CODES` is the union plus
+`3E` (`ENJOY`).
+
+#### The conversation
+
+```
+-> @TG:24
+<- @tg:24
+<- @TV:7024…            state 70  "Cleaning Start"
+<- @TV:7224…            state 72  "Cleaning empty tray"
+<- @TV:7524…            state 75  "Cleaning add tablet"
+<- @TV:2624…            state 26  "Press Rinse"  -> AcceptCommand="@TG:10"
+-> @TG:10
+<- @tg:10
+<- @TV:7424…            state 74  "Cleaning Process"
+<- @TV:7624…            state 76  "Cleaning Process finished"
+```
+
+The frames are ordinary progress frames (§5.10): byte 0 the state, byte
+1 the **process** code, then the value window — which is why
+`ProductProgress.progress_type` comes out as `PROCESS`. No bundled
+profile assigns a product the codes `0x21`..`0x26`, so a process frame
+can never be mistaken for a product one.
+
+The *ordering* of the states inside a cycle is the one thing the XMLs
+do not say. The sequences in `SimulatorConfig.process_sequences` are a
+plausible reconstruction, not an observation.
+
+#### Alert metadata: what is blocked, and what clears it
+
+The same XML says which products an active alert stops and which
+process makes it go away:
+
+```xml
+<ALERT Bit="10" Name="no beans" … Blocked="C" Type="info"/>
+<ALERT Bit="34" Name="cleaning alert" … Type="ip"
+       ProcessButton="206" Process="Cleaning" CancelButton="72"/>
+```
+
+* `Type="block"` blocks **every** product kind; `info` / `ip` block only
+  what `Blocked` names (and `Blocked` is absent on most of them).
+* `Blocked` is a single `Product.ProductGroup` token — `C`, `M`, `CM`,
+  `T`, `TM`, `P`. Jura's own comment only says that `CM` "block[s]
+  products of Coffe, Milk and Coffe + Milk", and the app code that
+  consumes the field did not survive obfuscation, so
+  `profile.expand_blocked_kinds()` implements the reading that matches
+  that example and the machine's behaviour: **a token blocks every kind
+  that shares a letter with it**. `Blocked="M"` therefore blocks `M`,
+  `CM` and `TM` — no milk, no cappuccino.
+* `Process` names the maintenance process that clears the alert, in the
+  same vocabulary as the table above (`Decalc` → `descale`).
+  **13 of the 89 profiles point at a process they never declare** —
+  milk-free machines that kept the boilerplate cappu-rinse/cappu-clean
+  alerts. Treat the field as a hint; `resolve_process()` refuses an
+  undeclared one rather than sending a verb the machine has no use for.
+* `Disabled="0406070A2E"` is a list of individual product codes (the app
+  chops it into two-character substrings); watch-only in J.O.E.
+
+`MachineStatus` surfaces all of this **only when a profile is loaded** —
+the hard-coded EF536 fallback codebook has no such metadata:
+
+```python
+st = client.read_status()          # client built with profile=load_profile("EF1091")
+st.blocked_kinds                   # ("C", "CM") — no beans
+st.blocked_products                # ("espresso", "coffee", "cappuccino", …)
+st.blocking_alerts                 # ("no_beans",)
+st.alert_processes                 # (("cleaning_alert", "cleaning"),)
+st.can_brew_kind("T")              # True — hot water is still fine
+st.can_brew("espresso")            # False
+```
+
+Every pre-existing field and `to_dict()` key is unchanged; the four new
+keys (`blocked_kinds`, `blocked_products`, `blocking_alerts`,
+`alert_processes`) are additive.
+
+#### Library entry points
+
+```python
+client.process_runner("cleaning")      # bind, send nothing
+client.run_process("cleaning", auto_accept=True, timeout=900)
+client.watch_process(timeout=60)       # read-only: decode a cycle someone else started
+
+runner = client.process_runner("cleaning")
+runner.start()                         # @TG:24, raises ProcessError if refused
+step = runner.wait_step(timeout=120)   # ProcessStep: name, accept_command, percent
+if step.needs_confirmation:
+    runner.accept()                    # the state's own @TG:10 / @TG:04
+runner.next_step(); runner.cancel()    # @TG:01 / @TG:FF
+run = runner.follow(auto_accept=True)  # ProcessRun.format() / .to_dict()
+```
+
+`follow(on_step=…)` takes a decision callback returning a
+`ProcessAction` (`WAIT` / `ACCEPT` / `NEXT` / `CANCEL`), which is how a
+UI drives the cycle without blocking on `auto_accept`.
+
+Named commands: `processes` (list, no I/O) and `process-watch`
+(listen-only) are ungated; `process-start`, `process-run`,
+`process-accept` and `process-next` are **gated** — `@TG:01`, `@TG:04`
+and `@TG:10` joined `DESTRUCTIVE_PREFIXES` because confirming a step
+advances a physical cycle and burns the tablet or descaler that step
+uses. The simulator models the whole walk behind
+`SimulatorConfig(allow_process=True)` and refuses the verbs with
+`@an:error` without it.
+
 ---
 
 ## 6. Machine variants (`MachineProfile`)

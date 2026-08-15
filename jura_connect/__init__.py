@@ -15,6 +15,8 @@ APK. Layered as:
   for "send the *counters* command" without hard-coding ``@TG:43``.
 * :mod:`jura_connect.progress`   -- decoder for the unsolicited ``@TV:``
   product-progress frames ("brewing, 60 %", "empty the grounds").
+* :mod:`jura_connect.process`    -- the interactive maintenance-process
+  state machine (start a cleaning cycle, confirm each step it asks for).
 * :mod:`jura_connect.simulator`  -- TCP server speaking the same protocol;
   used by the test-suite to exercise the client end-to-end without a
   physical machine.
@@ -39,6 +41,23 @@ from .client import (
     ProgramModeSlots,
     SettingValue,
 )
+from .process import (
+    ACCEPT_COMMANDS,
+    CANCEL_STEP_COMMAND,
+    NEXT_STEP_COMMAND,
+    PROCESS_FINISH_STATES,
+    MachineProcess,
+    ProcessAction,
+    ProcessCatalogue,
+    ProcessError,
+    ProcessRun,
+    ProcessRunner,
+    ProcessStep,
+    available_processes,
+    resolve_accept_command,
+    resolve_process,
+    watch_states,
+)
 from .profile import (
     KIND_BYPASS,
     KIND_COFFEE_STRENGTH,
@@ -49,12 +68,16 @@ from .profile import (
     KIND_WATER_AMOUNT,
     RECIPE_PARAM_KINDS,
     AlertDef,
+    PRODUCT_KINDS,
     MachineCatalogueEntry,
     MachineProfile,
+    ProcessDef,
     ProductDef,
     ProductParam,
     SettingDef,
     SettingItem,
+    StateDef,
+    expand_blocked_kinds,
     iter_profiles,
     known_machine_names,
     list_profile_codes,
@@ -88,7 +111,9 @@ from .crypto import decode, encode
 from .discovery import Machine, discover, probe, scan_tcp, tcp_probe
 
 __all__ = [
+    "ACCEPT_COMMANDS",
     "AlertDef",
+    "CANCEL_STEP_COMMAND",
     "COMMANDS",
     "KIND_BYPASS",
     "KIND_COFFEE_STRENGTH",
@@ -116,11 +141,22 @@ __all__ = [
     "MachineStatus",
     "MaintenanceCounters",
     "MaintenancePercent",
+    "NEXT_STEP_COMMAND",
     "PROCESS_CODES",
+    "PROCESS_FINISH_STATES",
     "PRODUCT_ARGUMENTS",
+    "PRODUCT_KINDS",
     "PRODUCT_NAMES",
     "PModeSlot",
     "PairingTimeout",
+    "MachineProcess",
+    "ProcessAction",
+    "ProcessCatalogue",
+    "ProcessDef",
+    "ProcessError",
+    "ProcessRun",
+    "ProcessRunner",
+    "ProcessStep",
     "ProductCounters",
     "ProductDef",
     "ProductParam",
@@ -133,7 +169,9 @@ __all__ = [
     "SettingDef",
     "SettingItem",
     "SettingValue",
+    "StateDef",
     "__version__",
+    "available_processes",
     "decode",
     "discover",
     "encode",
@@ -145,9 +183,13 @@ __all__ = [
     "list_profile_codes",
     "load_profile",
     "lookup_by_article_number",
+    "expand_blocked_kinds",
     "probe",
+    "resolve_accept_command",
+    "resolve_process",
     "run_named",
     "scan_tcp",
     "search_by_friendly_name",
     "tcp_probe",
+    "watch_states",
 ]
