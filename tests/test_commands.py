@@ -480,6 +480,10 @@ _DESTRUCTIVE_INVOCATIONS = [
     ("set-ssid", ["mywifi"]),
     ("set-password", ["s3cret"]),
     ("set-name", ["Kaffeebert"]),
+    # Firmware / dongle maintenance. The OTA sequence itself is not a
+    # named command by design (see docs/PROTOCOL.md §5.15); these two are.
+    ("milk-cooler-update", []),
+    ("restart-dongle", []),
 ]
 
 
