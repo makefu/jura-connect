@@ -2315,7 +2315,7 @@ the sequence fails loudly.
 
 ## 6. Machine variants (`MachineProfile`)
 
-The 88 machine XML files extracted from the J.O.E. APK
+The 89 machine XML files extracted from the J.O.E. APK
 (`assets/documents/xml/<EF_code>/<version>.xml`) are vendored under
 `jura_connect/data/xml/` and loaded on demand by
 `jura_connect.profile.load_profile(code)`. They provide:

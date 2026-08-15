@@ -179,7 +179,7 @@ trusted-publishing.
 
 ## 9. When in doubt
 
-* The simulator + 340 tests catch most regressions in seconds; lean
+* The simulator + 770 tests catch most regressions in seconds; lean
   on them.
 * `gh search code "<thing> repo:Jutta-Proto/protocol-bt-cpp"`
   finds the Bluetooth-flavour equivalent of most protocol questions.

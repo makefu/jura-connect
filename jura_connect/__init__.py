@@ -17,6 +17,12 @@ APK. Layered as:
   product-progress frames ("brewing, 60 %", "empty the grounds").
 * :mod:`jura_connect.process`    -- the interactive maintenance-process
   state machine (start a cleaning cycle, confirm each step it asks for).
+* :mod:`jura_connect.language`   -- the language-download sequence
+  (S-record payloads, capability-gated). Reachable as
+  ``jura_connect.language``; only the client entry points are re-exported.
+* :mod:`jura_connect.firmware`   -- dongle OTA and the milk cooler.
+  Deliberately not re-exported: the OTA sequencer is only safe as a whole
+  and a partial transfer needs a service visit to recover.
 * :mod:`jura_connect.simulator`  -- TCP server speaking the same protocol;
   used by the test-suite to exercise the client end-to-end without a
   physical machine.
