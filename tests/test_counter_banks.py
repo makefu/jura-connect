@@ -25,6 +25,7 @@ from jura_connect.client import (
     JuraClient,
     SPECIAL_COUNTER_BANK,
 )
+from jura_connect.commands import run_named
 from jura_connect.profile import iter_profiles, load_profile
 
 # EF1143 is the only bundled profile that declares every bank; EF1147
@@ -353,7 +354,156 @@ def test_without_a_profile_the_machine_decides(sim_factory) -> None:
 
     assert present is not None
     assert present.total == 8
+    # Nothing declared this read, so it is not a "declared" claim — but
+    # the caller never opted into a probe either.
+    assert present.source == "unprofiled"
+    assert present.to_dict()["probed"] is False
     assert absent is None
+
+
+# --------------------------------------------------------------------- #
+# Probing a bank the XML does not declare (docs/PROTOCOL.md §5.5)
+# --------------------------------------------------------------------- #
+
+
+def _kaffeebert_special_counters() -> list[int]:
+    """The S8 EB's own ``@TR:52`` table, from the 2026-08-16 capture.
+
+    Verbatim pages (``docs/captures/2026-08-16-kaffeebert-s8eb.md`` §6)::
+
+        @tr:52,00,FFFFFFFF0001000E
+        @tr:52,01,FFFFFFFFFFFFFFFF
+        @tr:52,02,0A65FFFFFFFFFFFF
+        @tr:52,03,FFFFFFFFFFFFFFFF
+
+    Note slot 0 — the bank's own total — reads the unused sentinel on
+    this machine; only slots 2, 3 and 8 carry values.
+    """
+    slots = [0xFFFF] * 16
+    slots[2] = 1
+    slots[3] = 14  # sweet_foam
+    slots[8] = 0x0A65  # 2661
+    return slots
+
+
+def test_undeclared_bank_stays_off_the_wire_without_probe(sim_factory) -> None:
+    """Default behaviour is unchanged: the S8 EB serves ``@TR:52`` but
+    does not declare it, and we still send nothing."""
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        assert c.read_counter_bank(SPECIAL_COUNTER_BANK, timeout_per_page=2.0) is None
+    finally:
+        c.close()
+
+    assert not any(b"@TR:52" in cmd for cmd in sim.sent_commands)
+
+
+def test_probe_reads_the_bank_the_s8_eb_serves_undeclared(sim_factory) -> None:
+    """Regression test for the real machine: EF1091 declares ``@TR:32``
+    alone yet answers ``@TR:52,00..03`` with live counts."""
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        bank = c.read_counter_bank(
+            SPECIAL_COUNTER_BANK, timeout_per_page=2.0, probe=True
+        )
+    finally:
+        c.close()
+
+    assert bank is not None
+    assert _pages_requested(sim, "@TR:52") == [0, 1, 2, 3]
+    assert bank.by_code["02"] == 1
+    assert bank.by_name["sweet_foam"] == 14
+    assert bank.by_code["08"] == 2661
+    assert bank.source == "probed"
+    assert bank.to_dict()["probed"] is True
+    assert bank.to_dict()["source"] == "probed"
+    assert "probed" in bank.format()
+
+
+def test_probe_on_a_bank_answering_tr00_is_still_not_implemented(sim_factory) -> None:
+    """The other four banks the S8 EB rejects stay rejected: one page
+    goes out, the bare ``@tr:00`` comes back, and the result is the same
+    "nothing here" as the declared case."""
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        for bank in (
+            BARISTA_COUNTER_BANK,
+            DAILY_PRODUCT_COUNTER_BANK,
+            DAILY_BARISTA_COUNTER_BANK,
+        ):
+            assert (
+                c.read_counter_bank(bank, timeout_per_page=2.0, probe=True) is None
+            ), bank
+    finally:
+        c.close()
+
+    for bank in ("@TR:34", "@TR:42", "@TR:44"):
+        assert _pages_requested(sim, bank) == [0]
+
+
+def test_a_declared_bank_is_never_marked_probed(sim_factory) -> None:
+    """``probe=True`` on a machine whose XML declares the bank is an
+    ordinary declared read — the stronger claim survives."""
+    special = _kaffeebert_special_counters()
+    special[0] = 99
+    sim = sim_factory(special_counters=special)
+
+    c = _paired(sim, SPECIAL_ONLY)
+    try:
+        bank = c.read_counter_bank(
+            SPECIAL_COUNTER_BANK, timeout_per_page=2.0, probe=True
+        )
+    finally:
+        c.close()
+
+    assert bank is not None
+    assert bank.total == 99
+    assert bank.source == "declared"
+    assert bank.to_dict()["probed"] is False
+    assert "probed" not in bank.format()
+
+
+def test_probe_covers_the_undeclared_overflow_of_a_probed_bank(sim_factory) -> None:
+    """A probed bank's overflow is undeclared too, so probing has to
+    reach it or counts past 65535 are silently truncated."""
+    special = _kaffeebert_special_counters()
+    special[0] = 2
+    overflow = [0x00] * 32
+    overflow[0] = 0x01  # total = 0x00010002
+    sim = sim_factory(special_counters=special, special_counter_overflow=overflow)
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        bank = c.read_counter_bank(
+            SPECIAL_COUNTER_BANK, timeout_per_page=2.0, probe=True
+        )
+    finally:
+        c.close()
+
+    assert bank is not None
+    assert _pages_requested(sim, "@TR:53") == [0, 1, 2, 3]
+    assert bank.total == 65538
+
+
+def test_probe_never_reaches_a_bank_the_caller_did_not_ask_for(sim_factory) -> None:
+    """Probing is per-read: asking for the special bank must not drag
+    the barista or daily banks onto the wire."""
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        c.read_counter_bank(SPECIAL_COUNTER_BANK, timeout_per_page=2.0, probe=True)
+    finally:
+        c.close()
+
+    for bank in ("@TR:34", "@TR:35", "@TR:42", "@TR:43", "@TR:44", "@TR:45"):
+        assert not any(bank.encode() in cmd for cmd in sim.sent_commands)
 
 
 def test_reading_an_overflow_bank_directly_is_refused() -> None:
@@ -388,4 +538,60 @@ def test_counter_bank_format_and_to_dict_round_trip() -> None:
         "total": 12,
         "by_name": dict(bank.by_name),
         "by_code": dict(bank.by_code),
+        "source": "declared",
+        "probed": False,
     }
+
+
+def test_bank_command_explains_an_undeclared_bank_and_points_at_probe(
+    sim_factory,
+) -> None:
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        result = run_named(c, "special-counters", timeout=2.0)
+    finally:
+        c.close()
+
+    text = result.format()
+    assert "not declared" in text
+    assert "EF1091" in text
+    assert "--probe" in text
+    assert not any(b"@TR:52" in cmd for cmd in sim.sent_commands)
+
+
+def test_bank_command_with_probe_returns_the_undeclared_bank(sim_factory) -> None:
+    sim = sim_factory(special_counters=_kaffeebert_special_counters())
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        result = run_named(c, "special-counters", timeout=2.0, probe=True)
+    finally:
+        c.close()
+
+    assert isinstance(result.value, CounterBank)
+    assert result.value.source == "probed"
+    assert result.to_dict()["value"]["probed"] is True
+
+
+def test_probe_changes_nothing_for_a_command_that_reads_no_bank(sim_factory) -> None:
+    """``probe`` is a counter-bank option; every other command ignores
+    it and puts exactly the same frames on the wire."""
+    sim = sim_factory()
+
+    c = _paired(sim, PRODUCT_ONLY)
+    try:
+        plain = run_named(c, "counters", timeout=2.0)
+        probed = run_named(c, "counters", timeout=2.0, probe=True)
+    finally:
+        c.close()
+
+    assert probed.to_dict() == plain.to_dict()
+    assert not any(b"@TR:" in cmd for cmd in sim.sent_commands)
+
+
+def test_counter_bank_rejects_an_unknown_source() -> None:
+    """``source`` is a closed set — a typo must not reach ``to_dict``."""
+    with pytest.raises(ValueError, match="source"):
+        CounterBank.from_slots(BARISTA_COUNTER_BANK, [1, 2], source="guessed")

@@ -669,6 +669,58 @@ def test_command_missing_stored_pin_hints_to_pass_one(
     assert "requires a PIN" in err
 
 
+def test_probe_flag_opts_into_an_undeclared_counter_bank(
+    sim_factory, tmp_path, capsys
+) -> None:
+    """The S8 EB serves ``@TR:52`` without declaring it (PROTOCOL.md
+    §5.5). Without ``--probe`` the CLI explains that and sends nothing;
+    with it the counts come back marked as probed."""
+    special = [0xFFFF] * 16
+    special[2] = 1
+    special[3] = 14  # sweet_foam
+    special[8] = 0x0A65  # 2661
+    sim = sim_factory(special_counters=special)
+    host, port, store_path, h = _setup_paired_simulator(sim, tmp_path)
+
+    def argv(*extra: str) -> list[str]:
+        return [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            h,
+            "--conn-id",
+            "cli-tests",
+            "--machine-type",
+            "EF1091",
+            "--handshake-timeout",
+            "3",
+            "--cmd-timeout",
+            "2",
+            *extra,
+            "special-counters",
+        ]
+
+    assert main(argv()) == 0
+    out = capsys.readouterr().out
+    assert "not declared" in out
+    assert "--probe" in out
+    assert not any(b"@TR:52" in cmd for cmd in sim.sent_commands)
+
+    assert main(argv("--probe", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "special-counters"
+    assert payload["value"]["source"] == "probed"
+    assert payload["value"]["probed"] is True
+    assert payload["value"]["by_name"]["sweet_foam"] == 14
+    assert payload["value"]["by_code"]["08"] == 2661
+    assert any(b"@TR:52" in cmd for cmd in sim.sent_commands)
+
+
 def test_creds_json_redacts_pin(capsys, tmp_path) -> None:
     """`creds --json` must expose pin_stored, never the PIN value."""
     from jura_connect.credentials import CredentialStore, MachineCredentials

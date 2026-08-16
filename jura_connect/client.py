@@ -624,7 +624,7 @@ class JuraClient:
         )
 
     def read_counter_bank(
-        self, bank: str, *, timeout_per_page: float = 6.0
+        self, bank: str, *, timeout_per_page: float = 6.0, probe: bool = False
     ) -> "CounterBank | None":
         """Read one counter bank other than ``@TR:32`` by wire command.
 
@@ -643,6 +643,19 @@ class JuraClient:
         Without a profile there is no declaration to consult, so the
         bank is requested and the machine's own ``@tr:00`` decides.
 
+        ``probe=True`` requests the bank even when the profile does not
+        declare it, and keeps the data if the machine answers. **An XML
+        declaration is a lower bound, not the truth**: the S8 EB serves
+        ``@TR:52,00..03`` with live counts while declaring ``@TR:32``
+        alone (docs/captures/2026-08-16-kaffeebert-s8eb.md §6). It is
+        off by default because trusting the catalogue is what the
+        official app does and costs no round trip; a first-page
+        ``@tr:00`` still means "not implemented" and still returns
+        ``None``. The probe covers this bank's overflow bank too —
+        undeclared banks have undeclared overflow banks, and without it
+        a probed count would silently truncate at 65535. It never
+        reaches any other bank or any other command.
+
         Only the special bank is exercised by the official app; the
         barista and daily banks are XML-derived and untested against
         hardware (docs/PROTOCOL.md §5.5).
@@ -654,15 +667,23 @@ class JuraClient:
                 f"read {spec.overflow_of} instead — its high bytes are "
                 "folded in automatically"
             )
-        if self.profile is not None and not self.profile.declares_counter_bank(
-            spec.command
-        ):
+        source = COUNTER_BANK_DECLARED
+        if self.profile is None:
+            source = COUNTER_BANK_UNPROFILED
+        elif not self.profile.declares_counter_bank(spec.command):
+            if not probe:
+                log.debug(
+                    "%s does not declare the %s bank; not reading it",
+                    self.profile.code,
+                    spec.command,
+                )
+                return None
+            source = COUNTER_BANK_PROBED
             log.debug(
-                "%s does not declare the %s bank; not reading it",
+                "%s does not declare the %s bank; probing it anyway",
                 self.profile.code,
                 spec.command,
             )
-            return None
         slots = self._read_counter_bank(
             spec.command,
             bytes_per_value=spec.bytes_per_value,
@@ -671,23 +692,37 @@ class JuraClient:
         )
         if slots is None:
             return None
-        overflow = self._read_overflow_bank(spec, timeout_per_page=timeout_per_page)
+        overflow = self._read_overflow_bank(
+            spec, timeout_per_page=timeout_per_page, probe=probe
+        )
         return CounterBank.from_slots(
-            spec.command, slots, profile=self.profile, overflow=overflow
+            spec.command,
+            slots,
+            profile=self.profile,
+            overflow=overflow,
+            source=source,
         )
 
     def _read_overflow_bank(
-        self, spec: "CounterBankSpec", *, timeout_per_page: float
+        self, spec: "CounterBankSpec", *, timeout_per_page: float, probe: bool = False
     ) -> list[int] | None:
         """Read ``spec``'s overflow bank when the machine declares it.
+
+        ``probe`` reads it even when the profile does not declare it —
+        the bank whose high bytes these are was probed too, so refusing
+        here would cap a probed count at 65535. The machine's ``@tr:00``
+        costs one round trip and ends it.
 
         Any surprise on that read — silence, a reply shape we don't know
         — degrades to "no overflow data" rather than losing the base
         counts we already have.
         """
-        if spec.overflow is None or self.profile is None:
+        if spec.overflow is None:
             return None
-        if not self.profile.declares_counter_bank(spec.overflow):
+        declared = self.profile is not None and self.profile.declares_counter_bank(
+            spec.overflow
+        )
+        if not declared and not probe:
             return None
         over = counter_bank_spec(spec.overflow)
         try:
@@ -699,10 +734,10 @@ class JuraClient:
             )
         except (TimeoutError, ValueError) as exc:
             log.warning(
-                "%s declares %s but the read failed (%s); reporting base counts only",
-                self.profile.code,
+                "%s read failed (%s); reporting base counts only for %s",
                 over.command,
                 exc,
+                spec.command,
             )
             return None
 
@@ -2537,6 +2572,37 @@ DAILY_COUNTER_RESET = "@TF:05"
 # "no overflow yet", 0xFF the same not-configured sentinel @TR:32 uses.
 OVERFLOW_COUNT_UNUSED = frozenset({0x00, 0xFF})
 
+#: :attr:`CounterBank.source` — the machine's XML declares this bank, so
+#: reading it is what J.O.E. itself would do.
+COUNTER_BANK_DECLARED = "declared"
+#: :attr:`CounterBank.source` — the XML does *not* declare this bank and
+#: the caller passed ``probe=True``, so it was requested anyway and the
+#: machine answered. An XML declaration is a lower bound, not the truth:
+#: the S8 EB serves ``@TR:52`` while declaring only ``@TR:32``
+#: (docs/captures/2026-08-16-kaffeebert-s8eb.md §6). The data is real,
+#: but nothing in the catalogue vouches for its slot layout.
+COUNTER_BANK_PROBED = "probed"
+#: :attr:`CounterBank.source` — no :class:`MachineProfile` was loaded, so
+#: there was no declaration to consult either way and the dongle's own
+#: answer decided. As weak a claim as a probe, without the opt-in.
+COUNTER_BANK_UNPROFILED = "unprofiled"
+
+#: Every value :attr:`CounterBank.source` may take.
+COUNTER_BANK_SOURCES: tuple[str, ...] = (
+    COUNTER_BANK_DECLARED,
+    COUNTER_BANK_PROBED,
+    COUNTER_BANK_UNPROFILED,
+)
+
+#: Line ``CounterBank.format()`` appends for a non-declared read, so a
+#: human reading the output sees the weaker claim as such.
+COUNTER_BANK_SOURCE_NOTES: dict[str, str] = {
+    COUNTER_BANK_PROBED: "probed: not declared by this machine's XML",
+    COUNTER_BANK_UNPROFILED: (
+        "no machine profile loaded: no XML declaration to check against"
+    ),
+}
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class CounterBankSpec:
@@ -2882,6 +2948,12 @@ class CounterBank:
     special bank's slots are fixed functions instead and are named from
     :data:`SPECIAL_COUNTER_SLOTS`. Slots no name covers always survive
     in ``by_code``.
+
+    ``source`` records *how* the read was justified — see
+    :data:`COUNTER_BANK_SOURCES`. Probed data is a weaker claim than
+    declared data (the catalogue never promised the bank exists), so the
+    two are kept apart rather than blurred; ``format()`` and
+    ``to_dict()`` both say which one this is.
     """
 
     bank: str
@@ -2890,6 +2962,13 @@ class CounterBank:
     by_name: dict[str, int]
     by_code: dict[str, int]
     raw_slots: tuple[int, ...]
+    source: str = COUNTER_BANK_DECLARED
+
+    @property
+    def probed(self) -> bool:
+        """True when this bank was read without an XML declaration
+        backing it, because the caller explicitly asked for a probe."""
+        return self.source == COUNTER_BANK_PROBED
 
     @classmethod
     def from_slots(
@@ -2898,9 +2977,13 @@ class CounterBank:
         slots: list[int],
         profile: MachineProfile | None = None,
         overflow: list[int] | None = None,
+        source: str = COUNTER_BANK_DECLARED,
     ) -> CounterBank:
         """Decode one bank's slot table, folding in ``overflow`` if read."""
         spec = counter_bank_spec(bank)
+        if source not in COUNTER_BANK_SOURCES:
+            known = ", ".join(sorted(COUNTER_BANK_SOURCES))
+            raise ValueError(f"unknown counter bank source {source!r}. Known: {known}")
         if spec.overflow_of is not None:
             raise ValueError(
                 f"{spec.command} is the overflow bank of {spec.overflow_of}; "
@@ -2920,15 +3003,18 @@ class CounterBank:
             by_name=by_name,
             by_code=_slots_by_code(slots),
             raw_slots=tuple(slots),
+            source=source,
         )
 
     def format(self) -> str:
         spec = counter_bank_spec(self.bank)
-        return _format_counter_slots(
+        text = _format_counter_slots(
             f"{spec.label} ({self.bank}) total: {self.total}",
             self.by_name,
             self.by_code,
         )
+        note = COUNTER_BANK_SOURCE_NOTES.get(self.source)
+        return f"{text}\n  ({note})" if note else text
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -2937,6 +3023,8 @@ class CounterBank:
             "total": self.total,
             "by_name": dict(self.by_name),
             "by_code": dict(self.by_code),
+            "source": self.source,
+            "probed": self.probed,
         }
 
 

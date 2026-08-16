@@ -310,6 +310,7 @@ def cmd_command(args: argparse.Namespace) -> int:
                 args.args,
                 timeout=args.cmd_timeout,
                 allow_destructive=args.allow_destructive_commands,
+                probe=args.probe,
             )
         except DestructiveCommandError as exc:
             # Print the gated-command explanation verbatim. It already
@@ -591,6 +592,19 @@ def build_parser() -> argparse.ArgumentParser:
             "emit the command result as JSON on stdout. All progress, "
             "handshake banner, watched frames, and error messages go to "
             "stderr so stdout is parseable verbatim."
+        ),
+    )
+    cm.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "for the counter-bank commands (special-counters, "
+            "barista-counters, daily-brews, daily-barista-counters): ask "
+            "the machine for a bank its XML does not declare, and keep the "
+            "data if it answers. A declaration is a lower bound — the S8 EB "
+            "serves @TR:52 while declaring only @TR:32. Read-only, one extra "
+            "round trip, and the result is marked as probed. Off by default: "
+            "the catalogue is what the official app trusts."
         ),
     )
     cm.add_argument(

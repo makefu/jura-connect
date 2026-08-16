@@ -189,6 +189,13 @@ class CommandSpec:
     # ``setting <name> <value>`` writes). Takes the args tuple, returns
     # a danger string when destructive, ``None`` when safe.
     dynamic_danger: Callable[["tuple[str, ...]"], str | None] | None = None
+    # Per-invocation option, not a registry declaration: every entry in
+    # COMMANDS leaves this False and :meth:`run` hands the runner a copy
+    # carrying the caller's value (the same trick the dynamic-danger gate
+    # uses). Only the counter-bank runners read it; it asks them to send
+    # a bank the machine's XML does not declare. See
+    # ``JuraClient.read_counter_bank(probe=...)``.
+    probe: bool = False
 
     def usage(self) -> str:
         if not self.arguments:
@@ -210,6 +217,7 @@ class CommandSpec:
         *,
         timeout: float,
         allow_destructive: bool = False,
+        probe: bool = False,
     ) -> CommandResult:
         required = sum(1 for a in self.arguments if not a.optional and not a.variadic)
         has_variadic = any(a.variadic for a in self.arguments)
@@ -245,7 +253,8 @@ class CommandSpec:
             if self.name == "raw":
                 _ensure_raw_payload_is_safe(args[0])
 
-        value = self.runner(self, client, tuple(args), timeout)
+        spec = dataclasses.replace(self, probe=True) if probe else self
+        value = spec.runner(spec, client, tuple(args), timeout)
         return CommandResult(name=self.name, value=value)
 
 
@@ -1009,7 +1018,9 @@ def _r_limits(_spec, client, args, timeout):
 # --------------------------------------------------------------------- #
 
 
-def _read_bank(client: JuraClient, bank: str, timeout: float) -> object:
+def _read_bank(
+    client: JuraClient, bank: str, timeout: float, *, probe: bool = False
+) -> object:
     """Read one counter bank, or explain why there is nothing to read.
 
     ``JuraClient.read_counter_bank`` returns ``None`` both for "your
@@ -1017,31 +1028,46 @@ def _read_bank(client: JuraClient, bank: str, timeout: float) -> object:
     answered @tr:00". Neither is an error — most machines have most of
     these banks missing — so the command reports it as text instead of
     raising.
+
+    The two cases are reported apart, because only one of them is
+    settled: an undeclared bank was never asked, and the S8 EB proves a
+    machine can serve a bank its XML never mentions, so the message
+    points at ``--probe``. A bank that answered ``@tr:00`` really is
+    absent and there is nothing more to try.
     """
-    result = client.read_counter_bank(bank, timeout_per_page=timeout)
+    result = client.read_counter_bank(bank, timeout_per_page=timeout, probe=probe)
     if result is not None:
         return result
     machine = client.profile.code if client.profile is not None else "this machine"
-    return (
-        f"{machine} does not implement the {bank} counter bank "
-        f"(not declared in its XML, or answered @tr:00)"
-    )
+    if (
+        not probe
+        and client.profile is not None
+        and not client.profile.declares_counter_bank(bank)
+    ):
+        return (
+            f"{bank} counter bank: not declared by {machine}, so nothing "
+            f"was sent.\nA declaration is a lower bound, not the truth — "
+            f"the S8 EB serves @TR:52 without declaring it. Ask the "
+            f"machine anyway with --probe (CLI) or probe=True "
+            f"(read_counter_bank); see docs/PROTOCOL.md §5.5."
+        )
+    return f"{machine} does not implement the {bank} counter bank (answered @tr:00)"
 
 
-def _r_special_counters(_spec, client, _args, timeout):
-    return _read_bank(client, SPECIAL_COUNTER_BANK, timeout)
+def _r_special_counters(spec, client, _args, timeout):
+    return _read_bank(client, SPECIAL_COUNTER_BANK, timeout, probe=spec.probe)
 
 
-def _r_barista_counters(_spec, client, _args, timeout):
-    return _read_bank(client, BARISTA_COUNTER_BANK, timeout)
+def _r_barista_counters(spec, client, _args, timeout):
+    return _read_bank(client, BARISTA_COUNTER_BANK, timeout, probe=spec.probe)
 
 
-def _r_daily_brews(_spec, client, _args, timeout):
-    return _read_bank(client, DAILY_PRODUCT_COUNTER_BANK, timeout)
+def _r_daily_brews(spec, client, _args, timeout):
+    return _read_bank(client, DAILY_PRODUCT_COUNTER_BANK, timeout, probe=spec.probe)
 
 
-def _r_daily_barista_counters(_spec, client, _args, timeout):
-    return _read_bank(client, DAILY_BARISTA_COUNTER_BANK, timeout)
+def _r_daily_barista_counters(spec, client, _args, timeout):
+    return _read_bank(client, DAILY_BARISTA_COUNTER_BANK, timeout, probe=spec.probe)
 
 
 def _r_reset_daily_counters(_spec, client, _args, timeout):
@@ -2146,6 +2172,7 @@ def run_named(
     *,
     timeout: float = 6.0,
     allow_destructive: bool = False,
+    probe: bool = False,
 ) -> CommandResult:
     """Dispatch a named command on an already-handshaken ``client``.
 
@@ -2153,7 +2180,15 @@ def run_named(
     :class:`DestructiveCommandError` unless ``allow_destructive=True``
     is passed explicitly — the safety gate that backs the CLI's
     ``--allow-destructive-commands`` flag.
+
+    ``probe=True`` (the CLI's ``--probe``) lets the counter-bank
+    commands request a bank the machine's XML does not declare, which
+    is a read either way. Every other command ignores it.
     """
     return get_command(name).run(
-        client, args, timeout=timeout, allow_destructive=allow_destructive
+        client,
+        args,
+        timeout=timeout,
+        allow_destructive=allow_destructive,
+        probe=probe,
     )
