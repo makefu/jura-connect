@@ -328,8 +328,8 @@ parameters. Complete list across all 89 profiles:
 | `F2` | `GRINDER_RATIO` | encoded, **untested** |
 | `F3` | `COFFEE_STRENGTH` | ✅ live-verified |
 | `F4` | `WATER_AMOUNT` | ✅ live-verified |
-| `F5` | `MILK_AMOUNT` | encoded, untested |
-| `F6` | `MILK_FOAM_AMOUNT` | encoded, untested |
+| `F5` | `MILK_AMOUNT` | ✅ live-verified on a Z10 (EA) / EF545 |
+| `F6` | `MILK_FOAM_AMOUNT` | ✅ live-verified on a Z10 (EA) / EF545 |
 | `F7` | `TEMPERATURE` | ✅ live-verified |
 | `F8` | `STROKE` | encoded, untested |
 | `F10` | `BYPASS` | ✅ live-verified |

@@ -496,3 +496,71 @@ be able to rule the run out as a cause:
   and a power cycle clears a leaked lock anyway (PROTOCOL.md §9).
 
 Nothing further was sent after the machine went quiet.
+
+---
+
+## Session 3 — post-merge re-run (12:40–12:42 local)
+
+The machine came back on its own (it had gone quiet at the end of
+session 1; see above). This third session re-ran a subset against the
+**merged** tree, after the counter-bank probe and the language-download
+fix had landed, to confirm the release candidate behaves on hardware.
+Read-only throughout; no destructive frame was sent.
+
+### `--probe` against the undeclared `@TR:52` bank
+
+The probe added in response to session 1's finding, exercised live:
+
+```
+$ jura-connect command --name kaffeebert --probe special-counters
+handshake -> CORRECT  (@hp4)
+special counter (@TR:52) total: 65535
+  sweet_foam          : 14
+  (unnamed slots): 0x02=1, 0x08=2663
+  (probed: not declared by this machine's XML)
+```
+
+Verdict: **confirmed** — the opt-in path reads a bank the machine's XML
+never declares, and labels the result as probed rather than declared.
+Slot 0 reads `0xFFFF`, which is why the bank's own total prints as
+65535 and cannot be used.
+
+**Slot 8 moves with brews.** Session 1 read `0x0A65` = 2661; this
+session, after exactly one `cafe_barista` had been brewed by hand in
+between (the brew of
+`2026-08-16-kaffeebert-brew-progress.md`), it reads **2663** — a step
+of 2 for one product. What the slot counts is unknown; the APK has no
+name for it. That is a lead, not a conclusion: one delta, one product.
+
+### Read-only regression sweep
+
+```
+info                 status bits 0004000008000000; errors (none);
+                     info flags coffee_ready, energy_safe
+counters             cleaning=26 filter=1 descale=9 cappu_rinse=360
+                     coffee_rinse=4255 cappu_clean=95
+percent              cleaning=0 filter=255 descale=70
+settings             7 settings read via per-setting @TM:<arg>;
+                     "batch read unavailable: settings bank '@TM:00,FC':
+                     reply echoes address '80', expected '00' ('@tm:80')"
+milk-cooler-status   milk cooler: no_cooler (@hu:800)
+languages            "(no reply to @TT:00: no reply to '@TT:00' within 6.0s)";
+                     download supported (profile): no; @TM:23: not supported
+```
+
+Verdicts:
+
+* **confirmed** — the counter and percent banks decode as in session 1
+  and against the §5.3 baseline;
+* **confirmed** — `settings` degrades to per-setting reads and *says so*,
+  which is the behaviour session 1's `@tm:80` finding was fixed into;
+* **confirmed** — `languages` now reports the silent machine as a
+  timeout note instead of letting `TimeoutError` escape, which is the
+  bug session 1 found, fixed and re-checked here on the same machine;
+* **confirmed** — `@hu:800` → `no_cooler`, unchanged.
+
+One connection was reset mid-handshake immediately after the previous
+session's socket closed (`ConnectionResetError` during `@HP:`), and the
+same command succeeded after a ~20 s pause. That matches the
+session-churn behaviour PROTOCOL.md already documents; it is a property
+of the dongle, not a regression.

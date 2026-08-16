@@ -1388,8 +1388,12 @@ unused bytes are `0x00` and whose byte 8 is a constant `0x01`**:
   temperature is the ITEM value (00/01/02).
 * **Live-verified:** water, temperature, strength and bypass, from the
   three cross-model vectors (S8 EB `cafe_barista`, E6 `espresso`, E6
-  `coffee`). **Not individually live-verified — may misbrew, verify on
-  your hardware:** `milk_foam_amount` / `milk_break` (seconds, as-is).
+  `coffee`). `milk_amount` (F5) and `milk_foam_amount` (F6) are
+  live-verified on a **Z10 (EA) / EF545** — blob
+  `05000812030202000100000000000000` (Milkcoffee, milk 3 s, foam 2 s),
+  brewed with the physical pour matching both phases. **Still not
+  individually live-verified — may misbrew, verify on your hardware:**
+  `milk_break` (seconds, sent as-is).
 * **`0x00` means "parameter not set"** — for parameters the product
   doesn't have. A water byte the product *does* have must still be set
   explicitly: with 00-padding an unset water byte is `0x00` = **no
