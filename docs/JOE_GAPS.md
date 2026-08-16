@@ -36,7 +36,7 @@ for what is *implemented* and how. This file is the scoreboard.
 | Status alerts (`@TF:`) | yes, + product/process/progress context | yes; bit decode + `blocked_kinds` / `blocking_alerts` / `alert_processes` / `can_brew()` |
 | Maintenance counters / percent | yes, XML-ordered | yes, XML-ordered |
 | Product brew counters + overflow | yes | yes |
-| Special / barista counter banks | yes (special only) | yes (both) — but gated on the XML declaring them, and the S8 EB **serves `@TR:52` without declaring it** (§9.3) |
+| Special / barista counter banks | yes (special only) | yes (both) — gated on the XML declaring them like J.O.E., plus an opt-in `--probe` / `probe=True` for the under-declaring case the S8 EB proved (§4) |
 | Daily counter banks + `@TF:05` reset | no | yes — past J.O.E. |
 | Machine settings read/write | yes (+ batch read declared, never sent) | yes (per-setting reads hardware-verified); batch read implemented but **the S8 EB rejects the address** — falls back per setting |
 | Per-product live limits (`@TM:60`) | yes | **yes (hardware-verified 2026-08-16)** |
@@ -106,7 +106,7 @@ classes.
 | `@TP:<blob>` → `@tp` | `WifiCommandStartProduct` | ✅ `brew`, incl. preselections |
 | `@TR:32,<page>` ×16 | `WifiCommandProductCounterStatistics` | ✅ `brews` |
 | `@TR:33,<page>` ×16 | same class, 1 byte/value | ✅ (overflow fold-in) |
-| `@TR:52,<page>` ×4 | `WifiCommandSpecialCounterStatistics` | ✅ `special-counters` — the S8 EB **serves** this bank but does not declare it, so the profile gate suppresses the read (§9.3) |
+| `@TR:52,<page>` ×4 | `WifiCommandSpecialCounterStatistics` | ✅ `special-counters` — the S8 EB **serves** this bank without declaring it, so the profile gate suppresses the read unless `--probe` is passed (§4) |
 | `@TR:53,<page>` ×4 | same class, 1 byte/value | ✅ (overflow fold-in) |
 | `@TR:34/35` | *(declared in XML; no APK code path)* | ✅ `barista-counters` |
 | `@TR:42..45` | *(declared in XML under `<DAILYCOUNTER>`; no APK code path)* | ✅ `daily-brews` / `daily-barista-counters` |
@@ -194,14 +194,26 @@ All ten banks are read (`JuraClient.read_counter_bank`,
 it. Page counts marked "assumed" use the product counter's 16 pages and
 stop early on `@tr:00`.
 
-> **"Only when the profile declares it" is now known to be wrong in at
-> least one direction.** Probed directly on 2026-08-16, an S8 EB
-> (EF1091) answers `@TR:52,00..03` with real counter data while its XML
-> declares only `@TR:32` — so `special-counters` reports "not
-> implemented" about a bank the machine plainly serves. `@TR:33`,
-> `@TR:34`, `@TR:42`, `@TR:44` and `@TR:53` really are absent there and
-> answer the bare `@tr:00`. Whether to keep trusting the XML or probe
-> and let `@tr:00` decide is an open design question — §9.3.
+> **"Only when the profile declares it" is a lower bound, not the
+> truth — settled 2026-08-16.** An S8 EB (EF1091) answers
+> `@TR:52,00..03` with real counter data while its XML declares only
+> `@TR:32`, so `special-counters` reported "not implemented" about a
+> bank the machine plainly serves. `@TR:33`, `@TR:34`, `@TR:42`,
+> `@TR:44` and `@TR:53` really are absent there and answer the bare
+> `@tr:00`.
+>
+> **Resolved as an opt-in, not a reversal.** The default still trusts
+> the XML — that is what J.O.E. does and it costs no round trip — but
+> `read_counter_bank(bank, probe=True)` (CLI: `--probe` on the four
+> counter-bank commands) sends an undeclared bank anyway and keeps the
+> data if the machine answers, along with the bank's overflow bank. A
+> first-page `@tr:00` still means "not implemented". The result records
+> which it was: `CounterBank.source` is `declared`, `probed` or
+> `unprofiled`, and `to_dict()` carries `"probed": true/false` for the
+> Home Assistant integration — a probed count is real data with no
+> catalogue vouching for its slot layout, and the API says so instead
+> of blurring the two. The over-declaring direction needs nothing: a
+> declared bank is asked for, and `@tr:00` settles it.
 
 | Bank | Pages | Bytes/val | Profiles declaring it | Lib |
 | ---- | ----- | --------- | --------------------- | --- |
@@ -490,7 +502,7 @@ the codebase carried as unrelated magic numbers are one rule.
 | Milk-cooler update (`@HU`) | an interrupted update can leave the cooler needing service | §5.15 |
 | PMode **writes** (`@TM:41` / `@TM:42`) | overwrites a user's stored recipe or slot assignment | §5.6.3–4 |
 | Batch settings read **reply layout** (`@TM:00,FC`) | still a pure guess — the one machine we can ask rejects the address. Mitigated: falls back to per-setting reads on any mismatch | §5.7 |
-| `@TR:52` **decode** (slot→function map) | the S8 EB *serves* this bank (below) but its raw pages have never been run through `SpecialCounterStatisticsParser`; a wrong map mislabels real counts | §5.5 |
+| `@TR:52` **decode** (slot→function map) | the S8 EB *serves* this bank and `--probe` now reads it live, but its pages have still never been checked against what the machine actually counted; a wrong map mislabels real counts. Note slot 0 (the bank total) reads `0xFFFF` there | §5.5 |
 | Counter banks `@TR:34/35/42..45` and the `@TF:05` reset | wrong slot mapping, or an irreversible zeroing of counters nobody meant to clear. The S8 EB rejects all of these with `@tr:00`, so they need a different machine | §5.5 |
 | `@TP:` recipe parameters F2, F5, F6, F8, F11, F17 | misbrew | §5.9 |
 | `cancel` (`@TG:FF`) | **not exercised**: `AGENTS.md` §2 calls it destructive while the code classes it read-only (below). Its behaviour on an idle machine is unknown | §5.8 |
@@ -498,19 +510,20 @@ the codebase carried as unrelated magic numbers are one rule.
 ### 9.3 New open questions the run created
 
 * **XML declaration ≠ firmware support, in the under-declaring
-  direction.** The S8 EB implements `@TR:52` and holds live values in
-  it (slots 2, 3 and 8 = 1, 14 and 2661) while its XML declares only
-  `@TR:32`. `read_counter_bank` trusts the XML and therefore sends
-  nothing, so `special-counters` reports "not implemented" about a bank
-  that plainly is. Raw probes settle which banks are real: `@TR:52` →
-  data, `@TR:33`/`@TR:34`/`@TR:42`/`@TR:44`/`@TR:53` → `@tr:00`.
+  direction — answered.** The S8 EB implements `@TR:52` and holds live
+  values in it (slots 2, 3 and 8 = 1, 14 and 2661) while its XML
+  declares only `@TR:32`. Raw probes settle which banks are real:
+  `@TR:52` → data, `@TR:33`/`@TR:34`/`@TR:42`/`@TR:44`/`@TR:53` →
+  `@tr:00`.
 
-  **Open design decision, deliberately not taken here:** keep trusting
-  the XML (what J.O.E. does), or probe every bank and let `@tr:00`
-  decide (one extra round trip per undeclared bank, read-only, and it
-  would surface this data). Nobody has checked whether an
-  *over*-declaring XML exists — that is the failure mode probing would
-  fix and declaration-trust would not.
+  **Decision taken:** the default keeps trusting the XML (what J.O.E.
+  does, no extra round trip), and `probe=True` / `--probe` is the
+  explicit opt-in that sends an undeclared bank anyway — read-only, one
+  extra round trip per undeclared bank, and the result is tagged
+  `source="probed"` so a consumer can tell it from a declared read. See
+  §4 and PROTOCOL.md §5.5. Nobody has checked whether an
+  *over*-declaring XML exists, but that direction never needed probing:
+  a declared bank is sent and `@tr:00` answers it.
 
 * **`AGENTS.md` §2 and `commands.DESTRUCTIVE_PREFIXES` disagree about
   `@TG:FF`.** The document lists it among the prefixes that change
@@ -559,7 +572,10 @@ value-per-risk — the first two are **read-only**:
    machine or it stays a guess forever.
 4. `@TR:52` on a machine that *declares* it (14 of 89 profiles), to
    check the slot→function map against a machine whose XML agrees with
-   its firmware.
+   its firmware. Cheaper first step on the S8 EB itself:
+   `special-counters --probe` and compare the named slots against what
+   the machine has really poured — it is read-only and needs no other
+   machine.
 
 ---
 

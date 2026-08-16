@@ -579,7 +579,8 @@ speaks.
 
 Only `@TR:32` has a dedicated result type (`ProductCounters`, whose
 shape downstream consumers depend on). Every other bank decodes into
-`CounterBank`, which carries the bank command alongside the same
+`CounterBank`, which carries the bank command and a `source` (how the
+read was justified — see "the opt-in probe" below) alongside the same
 `total` / `by_name` / `by_code` / `raw_slots` view. Slot 0 is the
 bank's own total everywhere.
 
@@ -639,10 +640,11 @@ its own: `JuraClient.read_counter_bank("@TR:33")` raises and points at
 (`((@tr:33,<page>,.*)|(@tr:00))`) and so does the client, falling back
 to the base table.
 
-The same rule governs the base banks: `JuraClient.read_counter_bank`
-sends nothing at all when the profile does not declare the bank, and
-returns `None` — not an exception — for both "not declared" and "the
-dongle answered `@tr:00` on page 0". Named commands
+The same rule governs the base banks by default:
+`JuraClient.read_counter_bank` sends nothing at all when the profile
+does not declare the bank, and returns `None` — not an exception — for
+both "not declared" and "the dongle answered `@tr:00` on page 0"
+(`probe=True` lifts the first half of that; see below). Named commands
 `special-counters`, `barista-counters`, `daily-brews` and
 `daily-barista-counters` wrap the four base banks; `@TR:32` keeps its
 own `brews`.
@@ -711,20 +713,54 @@ The five other banks answer the bare `@tr:00` rejection J.O.E.'s
 matcher expects, so the XML is not wrong about *those* — and the
 `@tr:00` shape itself is now hardware-observed rather than assumed.
 
-Consequence for this client: because
-`JuraClient.read_counter_bank` sends **nothing** when the profile does
-not declare the bank, `special-counters` on an S8 EB reports "does not
-implement the `@TR:52` counter bank" and never asks. That is the
-documented design (trust the XML), and it is wrong for this machine.
-Whether to keep trusting the XML or probe and let `@tr:00` decide is an
-open design question — see `docs/JOE_GAPS.md`.
+##### The opt-in probe
+
+Consequence for this client: `JuraClient.read_counter_bank` sends
+**nothing** when the profile does not declare the bank, so
+`special-counters` on an S8 EB reports "not declared" and never asks.
+That stays the default — it is what J.O.E. does and it costs no round
+trip — but the XML is now known to be a lower bound, so the read can be
+opted into:
+
+```
+read_counter_bank(bank, probe=True)      # library
+jura-connect command ... --probe special-counters   # CLI
+```
+
+`probe=True` sends the bank anyway and keeps the data if the machine
+answers. A first-page `@tr:00` still means "not implemented" and still
+returns `None`, exactly as for a declared bank, so the probe can only
+add information. It also covers the probed bank's **overflow** bank
+(`@TR:53` for `@TR:52`) — an undeclared bank has an undeclared overflow
+bank, and without it a probed count would silently truncate at 65535;
+that costs one further round trip and ends on the same `@tr:00`. It
+reaches nothing else: not another bank, not another command, and never
+anything that writes.
+
+Probed data is a weaker claim than declared data, so the two are kept
+apart rather than blurred. `CounterBank.source` records which it was —
+`declared`, `probed`, or `unprofiled` (no profile loaded, so there was
+no declaration to consult either way) — and both `format()` and
+`to_dict()` say so; `to_dict()` additionally carries a plain
+`"probed": true/false` for consumers such as the Home Assistant
+integration.
+
+Nobody has checked whether an *over*-declaring XML exists — a machine
+that declares a bank its firmware rejects. That direction is already
+safe: the declared read is sent, the machine answers `@tr:00`, and the
+client reports "not implemented".
 
 > **Still untested against hardware:** the *decoding* of every bank
-> above except `@TR:32`. Kaffeebert's `@TR:52` reply was captured but
-> not decoded through `CounterBank`/`SpecialCounterStatisticsParser`,
-> because the profile gate refuses the read; the slot→function map
-> (`sweetFoam` = slot 3, `coldBrew` = slots 4+5+6, …) remains
-> APK-derived. `@TR:34`/`@TR:35`, the four daily banks and `@TF:05` are
+> above except `@TR:32`. Kaffeebert's `@TR:52` pages were captured but
+> have never been run through
+> `CounterBank`/`SpecialCounterStatisticsParser` on the machine itself
+> — the simulator replays them (`tests/test_counter_banks.py`), and
+> `--probe` now makes the live read possible, but nobody has confirmed
+> what those numbers mean. The slot→function map (`sweetFoam` = slot 3,
+> `coldBrew` = slots 4+5+6, …) remains APK-derived, and note that the
+> S8 EB leaves slot 0 — the bank's own total — at the `0xFFFF` unused
+> sentinel, so `CounterBank.total` reads 65535 there.
+> `@TR:34`/`@TR:35`, the four daily banks and `@TF:05` are
 > unverified in every respect — the command form follows the shared
 > `@TR:<bank>,<page>` grammar, but no implementation has ever been
 > observed sending them and `@TF:05` has never been observed being
