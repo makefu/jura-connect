@@ -43,9 +43,19 @@ factory reset on the machine itself to recover), reset maintenance
 counters (irreversible):
 
 ```
-@TG:21 @TG:23 @TG:24 @TG:25 @TG:26 @TG:7E @TG:FF
-@TF:02 @AN:02 @TP: @HW:
+@TG:01 @TG:04 @TG:10 @TG:21 @TG:23 @TG:24 @TG:25 @TG:26 @TG:7E
+@TF:02 @TF:05 @AN:02 @TP: @HW: @TM:3C,
+@TS:F1 @TT:01 @TT:02 @TT:03 @TT:08 @TV:81 @TV:82
+@HB @HO: @HD: @HE @HT:
 ```
+
+Plus one *exact* match, `@HU` (`DESTRUCTIVE_EXACT`): it cannot be a
+prefix, because it would swallow the `@HU?` read.
+
+`@TG:FF` used to be on this list and is not any more. It is J.O.E.'s
+`WifiCommandCancelProductStep` — "abort the running step" — and is now
+the ungated `cancel` command. Note the trailing comma on `@TM:3C,`:
+without it the gate would swallow `mem-read 3C`.
 
 Hard rules:
 
