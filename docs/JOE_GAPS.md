@@ -43,7 +43,7 @@ for what is *implemented* and how. This file is the scoreboard.
 | PMode slot read | yes | yes |
 | PMode slot/product **write** | yes | yes (APK-derived, untested) |
 | Start product (`@TP:`) | yes, + preselections | yes, + preselections (blob live-verified; preselection encoding untested) |
-| Product progress state machine (`@TV:`) | yes, `ProgressState` | yes — 87 states, `ProductProgress`, `iter_progress` / `follow_progress` / `brew(follow=True)` |
+| Product progress state machine (`@TV:`) | yes, `ProgressState` | yes — 87 states, `ProductProgress`, `iter_progress` / `follow_progress` / `brew(follow=True)`; **the coffee path is hardware-verified (2026-08-16)**, milk/steam states are not |
 | Maintenance processes with user interaction | yes | yes — `ProcessRunner` over `@TG:01` / `@TG:04` / `@TG:10` |
 | Coffee timer (scheduled brew) | yes | yes (APK-derived, untested) |
 | Language download | yes (+ CDN fetch) | yes, minus the fetch — caller supplies the S-records; the `@TT:00`/`@TM:23` **reads** are hardware-verified, the writes are not |
@@ -181,9 +181,18 @@ Consumed as `JuraClient.iter_progress()` (generator),
 the read-only `progress` CLI command. `@TV:81` / `@TV:82` / `@TV:84` are
 *not* progress frames and `is_progress_frame` filters them.
 
-Remaining unknowns are recorded in PROTOCOL.md §9: no full raw capture
-of a real brew, no milk drink, no bypass frame, no `8F` extended-window
-frame, and 18 of EF1091's states are absent from the app's own enum.
+**Hardware-backed since 2026-08-16 for the coffee path**: a full raw
+capture of a hand-started `cafe_barista` on the S8 EB decoded all 32 of
+its `@TV:` frames with zero failures, pinning the value window, the
+percentage slot, states `39`/`3C`/`41`/`3E`, product resolution and the
+`41` bypass branch — see §9.1.1 and
+[`captures/2026-08-16-kaffeebert-brew-progress.md`](captures/2026-08-16-kaffeebert-brew-progress.md).
+
+Remaining unknowns are recorded in PROTOCOL.md §9: no milk drink
+(states `31`–`37`, `42`, `43`), no `41` frame from a bypass-free recipe,
+no `8F` extended-window frame, no process / timer / P-mode frame, an
+unexplained bare `@TS` after the brew, and 18 of EF1091's states are
+absent from the app's own enum.
 
 ---
 
@@ -477,11 +486,43 @@ rejection token.** `@tm:80`, `@tm:A3`, `@tm:C1`, `@tm:C2` and the
 APK's `@tm:D0` are all just `request_address | 0x80`. Four constants
 the codebase carried as unrelated magic numbers are one rule.
 
+### 9.1.1 Closed by the 2026-08-16 brew capture — `@TV:` progress
+
+The one gap the command run could not close (nobody brewed during it)
+was closed the same day by a second, read-only capture of a
+hand-started `cafe_barista`:
+[`captures/2026-08-16-kaffeebert-brew-progress.md`](captures/2026-08-16-kaffeebert-brew-progress.md).
+All 32 `@TV:` frames decoded, zero failures.
+
+**Hardware-backed for the coffee path:** the 16-byte frame length; the
+value window starting at payload byte 2; the percentage at window slot
+12 (the second-to-last byte) and its being a *whole-product* figure
+rather than per-phase; states `39` (strength 7/7 while grinding), `3C`
+(water ticks 0→9 = 45 ml), `41` and `3E`; the `41` →
+`BYPASS_WATER_VOLUME` branch, which was the shakiest rule in
+`progress.py`; `FF` as the "product does not use this slot" sentinel;
+product resolution of byte 1 against the machine profile; `ProgressType`
+rule 3 (`PRODUCT`); `@TB` as the brew-start marker.
+
+**Corrected by it:** §5.10 used to claim the *other* `41` branch
+(`HOTWATER_VOLUME`, slot 6 = `0xFF`) was the live-verified one. It is
+not, and it remains unobserved.
+
+**Learned, not previously suspected:** the `@TF:` broadcast stops for
+the whole brew (51.6 s of silence), and `ENJOY` is level-triggered —
+the machine repeated `@TV:3E28` five times, so a consumer that counts
+brews on `is_complete` must edge-trigger.
+
+Regression tests replay the real frames verbatim
+(`tests/test_progress_capture.py`), and the frame list is tracked as
+`simulator.CAPTURED_S8EB_CAFE_BARISTA_BREW` so the simulator can push
+the observed sequence instead of its model.
+
 ### 9.2 Still unverified
 
 | Area | Risk if wrong | PROTOCOL.md |
 | ---- | ------------- | ----------- |
-| `@TV:` progress decode (87 states, value window, percent at slot 12) | wrong readings in a UI; a missed `ENJOY` leaves `follow_progress` waiting for the timeout | §5.10 |
+| `@TV:` progress — the **milk/steam states** (`31`–`37`, `42`, `43`), the `41` → `HOTWATER_VOLUME` branch, the `8F` extended window, and the process / coffee-timer / P-mode / quality-assistant frame types | wrong readings in a UI for anything but a plain coffee. The coffee path itself is now hardware-backed (§9.1.1) | §5.10 |
 | Maintenance processes (`@TG:01` / `@TG:04` / `@TG:10`, state ordering) | a confirmation sent at the wrong moment advances a physical cycle and consumes supplies; a wrong finish state hangs the run | §5.11 |
 | Coffee timer (`@TM:3C` + `@TV:84`) | the machine pours later, unattended, possibly the wrong product | §5.12 |
 | Preselections in `@TP:` (byte overwrites, `IntakeF18` mask) | misbrew — a wrong byte overwrites a recipe parameter | §5.13 |
@@ -540,16 +581,19 @@ discovery, the `@HP:` handshake and pairing, `@TG:43` / `@TG:C0`,
 `@TS:01` / `@TS:00`, single-setting `@TM:` reads and writes,
 `@TM:50` / `@TM:41` / `@TM:42` reads, **`@TM:60` limit load**,
 **`@TT:00`'s silence and `@TM:23` → `@tm:A3`**, **`@TR:52`'s existence
-on an undeclaring machine**, `@HU?` → `@hu:800`, and the 16-byte
-`@TP:` blob for water / strength / temperature / bypass.
+on an undeclaring machine**, `@HU?` → `@hu:800`, the 16-byte
+`@TP:` blob for water / strength / temperature / bypass, and — since
+the brew capture — **the `@TV:` progress decode for the coffee path**
+(§9.1.1).
 
 Cheapest things a machine owner could confirm next, in order of
 value-per-risk — the first two are **read-only**:
 
-1. A raw capture of a front-panel brew and of a cleaning cycle
-   (settles most of §3 and the state ordering in §2) — `progress` and
-   `process-watch` both send nothing, so this costs only patience and
-   one coffee. Nothing else in the risk table is this cheap.
+1. A raw capture of a **milk** drink and of a **cleaning cycle**
+   (settles the rest of §3 and the state ordering in §2) — `progress`
+   and `process-watch` both send nothing, so a milk drink costs only
+   patience and one cappuccino. The coffee half of §3 was settled this
+   way on 2026-08-16; nothing else in the risk table is this cheap.
 2. `@TM:41` / `@TM:42` **reads** on a machine whose XML says
    `Productprogramming="true"` (20 of 89 profiles, e.g. EF1143 /
    EF529). EF1091 answers `@tm:C1` / `@tm:C2` to everything, so the

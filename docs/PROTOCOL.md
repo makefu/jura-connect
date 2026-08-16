@@ -16,6 +16,7 @@ verbatim frame log; claims marked *APK-derived* or *untested* are not.
 | Capture | Machine | Covers |
 | ------- | ------- | ------ |
 | [`2026-08-16-kaffeebert-s8eb.md`](captures/2026-08-16-kaffeebert-s8eb.md) | S8 EB / EF1091, TT237W | the whole non-destructive command registry: `@TM:60` limits, the `@TM:00,FC` settings bank, `@TR:52`, `@TT:00`, `@HU?`, `@TS:01`/`@TS:00`, PMode, the maintenance banks |
+| [`2026-08-16-kaffeebert-brew-progress.md`](captures/2026-08-16-kaffeebert-brew-progress.md) | S8 EB / EF1091 | every frame of a hand-started `cafe_barista`: `@TB`, the 32 `@TV:` progress frames (states `39`/`3C`/`41`/`3E`), the repeated `ENJOY`, and a stray `@TS` |
 
 ---
 
@@ -326,7 +327,8 @@ cleartext body is just the inner CRLF. `JuraClient.close()` sends that.
 | `@TV:<hex>` | brewing-in-progress / product progress — decoded, see §5.10 |
 | `@TV:81,<text>` / `@TV:82,<text>` | language-download display lines — **not** progress |
 | `@TV:84,<time>` | coffee-timer clock sync — **not** progress |
-| `@TB` | brew started (sent right after an accepted `@TP:`) |
+| `@TB` | brew started (sent right after an accepted `@TP:`, and 19 ms before the first `@TV:` of a hand-started brew) |
+| `@TS` | **bare, no colon, no payload** — pushed 1.8 s after the last `ENJOY` of a captured brew, 3 ms before the `@TF:` broadcast resumed. Meaning unresolved; J.O.E. has no handler for it. See §9 |
 | `@hu:<code>` | milk-cooler / OTA-family acknowledgement code — 3 hex chars (`800` seen on Kaffeebert); also carries `ok` / `wait` / `busy` / `abort` / `error` tails on other verbs |
 
 ### 5.3 Maintenance counter layout (`@TG:43`, `@TG:C0`)
@@ -1346,11 +1348,17 @@ unused bytes are `0x00` and whose byte 8 is a constant `0x01`**:
 * No trailing checksum is needed (unlike `@TM:` writes), and no
   `@TS:01`/`@TS:00` lock wrapper is required.
 * Reply behaviour: the dongle ACKs an **accepted** blob with a bare
-  `@tp`, then emits `@TB` when the brew starts, `@TV:41<code>…`
-  progress frames (byte 4 = current tick, byte 5 = target ticks,
-  second-to-last byte = percent 0x00–0x64), and `@TV:3E<code>` on
-  completion. A **rejected/ignored** blob gets `@tp:00` and no further
-  frames — `@tp:00` is *not* an accept.
+  `@tp`, then emits `@TB` when the brew starts, a run of `@TV:` progress
+  frames (second-to-last byte = percent 0x00–0x64), and `@TV:3E<code>`
+  on completion. A **rejected/ignored** blob gets `@tp:00` and no
+  further frames — `@tp:00` is *not* an accept.
+  The earlier form of this bullet said the progress frames are
+  `@TV:41<code>…` with the tick at byte 4 and the target at byte 5.
+  The full capture in
+  [`2026-08-16-kaffeebert-brew-progress.md`](captures/2026-08-16-kaffeebert-brew-progress.md)
+  shows that is the `@TV:3C…` (water) frame; the `@TV:41…` frames that
+  follow it carry the *bypass* pair at bytes 8/9 and leave bytes 4/5
+  frozen. See §5.10.
 * A machine in `energy_safe` wakes on the first `@TP:` but may ignore
   that first command; a retry then brews. `JuraClient.brew(retry=True)`
   opts into resending the blob once if the first reply is not an accept
@@ -1418,11 +1426,17 @@ set" into "brewing, 60 %".
 @TV:<hex payload>
 ```
 
-**Provenance.** The layout below is **APK-derived** — decompiled from
+**Provenance.** The layout below was **APK-derived** — decompiled from
 `Progress`, `ProgressParser`, `ProgressState`, `ProductProgressState`
-and `ProductArgument` in J.O.E. 4.6.10 — and is **not** hardware
-verified as a whole. Two parts *do* match the live S8 EB capture in
-§5.9 and are marked **[live]** below; everything else is
+and `ProductArgument` in J.O.E. 4.6.10. The **coffee path is now
+hardware-confirmed**: a full raw capture of a hand-started
+`cafe_barista` on an S8 EB / EF1091 decoded all 32 of its `@TV:` frames
+with zero failures
+([`2026-08-16-kaffeebert-brew-progress.md`](captures/2026-08-16-kaffeebert-brew-progress.md)).
+Everything that brew exercised is marked **[live]** below and every
+number in it is quoted from that capture; everything it did not touch
+— the milk and steam states, the `8F` extended window, the process /
+coffee-timer / P-mode / quality-assistant frame types — stays
 **[APK, untested]**.
 
 #### Payload layout
@@ -1453,42 +1467,77 @@ index the window, not the payload:
 | 13 | invalid / padding |
 
 A 16-byte payload (2 head + 14 window) therefore puts the percentage
-at payload byte 14, the second-to-last byte — which is exactly where
-the live capture in §5.9 saw it, and window slots 2/3 land on payload
-bytes 4/5, exactly where §5.9 saw "current tick / target ticks".
-**[live]** The frame is decoded defensively: any slot the payload is
-too short to reach decodes as `None` rather than raising.
+at payload byte 14, the second-to-last byte, and window slots 2/3 land
+on payload bytes 4/5. **[live]** Both are confirmed frame by frame in
+the brew capture: every one of its 32 frames was exactly 16 bytes with
+the percentage at byte 14 (`00` → `64`, monotone, always a multiple of
+10), and the water tick/target sat at bytes 4/5 throughout the `3C`
+phase. The frame is decoded defensively: any slot the payload is too
+short to reach decodes as `None` rather than raising — which the
+capture also exercised, because the `ENJOY` frame is a bare `@TV:3E28`
+with no window at all. **[live]**
+
+The percentage is a **whole-product** figure, not a per-phase one:
+during the captured brew it ran 0 → 60 % across the water phase and
+60 → 100 % across the bypass phase. **[live]** `actual`/`maximum` (and
+therefore `fraction`) are per-phase and reach 1.0 more than once per
+product, so a progress bar must follow `percent` and must not recompute
+it from the tick pair.
+
+Tick counts are **reported, not interpolated**: the captured water
+ticks went 0,0,0,0,0,1,2,3,4,5,5,7,7,8,9 (no 6) and the bypass ticks
+0,1,1,4,6,8,9. Gaps and repeats are normal. **[live]**
+
+Slots a product does not use read `FF`: `cafe_barista` left slots 4/5
+(milk time) and 9/10 (pause) at `FF` in every frame. **[live]** Slots
+8 and 11 carried a constant `0x11` for the whole brew — unexplained,
+see §9.
 
 #### Which slots a state reports
 
 Only some states carry a live value pair; for the rest the decoder
 falls back to "window slot 0 is the value" (plus slot 1 as the maximum
-in an `8F` frame). **[APK, untested]**
+in an `8F` frame). **[APK, untested]** except where marked.
 
-| state | reports | actual idx | max idx |
-| ----- | ------- | ---------- | ------- |
-| `19` | SMART_ALERT_PAUSE | 0 | 1 |
-| `31` | MILK_FOAM_BEAN_AMOUNT | 0 | 1 |
-| `32` | MILK_FOAM_MILK_VOLUME | 4 | 5 |
-| `33` | MILK_FOAM_PAUSE | 9 | 10 |
-| `34` | MILK_FOAM_VOLUME | 6 | 7 |
-| `37` | MILK_FOAM_WATER_VOLUME | 2 | 3 |
-| `39` | COFFEE_BEAN_AMOUNT | 0 | 1 |
-| `3C` | COFFEE_WATER_AMOUNT | 2 | 3 |
-| `40` | HOTWATER_TEMPERATURE | 8 | 8 |
-| `41` | HOTWATER_VOLUME | 2 | 3 |
-| `41` | BYPASS_WATER_VOLUME (see below) | 6 | 7 |
-| `43` | STEAM_TEMPERATURE | 6 | 7 |
+| state | reports | actual idx | max idx | evidence |
+| ----- | ------- | ---------- | ------- | -------- |
+| `19` | SMART_ALERT_PAUSE | 0 | 1 | APK, untested |
+| `31` | MILK_FOAM_BEAN_AMOUNT | 0 | 1 | APK, untested |
+| `32` | MILK_FOAM_MILK_VOLUME | 4 | 5 | APK, untested |
+| `33` | MILK_FOAM_PAUSE | 9 | 10 | APK, untested |
+| `34` | MILK_FOAM_VOLUME | 6 | 7 | APK, untested |
+| `37` | MILK_FOAM_WATER_VOLUME | 2 | 3 | APK, untested |
+| `39` | COFFEE_BEAN_AMOUNT | 0 | 1 | **[live]** 7/7 while grinding |
+| `3C` | COFFEE_WATER_AMOUNT | 2 | 3 | **[live]** 0→9 ticks = 45 ml |
+| `40` | HOTWATER_TEMPERATURE | 8 | 8 | APK, untested |
+| `41` | HOTWATER_VOLUME | 2 | 3 | APK, untested (see below) |
+| `41` | BYPASS_WATER_VOLUME (see below) | 6 | 7 | **[live]** 0→9 ticks = 45 ml |
+| `43` | STEAM_TEMPERATURE | 6 | 7 | APK, untested |
+
+State `39` reports the **configured** strength, not a countdown: the
+capture's four grind frames all read 7/7, and 7 is the strength in the
+`@TP:` blob that brews the same product (§5.9). Do not render it as
+progress. **[live]**
 
 **The `41` disambiguation.** State `41` is overloaded. The app reads
 it as `HOTWATER_VOLUME` (slots 2/3) **only when window slot 6 is
 `0xFF`**, and as `BYPASS_WATER_VOLUME` (slots 6/7) otherwise —
 including when the payload is too short to contain slot 6. Slot 6 is
 the bypass-water slot, so `0xFF` reads as "no bypass in this recipe,
-the water figure is the real one". The live S8 EB brew in §5.9 showed
-tick/target at payload bytes 4/5 — i.e. the `HOTWATER_VOLUME`
-reading — so on that firmware slot 6 was `0xFF`. **[live for the
-`0xFF` branch, APK-only for the bypass branch]**
+the water figure is the real one".
+
+The **bypass branch is confirmed on hardware**, and it was the shakier
+half. In the captured `cafe_barista` (45 ml bypass) every `41` frame
+had slot 6 ≠ `FF`; slots 6/7 climbed 0→9 while slots 2/3 sat frozen at
+`9/9` from the finished water phase. Reading `HOTWATER_VOLUME` there
+would have reported a dead 9/9 for the whole phase. **[live]**
+
+Earlier revisions of this section said the opposite — that §5.9's live
+frames showed the `HOTWATER_VOLUME` reading, "so on that firmware slot
+6 was `0xFF`". That was a misattribution: payload bytes 4/5 do move,
+but during state `3C`. **The `0xFF` / `HOTWATER_VOLUME` branch has
+never been observed** and needs a product with no bypass (e.g.
+`hotwater_portion`, `0x0D`).
 
 #### Frame type
 
@@ -1503,6 +1552,11 @@ decoder mirrors it exactly:
 6. state `FF` → `P_MODE`;
 7. otherwise → `NONE`.
 
+Rule 3 is **[live]**: all 32 frames of the captured brew resolved byte
+1 `0x28` to `cafe_barista` against the EF1091 profile and classified as
+`PRODUCT`. The other six rules are **[APK, untested]** — no process,
+timer, aroma or P-mode frame has ever been seen on a wire.
+
 "Known product code" means the loaded `MachineProfile` has it — so
 this is profile-dependent: with no profile (or the wrong EF code) a
 product frame classifies as `NONE`, while the value window still
@@ -1512,7 +1566,7 @@ ExecuteCommand="@TG:xx">` element; all 89 bundled XMLs use only
 `25` Decalc, `26` FilterChange, so `jura_connect.progress.PROCESS_CODES`
 hard-codes those six.
 
-#### `ProgressState` — all 87 codes **[APK, untested]**
+#### `ProgressState` — all 87 codes, four of them observed
 
 ```
 01 INSERT_TRAY                  02 FILL_WATERTANK               03 EMPTY_GROUNDS
@@ -1546,8 +1600,21 @@ E5 FILTER_THANKS                E6 TOO_HOT                      EF WIFI_CONFIGUR
 FE AROMA_PRESELECT              FF P_MODE                       00 INVALID
 ```
 
-`3E` (`ENJOY`) ends a product — the live capture in §5.9 saw exactly
-that frame when the cup was done. **[live]**
+Exactly four of these have been seen on a wire, all in the brew
+capture: `39`, `3C`, `41`, `3E`, in that order. The remaining 83 are
+**[APK, untested]** — a code this firmware family invented decodes to
+`state = None` with the raw byte kept in `state_code`, never an
+exception.
+
+`3E` (`ENJOY`) ends a product. **[live]** It is a bare `@TV:3E<code>`
+with no value window, and it is **level-triggered, not edge-triggered**:
+the captured machine repeated it five times, ~2 s apart, until
+something cleared the state ~10 s later. `is_complete` is therefore a
+*state*, and a caller that counts brews or fires a notification on it
+must act on the transition into `ENJOY`, or it acts once per repeat.
+`JuraClient.follow_progress()` breaks on the first one; code driving
+`iter_progress()` directly has to do this itself. The repeat count is
+not a constant to rely on.
 
 #### `@TV:` frames that are *not* progress
 
@@ -1580,6 +1647,21 @@ lines; it is read-only (it sends nothing). The simulator models the
 whole chain — `@tp` → `@TB` → rising `@TV:41…` frames → `@TV:3E…` —
 behind `SimulatorConfig(allow_brew=True)`, which is off by default so
 an accidental `@TP:` in a test still gets refused with `@an:error`.
+That model is a simplification; the captured brew is available verbatim
+as `simulator.CAPTURED_S8EB_CAFE_BARISTA_BREW` and can be pushed
+instead via `SimulatorConfig(brew_script=…)`, which is what
+`tests/test_progress_capture.py` replays through the full client stack.
+
+#### Frame cadence during a brew **[live]**
+
+The dongle's ~2.05 s `@TF:` broadcast **stops for the duration of the
+product** and `@TV:` takes over the same slot: the capture has a 51.6 s
+window with no `@TF:` frame at all, bracketed by `@TB` and the `@TS`
+below. Anything using `@TF:` arrival as a liveness signal must tolerate
+a ~1 minute gap per brew. The `@TV:` stream itself runs on the same
+~2 s beat plus occasional extra frames as little as 0.13 s apart; most
+of the extras carry a changed percentage, but not all of them do, so
+"a new frame means something changed" is false.
 
 ### 5.11 Maintenance processes and the state machine — **APK/XML-derived, untested**
 
@@ -2697,13 +2779,43 @@ breaks both halves of the test-suite simultaneously.
   never sent to a machine. A machine whose XML carries
   `Productprogramming="true"` (20 of the 89 bundled profiles, e.g.
   EF1143 / EF529) is what's needed to confirm them.
-* `@TV:` decoding (§5.10) is APK-derived and verified only against the
-  simulator plus the two live observations recorded in §5.9. Wanted
-  from real hardware: a full raw capture of a brew (to pin the frame
-  *length* and confirm the percentage really sits at window slot 12
-  rather than 11), a milk drink (states `31`–`37`), a `41` frame from
-  a recipe with bypass (to confirm the `BYPASS_WATER_VOLUME` branch),
-  and any `8F` extended-window frame — we have never seen one.
+* `@TV:` decoding (§5.10): the **coffee path is settled**. The
+  2026-08-16 brew capture pinned the 16-byte frame length, the window
+  origin, the percentage at slot 12 (not 11), states `39`/`3C`/`41`/`3E`
+  and the `BYPASS_WATER_VOLUME` branch of `41`. Still wanted from
+  hardware: a **milk drink** (states `31`–`37`, `42`, `43` — the whole
+  milk half of the table is untouched), a `41` frame from a recipe with
+  **no** bypass (the `0xFF` → `HOTWATER_VOLUME` branch, which turns out
+  never to have been observed), a maintenance cycle's process frames, a
+  coffee-timer or P-mode frame, and any **`8F` extended-window** frame —
+  we have still never seen one, and nothing in the app says which
+  machines emit it.
+* **What is a bare `@TS`?** Ten seconds after the last `ENJOY` of the
+  captured brew the machine pushed `@TS` — uppercase, no colon, no
+  payload — 3 ms before the `@TF:` broadcast resumed. Nothing had been
+  sent; the watcher only ever issued the handshake. J.O.E. cannot
+  explain it: `TCPReceiveHandler` routes `@hu:`, `@TV:` and `@TF:` and
+  drops everything else as "no parser matched", and neither `@TB` nor
+  `@TS` appears anywhere in the decompiled app. Two readings fit — an
+  end-of-product bookend for `@TB`, or a "the panel is free again"
+  notification matching the `@TS:` key-block verb (`@TS:01` has always
+  been recorded as answering `@TB` **then** `@ts`, so `@TB` is not
+  brew-specific either). Cheap experiment: lock and unlock an idle
+  machine with `@TS:01` / `@TS:00` and watch for an unsolicited `@TS`.
+* **A pushed marker can be mistaken for a reply.** `@TB` and `@TS` are
+  uppercase and payloadless, and `JuraClient.request()` without a
+  `match` pattern returns the first frame that is not `@TF:`/`@TV:` —
+  so a marker arriving between a command and its answer would be
+  returned as the answer. `lock_screen` / `unlock_screen` are safe by
+  accident (they match the lowercase `^@ts`), but `brew()` sends
+  `@TP:` with no matcher, and the capture cannot rule out that the
+  dongle emits `@TB` *before* the `@tp` ack on a remote start. Untested
+  either way; worth a matcher when someone next brews over the wire.
+* **Window slots 8 and 11 held a constant `0x11`** through every frame
+  of the captured brew (slot 8 is `max water temperature` in the app's
+  table, slot 11 the unused `INTAKE_PERCENTAGE`). Neither 17 corresponds
+  to anything in the recipe — the blob's temperature byte was `0x00`.
+  Unexplained; harmless, since the decoder reads neither.
 * **18 of EF1091's 83 `<STATE>` entries have no `ProgressState`
   counterpart** in the app's own enum (§5.11) — including `26` "Press
   Rinse", the state a cleaning cycle parks on. Either J.O.E. never
