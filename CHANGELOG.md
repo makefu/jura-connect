@@ -96,19 +96,70 @@ so in `docs/PROTOCOL.md`.
   machine available to the project declares the bank, so this path is
   covered by the simulator and by the decompiled app only.
 
+### Breaking changes for library consumers
+
+Checked mechanically against the `v0.12.0` tag: **no public class or
+function was removed and no signature lost a parameter.** Every break
+below is structural or behavioural, so it will surface at runtime rather
+than at import. `ProductCounters`, `MachineInfo`, `SettingValue`,
+`ProgramModeSlots` and `PModeSlot` are untouched, and `MachineStatus`
+only gained fields.
+
+- **`MaintenanceCounters` / `MaintenancePercent` changed shape.** The
+  six (resp. three) dataclass *fields* became a single ordered
+  `counters` / `percent` tuple of `(name, value)` pairs, because the
+  field order is per machine (see Fixed). The old names still work for
+  **reading** — they are now properties returning `int | None`:
+
+  ```python
+  counters.cleaning          # still fine, but may be None now
+  counters.get("cappu_rinse")  # explicit, returns None when unreported
+  ```
+
+  What breaks: constructing one directly
+  (`MaintenanceCounters(cleaning=26, …)` — use `parse()`),
+  `dataclasses.replace()` / `asdict()` / `astuple()` on them, and any
+  code assuming the attributes are always `int`. On a machine that
+  reports four counters, `cappu_rinse` and `cappu_clean` are `None`.
+- **`to_dict()` key sets are no longer fixed** for those two types: a
+  counter the machine does not report is absent, not zero. Consumers
+  that index (`d["cappu_rinse"]`) must use `.get()`. This is the one
+  most likely to bite the Home Assistant integration.
+- **The `reset-counters` command no longer exists**; it is
+  `skip-quality-step` with an optional `one` / `all` argument.
+  `run_named(client, "reset-counters")` now raises `CommandError`, and
+  any CLI script using the old name fails. The rename is not cosmetic:
+  `@TG:7E` is the quality-assistant skip, and calling it
+  "reset counters" invited exactly the accident that named it.
+- **`read_status()` no longer puts `@HU?` on the wire.** It waits for
+  the `@TF:` frame the dongle pushes on its own. Callers that relied on
+  the send (some firmwares want traffic on the socket first) pass
+  `read_status(nudge=True)`. Timing changes: the call now returns on the
+  machine's own broadcast interval, roughly every two seconds on an
+  S8 EB, instead of immediately after a round trip.
+- **`close()` sends an empty frame instead of `@HE`.** Anything
+  asserting on the closing frame — a proxy, a capture-based test — sees
+  a different byte sequence. `@HE` is the OTA-end verb and is now gated.
+- **`DESTRUCTIVE_PREFIXES` is no longer the whole gate.** `@TG:FF` left
+  the tuple (it is the ungated `cancel`) and ten families joined it, and
+  `@HU` cannot be a prefix at all because it would swallow the `@HU?`
+  read — it lives in the new `DESTRUCTIVE_EXACT`. Code that matched the
+  tuple by hand must call `match_destructive(payload)` instead, which is
+  what the runtime gate, the `raw` inspector and the simulator all use.
+- **`ProductDef.build_recipe_hex()` can return a 17-byte blob.**
+  Products declaring `Argument="F17"` (grinder freeness) previously
+  raised; they now build the 17-byte form the app builds. Callers that
+  hard-code a 32-hex-character length need to relax that check.
+  Products without F17 still produce the byte-identical 16-byte blob.
+- **`MachineProfile.has_pmode` changed meaning.** It used to probe for a
+  `<PROGRAMMODE>` element that exists in no bundled XML, so it was
+  always `False`; it now reflects `<MACHINESETTINGS Productprogramming>`
+  and is `True` for 20 profiles. Code branching on it will take the
+  other path for the first time.
+
 ### Changed
-- **Breaking:** `MaintenanceCounters` and `MaintenancePercent` hold
-  ordered name/value pairs. The named attributes remain as `int | None`
-  properties, and `to_dict()` omits counters a machine does not report —
-  a four-counter machine has no `cappu_rinse` key.
-- **Breaking:** `reset-counters` is now `skip-quality-step [one|all]`.
-  `@TG:7E` is the app's `WifiCommandCancelQualityAssistantStep`, but it
-  was also observed zeroing the maintenance counters on TT237W, so it
-  stays gated and its danger string states both readings.
-- **Breaking:** `read_status()` no longer sends `@HU?`. It waits for the
-  `@TF:` frame the dongle pushes on its own, the way the app does;
-  `read_status(nudge=True)` keeps the old send for firmwares that want
-  traffic on the socket first.
+- The three API-level breaks are described in full under **Breaking
+  changes for library consumers** above.
 - Destructive gating grew an exact-match tier. `@HU` cannot be a prefix
   because it would swallow the `@HU?` read, so `match_destructive()` is
   now the single matcher shared by the runtime gate, the `raw` payload
