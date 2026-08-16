@@ -108,6 +108,37 @@ def _capped_join(items: list[str], limit: int = 10) -> str:
     return ", ".join(items[:limit]) + f", … (+{len(items) - limit} more)"
 
 
+#: A frame the machine pushes on its own that is a *marker*, not a
+#: reply: a bare two-letter upper-case verb with no colon and no
+#: payload. Two are known, both seen on an S8 EB that was only ever
+#: sent a handshake (PROTOCOL.md §5.2, docs/captures/2026-08-16-
+#: kaffeebert-brew-progress.md): ``@TB`` when a brew (or a ``@TS:01``
+#: screen lock) starts, and ``@TS`` ~10 s after the last ``ENJOY``.
+#:
+#: The pattern is deliberately narrow. Replies in this protocol are
+#: lower-case (``@tp``, ``@ts``, ``@tg:43…``, ``@hu:800``) and pushes
+#: are upper-case, so an upper-case *payload-less* frame cannot be an
+#: answer to anything we send; anything with a body stays a candidate
+#: reply and is handed to the caller untouched.
+_MARKER_FRAME_RE = re.compile(r"^@[A-Z]{2}$")
+
+#: Reply matcher for ``@TP:`` (brew). ``@tp`` accepts, ``@tp:00`` is the
+#: ACK-and-ignore rejection, ``@an:error`` is a refusal; the ``\b``
+#: keeps the alternatives from matching a longer verb. Without an
+#: explicit matcher a pushed ``@TB`` / ``@TS`` would be returned as the
+#: reply and invert the accept/reject decision below.
+#:
+#: A superset of J.O.E.'s own matcher for the command
+#: (``WifiCommandStartProduct``: ``@tp(:|:[0-9]{2})?``), widened only by
+#: the ``@an:`` refusal token this library surfaces instead of hiding.
+BREW_REPLY_MATCH = re.compile(r"(?i)^@(?:tp|an)\b")
+
+
+def _is_marker_frame(frame: str) -> bool:
+    """True for an unsolicited, payload-less marker (``@TB`` / ``@TS``)."""
+    return _MARKER_FRAME_RE.match(frame.strip()) is not None
+
+
 def _is_brew_accept(reply: str) -> bool:
     """True when a ``@TP:`` reply means the machine accepted the brew.
 
@@ -348,7 +379,10 @@ class JuraClient:
                 raise PairingTimeout(
                     f"no @hp4/@hp5 reply within {timeout:.1f}s"
                 ) from exc
-            if reply.startswith(("@TF:", "@TV:")):
+            if reply.startswith(("@TF:", "@TV:")) or _is_marker_frame(reply):
+                # Pushed frames, not the handshake answer: a machine that
+                # is mid-brew or mid-lock when a client pairs puts @TF:/
+                # @TV:/@TB on the wire before it ever says @hp4.
                 self.status_history.append(reply)
                 continue
             result = _classify(reply)
@@ -372,9 +406,10 @@ class JuraClient:
         """Send ``cmd`` and return the first matching reply.
 
         ``match`` may be a regex source or compiled pattern. When ``None``
-        the first reply that isn't an unsolicited ``@TV:``/``@TF:`` status
-        frame is returned. Status frames seen along the way are appended
-        to :attr:`status_history`.
+        the first reply that is neither an unsolicited ``@TV:``/``@TF:``
+        status frame nor a bare marker (``@TB`` / ``@TS``) is returned.
+        Every pushed frame seen along the way is appended to
+        :attr:`status_history`.
         """
         if isinstance(match, str):
             pattern: re.Pattern[str] | None = re.compile(match)
@@ -390,13 +425,21 @@ class JuraClient:
         timeout: float,
         what: str,
     ) -> str:
-        """Read frames until one matches ``pattern`` (or the first non-status
-        frame when ``pattern`` is ``None``).
+        """Read frames until one matches ``pattern`` (or the first frame
+        the machine did not push on its own when ``pattern`` is ``None``).
 
         Sends nothing — :meth:`request` calls it after writing its
         command, :meth:`read_status` calls it to sit and wait for the
         dongle's next broadcast. ``what`` names the awaited thing in the
         :class:`TimeoutError` message.
+
+        With no ``pattern`` the ``@TF:`` / ``@TV:`` broadcasts *and* the
+        bare markers (:func:`_is_marker_frame`) are skipped, because a
+        caller that did not say what it wants cannot want a frame the
+        machine would have sent anyway. Both land in
+        :attr:`status_history`, so a skipped frame is never lost. A
+        caller that passes a ``pattern`` gets exactly what the pattern
+        says — including a marker, if it asks for one.
         """
         deadline = time.monotonic() + timeout
         while True:
@@ -412,6 +455,14 @@ class JuraClient:
                 if pattern is None:
                     continue
                 if not pattern.search(reply):
+                    continue
+                return reply
+            if _is_marker_frame(reply):
+                # Pushed, payload-less, upper-case: recorded like any
+                # other unsolicited frame, and skipped unless the caller
+                # explicitly asked for it.
+                self.status_history.append(reply)
+                if pattern is None or not pattern.search(reply):
                     continue
                 return reply
             if pattern is None:
@@ -1581,9 +1632,12 @@ class JuraClient:
         is not an ``@tp`` accept: a machine in ``energy_safe`` wakes on
         the first ``@TP:`` but may ignore it (see PROTOCOL.md §5.9).
 
-        Returns the dongle's reply (``"@tp"`` on accept). The machine
-        then emits ``@TB`` (brew start) and ``@TV:`` progress frames,
-        observable via :meth:`iter_frames` / :meth:`iter_progress`.
+        Returns the dongle's reply (``"@tp"`` on accept), matched with
+        :data:`BREW_REPLY_MATCH` so that a pushed ``@TB`` / ``@TS``
+        marker can never be read as the acknowledgement. The machine
+        emits ``@TB`` (brew start) and ``@TV:`` progress frames right
+        after, observable via :meth:`iter_frames` /
+        :meth:`iter_progress`.
 
         ``follow=True`` (off by default, so the call stays a single
         round-trip unless asked) blocks after an accepted blob and
@@ -1619,11 +1673,13 @@ class JuraClient:
             if plan is None
             else plan.build_recipe_hex(overrides)
         )
-        reply = self.request(f"@TP:{recipe}", timeout=timeout)
+        reply = self.request(f"@TP:{recipe}", match=BREW_REPLY_MATCH, timeout=timeout)
         if retry and not _is_brew_accept(reply):
             # Energy-safe wake-up: the first @TP: only woke the machine;
             # resend now that it is awake.
-            reply = self.request(f"@TP:{recipe}", timeout=timeout)
+            reply = self.request(
+                f"@TP:{recipe}", match=BREW_REPLY_MATCH, timeout=timeout
+            )
         self.last_progress = ()
         if follow and _is_brew_accept(reply):
             self.last_progress = tuple(
@@ -1667,6 +1723,13 @@ class JuraClient:
             except (TimeoutError, socket.timeout) as exc:
                 raise TimeoutError(f"no reply to {label!r}… within {timeout}s") from exc
             if reply.startswith(("@TF:", "@TV:")):
+                self.status_history.append(reply)
+                if pattern is None or not pattern.search(reply):
+                    continue
+                return reply
+            if _is_marker_frame(reply):
+                # Same rule as _await_frame: a pushed @TB / @TS is not
+                # an answer to anything this method sent.
                 self.status_history.append(reply)
                 if pattern is None or not pattern.search(reply):
                     continue

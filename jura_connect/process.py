@@ -67,10 +67,14 @@ ACCEPT_COMMANDS: tuple[str, ...] = ("@TG:04", "@TG:10")
 
 #: Reply matcher for every verb in this module. The machine's answer is
 #: whatever it says (``@tg:24``, ``@tg:00``, ``@an:error`` when it
-#: refuses), so the pattern is "any reply that is not a pushed ``@TF:``
-#: status or ``@TV:`` progress frame" — those keep flowing during a
-#: cycle and must not be mistaken for the acknowledgement.
-PROCESS_REPLY_MATCH = r"(?i)^@(?!t[fv]:)"
+#: refuses), so the pattern is "any reply that is not a frame the
+#: machine pushes on its own" — the ``@TF:`` status and ``@TV:``
+#: progress broadcasts keep flowing during a cycle, and so do the bare
+#: upper-case markers ``@TB`` / ``@TS`` (PROTOCOL.md §5.2), which a
+#: ``@TG:24`` start would otherwise read as its acknowledgement and
+#: report as a refusal. The marker exclusion is case-sensitive on
+#: purpose: the lower-case ``@ts`` *is* a legitimate reply.
+PROCESS_REPLY_MATCH = r"^(?!@T[BS]$)(?i:@(?!t[fv]:))"
 
 #: Accept command assumed when no profile is loaded and the caller names
 #: none. 87 of the 89 profiles declare ``@TG:10`` somewhere and 78

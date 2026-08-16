@@ -35,6 +35,7 @@ from collections.abc import Callable, Sequence
 from . import language, profile
 from .client import (
     BARISTA_COUNTER_BANK,
+    BREW_REPLY_MATCH,
     DAILY_BARISTA_COUNTER_BANK,
     DAILY_COUNTER_RESET,
     DAILY_PRODUCT_COUNTER_BANK,
@@ -409,11 +410,25 @@ def _r_raw(_spec, client, args, timeout):
         raise CommandError(f"raw: command must start with '@', got {cmd!r}")
     if not all(0x20 <= ord(c) < 0x7F for c in cmd):
         raise CommandError(f"raw: non-ASCII characters in {cmd!r}")
+    # Deliberately matcher-less: the caller invents the command, so
+    # nothing here knows what its reply looks like. The matcher-less
+    # path means "the machine's next real answer" — it skips the pushed
+    # @TF:/@TV: broadcasts and the bare @TB/@TS markers (PROTOCOL.md
+    # §5.2), which is exactly what a pass-through wants.
     return client.request(cmd, timeout=timeout)
 
 
 # --------------------------------------------------------------------- #
 # Destructive runners
+#
+# These stay matcher-less on purpose. Their reply token is not decoded —
+# it is echoed to the user verbatim — and it varies across firmware
+# families (`@tg:24`, a bare `@tg`, `@an:error` on refusal), so pinning
+# a pattern would turn an unexpected-but-informative answer into a
+# timeout. The matcher-less path already refuses to bind to a pushed
+# frame or a bare @TB/@TS marker (PROTOCOL.md §5.2). `brew` is the
+# exception: its reply drives an accept/reject decision, so it matches
+# BREW_REPLY_MATCH.
 # --------------------------------------------------------------------- #
 
 
@@ -564,7 +579,7 @@ def _r_brew(_spec, client, args, timeout):
                 "combined with a raw recipe blob — bake the values into the "
                 "blob instead."
             )
-        return client.request(f"@TP:{target}", timeout=timeout)
+        return client.request(f"@TP:{target}", match=BREW_REPLY_MATCH, timeout=timeout)
     if client.profile is None:
         raise CommandError(
             "brew: product names and codes need a machine profile. Pair "
@@ -583,7 +598,7 @@ def _r_brew(_spec, client, args, timeout):
             recipe = definition.build_recipe_hex(overrides)
     except ValueError as exc:
         raise CommandError(str(exc)) from exc
-    return client.request(f"@TP:{recipe}", timeout=timeout)
+    return client.request(f"@TP:{recipe}", match=BREW_REPLY_MATCH, timeout=timeout)
 
 
 # -- products discovery -------------------------------------------------
@@ -884,6 +899,9 @@ def _r_products(_spec, client, _args, _timeout):
     )
 
 
+# The four @HW: writes and the daily-counter reset below follow the same
+# rule as the destructive runners above: reply echoed, not decoded, so no
+# matcher. See the block comment there.
 def _r_set_pin(_spec, client, args, timeout):
     pin = _ascii_arg("pin", args[0])
     if not pin.isdigit():
