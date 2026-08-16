@@ -3169,10 +3169,15 @@ def _parse_pmode_num_slots(reply: str) -> int:
         @tm:50,<N hex bytes><1-byte checksum>
 
     The body bytes are summed (each byte parsed as hex) and the total
-    is the number of pmode slots. The trailing byte is a checksum that
-    we don't currently verify (the APK does but the algorithm is opaque
-    and not needed for correctness — wrong counts surface as
-    unsupported-slot replies below).
+    is the number of pmode slots. The S8 EB answers
+    ``@tm:50,04040404047A`` — five per-kind counts of 4, so 20 slots.
+
+    The trailing byte is the ordinary :func:`_settings_checksum`
+    (``ByteOperations.d``) over ``"50,<body>"``; ``0x7A`` is exactly
+    that over ``"50,0404040404"``, confirmed against hardware on
+    2026-08-16. We still don't verify it: a wrong count surfaces
+    harmlessly as unsupported-slot replies below, so rejecting the
+    whole read would lose more than it protects.
 
     ``@tm:D0`` is the parser's "no slots" rejection token and decodes
     to zero, as does any other head we don't recognise.

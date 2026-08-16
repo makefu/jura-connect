@@ -9,6 +9,14 @@ firmware `TT237W V06.11`, hostname `espressif.lan`, MAC prefix
 Numbers, byte values and command codes here are *observed* values, not
 guesses — if a behaviour differs from this doc, fix the doc.
 
+Raw wire traces from hardware runs live in [`captures/`](captures/),
+one file per session. Claims below that cite a capture are backed by a
+verbatim frame log; claims marked *APK-derived* or *untested* are not.
+
+| Capture | Machine | Covers |
+| ------- | ------- | ------ |
+| [`2026-08-16-kaffeebert-s8eb.md`](captures/2026-08-16-kaffeebert-s8eb.md) | S8 EB / EF1091, TT237W | the whole non-destructive command registry: `@TM:60` limits, the `@TM:00,FC` settings bank, `@TR:52`, `@TT:00`, `@HU?`, `@TS:01`/`@TS:00`, PMode, the maintenance banks |
+
 ---
 
 ## 1. Transport
@@ -373,6 +381,27 @@ Live example from Kaffeebert (EF1091, baseline order):
 The same 12 bytes on an EF1090 mean 344 `coffee_rinse` and 3617
 `cappu_rinse` — the tail is swapped.
 
+Re-read from the same machine on 2026-08-16
+([capture §10](captures/2026-08-16-kaffeebert-s8eb.md)) after the
+XML-declared field-order rewrite:
+
+```
+@tg:43001A000100090168109F005F
+       └┘└┘└┘└┘└┘└┘
+       26  1  9 360 4255 95
+```
+
+Every field moved monotonically upward from the earlier capture (21→26,
+1→1, 8→9, 344→360, 3617→4255, 91→95), which confirms the field order
+survived the rewrite unchanged on this machine.
+
+`@TG:C0` from the same session: `@tg:C000FF46` → `cleaning=0
+filter=255 descale=70`. The `0xFF` is the not-applicable sentinel (no
+water filter fitted — the lifetime `filter_change` counter reads 1) and
+is **passed through as the integer 255**, not suppressed;
+`MaintenancePercent.format()` prints `filter=255`. Reading a percent
+field as a percentage therefore requires treating 255 as "n/a".
+
 ### 5.4 Status bits (`@TF:`)
 
 Bits are addressed **MSB-first within each byte**, indexed globally
@@ -410,6 +439,29 @@ The `MachineStatus` dataclass exposes `errors`, `info`, and
 `process` as separate tuples plus the unsplit `active_alerts` for
 backwards compatibility; only the first should drive "is the machine
 broken?" logic.
+
+#### The display lock is visible in the status frame — **verified**
+
+`@TS:01` / `@TS:00` (§9) do not only answer `@ts`; they move a status
+bit. On Kaffeebert, 2026-08-16
+([capture §9](captures/2026-08-16-kaffeebert-s8eb.md)):
+
+```
+idle            @TF:0004000008000000     byte 4 = 0x08
+after @TS:01    @TF:0004000009000000     byte 4 = 0x09
+after @TS:00    @TF:0004000008000000     byte 4 = 0x08
+```
+
+`0x09` sets MSB-positions 4 *and* 7 → global bits 36 and **39**.
+EF1091's XML names bit 39 `LockedKeys`. That is an independent
+confirmation of the MSB-first indexing above — a naïve byte-LSB reading
+would have put the lock at bit 32 — and it gives a reliable way to
+check from the outside whether a lock leaked: read the pushed `@TF:`
+frame and look at bit 39.
+
+The dongle broadcasts `@TF:` unprompted **every ~2.05 s** for the whole
+life of a session (measured over five 20 s windows on the same
+machine), so this check costs nothing but a wait.
 
 ### 5.5 Product brew counters (`@TR:32,<page>`)
 
@@ -628,26 +680,71 @@ profiles spell it identically. It zeroes the daily banks irreversibly,
 so it is in `DESTRUCTIVE_PREFIXES` and exposed only as the gated
 `reset-daily-counters` command. Nothing in the app sends it either.
 
-> **Untested against hardware.** No machine available to this project
-> declares any bank beyond `@TR:32` — EF545, EF1091 and EF1151 list it
-> alone — so all of the decoding above is derived from the app (special
-> banks) or from the machine XMLs (barista and daily banks) and
-> exercised against the simulator only. For `@TR:33`/`@TR:52`/`@TR:53`
-> what the request looks like is settled: it is J.O.E.'s own WiFi path,
-> quoted above. For `@TR:34`/`@TR:35` and the four daily banks not even
-> that is confirmed — the command form follows the shared
-> `@TR:<bank>,<page>` grammar every other bank uses, but no
-> implementation has ever been observed sending them, and `@TF:05` has
-> never been observed being answered. Treat all of it as APK/XML-derived
-> and unverified.
+#### XML declaration ≠ firmware support — **verified, and it cuts both ways**
+
+Kaffeebert (S8 EB / EF1091, TT237W, 2026-08-16 —
+[capture §6](captures/2026-08-16-kaffeebert-s8eb.md)) was asked for
+every non-`@TR:32` bank directly, with `raw`, bypassing the profile
+gate:
+
+| Frame | Reply |
+| ----- | ----- |
+| `@TR:52,00` | `@tr:52,00,FFFFFFFF0001000E` |
+| `@TR:52,01` | `@tr:52,01,FFFFFFFFFFFFFFFF` |
+| `@TR:52,02` | `@tr:52,02,0A65FFFFFFFFFFFF` |
+| `@TR:52,03` | `@tr:52,03,FFFFFFFFFFFFFFFF` |
+| `@TR:33,00` | `@tr:00` |
+| `@TR:34,00` | `@tr:00` |
+| `@TR:42,00` | `@tr:00` |
+| `@TR:44,00` | `@tr:00` |
+| `@TR:53,00` | `@tr:00` |
+
+**The S8 EB implements `@TR:52` and holds live values in it — slot 2 =
+1, slot 3 = 14, slot 8 = 0x0A65 = 2661 — while its XML declares only
+`@TR:32`.** So a machine XML can *under*-declare: "declared in the
+XML" and "supported by the firmware" are not the same set. The
+4-page size is confirmed (all four pages answer, none early-terminates
+with `@tr:00`), as is the `@tr:<bank>,<page>,<8 hex bytes>` reply
+grammar for a bank other than `@TR:32`.
+
+The five other banks answer the bare `@tr:00` rejection J.O.E.'s
+matcher expects, so the XML is not wrong about *those* — and the
+`@tr:00` shape itself is now hardware-observed rather than assumed.
+
+Consequence for this client: because
+`JuraClient.read_counter_bank` sends **nothing** when the profile does
+not declare the bank, `special-counters` on an S8 EB reports "does not
+implement the `@TR:52` counter bank" and never asks. That is the
+documented design (trust the XML), and it is wrong for this machine.
+Whether to keep trusting the XML or probe and let `@tr:00` decide is an
+open design question — see `docs/JOE_GAPS.md`.
+
+> **Still untested against hardware:** the *decoding* of every bank
+> above except `@TR:32`. Kaffeebert's `@TR:52` reply was captured but
+> not decoded through `CounterBank`/`SpecialCounterStatisticsParser`,
+> because the profile gate refuses the read; the slot→function map
+> (`sweetFoam` = slot 3, `coldBrew` = slots 4+5+6, …) remains
+> APK-derived. `@TR:34`/`@TR:35`, the four daily banks and `@TF:05` are
+> unverified in every respect — the command form follows the shared
+> `@TR:<bank>,<page>` grammar, but no implementation has ever been
+> observed sending them and `@TF:05` has never been observed being
+> answered.
 >
-> What a real machine *answers* is unknown in every case, so reply
-> length is treated as advisory rather than assumed. Anything unexpected
-> on an overflow read — a timeout, a reply shape we don't know — is
-> logged and degraded to base counts rather than failing the whole read.
-> On the WiFi side J.O.E. collects the banks it does read into a
-> `StatisticsCollection` alongside the maintenance banks
-> (`CoffeeMachineAdapterWifi.readStatistics`).
+> Reply length is therefore still treated as advisory rather than
+> assumed. Anything unexpected on an overflow read — a timeout, a reply
+> shape we don't know — is logged and degraded to base counts rather
+> than failing the whole read. On the WiFi side J.O.E. collects the
+> banks it does read into a `StatisticsCollection` alongside the
+> maintenance banks (`CoffeeMachineAdapterWifi.readStatistics`).
+
+#### A bare `@TR:<bank>` draws no reply at all
+
+`@TR:32` and `@TR:52` were both sent without a `,<page>` argument.
+Neither drew any answer — the dongle just kept broadcasting `@TF:`
+until the read timed out (10 s, twice). Bank reads are page-addressed
+only; there is no "whole bank in one frame" form. The `register-read
+<bank>` command therefore cannot succeed on this firmware and will
+block for its full timeout; use `raw '@TR:<bank>,<page>'`.
 
 ### 5.6 Programmable-recipe slots (`@TM:50` + `@TM:42,<slot>`)
 
@@ -680,7 +777,9 @@ argument `F<n>` lives at payload byte `n-1`, the same offset rule the
 `@TP:` recipe blob uses (§5.9).
 
 The S8 EB / EF1091 reports 20 slots via `@TM:50` (`@tm:50,0404040404` +
-checksum `7A`) but answers every `@TM:42,<n>` with `@tm:C2`. That is
+checksum `7A` — re-confirmed 2026-08-16, and the trailing byte is the
+ordinary `ByteOperations.d` checksum over `"50,0404040404"`, not an
+opaque one) but answers every `@TM:42,<n>` with `@tm:C2`. That is
 the "machine reports a PMode table but doesn't make any of it
 addressable" branch, and the machine's own XML agrees: EF1091 carries
 `<MACHINESETTINGS Productprogramming="false">`.
@@ -786,21 +885,29 @@ well be a bug in J.O.E., but it is what the app puts on the wire, so
 
 #### 5.6.5 Rejection tokens
 
-| Token | Command | APK source | Meaning |
-| ----- | ------- | ---------- | ------- |
-| `@tm:C1` | `@TM:41` | `PModeProductReadParser` | "Machine does not support Product Programming" |
-| `@tm:C2` | `@TM:42` | `PModeSlotProductReadParser` | "Product code, slot, or function is not supported by machine" |
-| `@tm:D0` | `@TM:50` | `PModeNumSlotReadParser` | no programmable slots |
-| `@tm:00` | either write | dongle generic | write rejected |
+| Token | Command | APK source | Meaning | Seen on hardware |
+| ----- | ------- | ---------- | ------- | ---------------- |
+| `@tm:C1` | `@TM:41` | `PModeProductReadParser` | "Machine does not support Product Programming" | **yes** — S8 EB, 2026-08-16 |
+| `@tm:C2` | `@TM:42` | `PModeSlotProductReadParser` | "Product code, slot, or function is not supported by machine" | **yes** — S8 EB, all 20 slots |
+| `@tm:D0` | `@TM:50` | `PModeNumSlotReadParser` | no programmable slots | no (the S8 EB answers `@TM:50` successfully) |
+| `@tm:00` | either write | dongle generic | write rejected | no |
 
 None of these is a success reply. Reads map them to `None`; writes
 raise. `jura_connect.client._PMODE_NOT_SUPPORTED` is the single table
 both paths consult.
 
-> **Nothing in §5.6.2 – §5.6.5 has been observed on hardware.** The
-> only PMode traffic ever seen on a real machine is `@TM:50` and the
-> `@tm:C2` answers from the S8 EB. The write formats come from the
-> decompiled J.O.E. APK; the simulator models both branches so the
+All three read tokens fit the general `addr | 0x80` rule documented in
+§5.7 (`0x41|0x80 = 0xC1`, `0x42|0x80 = 0xC2`, `0x50|0x80 = 0xD0`) —
+they are not PMode-specific magic numbers but the dongle's generic
+"unimplemented `@TM:` address" answer.
+
+> **The write formats in §5.6.2 – §5.6.4 have not been observed on
+> hardware** and never will be from this project's S8 EB, which
+> refuses product programming outright. The *read* rejections above are
+> now confirmed live ([capture §7](captures/2026-08-16-kaffeebert-s8eb.md)):
+> `@TM:50` → `@tm:50,04040404047A`, every `@TM:42,<slot>` → `@tm:C2`,
+> `@TM:41,02` and `@TM:41,04` → `@tm:C1`. The write formats come from
+> the decompiled J.O.E. APK; the simulator models both branches so the
 > decode path has coverage, but a machine could still disagree.
 
 ### 5.7 Machine settings (`@TM:<arg>` read / write)
@@ -946,7 +1053,7 @@ survey:
   both "Operating instructions" and "Aroma Control Instructions" in
   the template); the first declaration wins, matching J.O.E.
 
-#### Batch settings read (`@TM:00,FC`) — **guessed reply, untested**
+#### Batch settings read (`@TM:00,FC`) — **rejected by the S8 EB**
 
 57 of the 89 profiles declare, inside `<MACHINESETTINGS>`:
 
@@ -987,25 +1094,64 @@ dongle → @tm:00                          (rejection — no batch read)
   1, 2 or 3 bytes wide;
 * `<csum>` is the usual `ByteOperations.d` over `"00,<values>"`.
 
-Unknowns, spelled out:
+**Hardware answer (Kaffeebert, S8 EB / EF1091, TT237W, 2026-08-16 —
+see [`captures/2026-08-16-kaffeebert-s8eb.md`](captures/2026-08-16-kaffeebert-s8eb.md)
+§1):**
 
-* whether the request needs a checksum of its own. `@TM:60,…` and
-  every settings write carry one; `@TM:41,…` / `@TM:42,…` reads do
-  not. `read_settings_bank(checksum=True)` sends the alternative form
-  `@TM:00,FCEA` for probing.
-* whether the reply is one frame or several.
-* whether the value order follows `CommandArgument` at all.
+```
+client → @TM:00,FC
+dongle → @tm:80              <-- rejection, not a value payload
+client → @TM:00              (bare, no argument)
+dongle → @tm:80              <-- same answer
+```
 
-Because of that, `JuraClient.read_all_settings()` treats the batch
-read as an optimisation only: any rejection, checksum failure, or
-value-count mismatch is caught and the settings are re-read one
-`@TM:<arg>` at a time. The returned `SettingsSnapshot` records which
-path was taken (`batch_used`, `batch_error`). **A wrong guess costs a
-round trip, never a wrong value.** Verifying this against a real
-machine is a read-only, non-destructive experiment: send `@TM:00,FC`
-and compare the reply against four individual reads.
+The machine **does not implement the bank it declares**. `@tm:80` is
+the `addr | 0x80` rejection token (see below): address `00` is not a
+readable `@TM:` address on this firmware at all, so the `,FC`
+argument is irrelevant and no request-side checksum can change the
+outcome. The guessed reply layout above was never reached and remains
+unverified — it should be treated as speculation until a machine is
+found that answers.
 
-#### Limit load (`@TM:60,<product code><csum>`) — APK-derived, untested
+`read_settings_bank(checksum=True)` still exists for probing the
+`@TM:00,FCEA` form on other machines; it was deliberately **not** sent
+to Kaffeebert, because a valid checksum is exactly what makes
+`@TM:<addr>,<value><csum>` look like a well-formed *write*, and the
+bare read had already settled the question.
+
+What this run *did* confirm is the fallback design.
+`JuraClient.read_all_settings()` treats the batch read as an
+optimisation only: any rejection, checksum failure, or value-count
+mismatch is caught and the settings are re-read one `@TM:<arg>` at a
+time. On Kaffeebert it caught the `ValueError`, recorded
+`batch_error`, and read all seven catalogue entries individually with
+correct values. **A wrong guess costs a round trip, never a wrong
+value** — now observed, not asserted.
+
+Note also that `CommandArgument="02080913"` covers only 4 of the 7
+settings EF1091 actually exposes (`0A`, `04` and `62` are missing), so
+even a working batch read would not replace the per-setting path.
+
+#### `@tm:<addr | 0x80>` is the `@TM:` rejection token — **verified**
+
+Every `@TM:` read the S8 EB refused came back as the *requested
+address with bit 7 set*:
+
+| Request | Reply | `addr \| 0x80` |
+| ------- | ----- | -------------- |
+| `@TM:00` / `@TM:00,FC` | `@tm:80` | `0x00 \| 0x80` |
+| `@TM:23` (max languages) | `@tm:A3` | `0x23 \| 0x80` |
+| `@TM:41,<code>` (PMode product) | `@tm:C1` | `0x41 \| 0x80` |
+| `@TM:42,<slot>` (PMode slot) | `@tm:C2` | `0x42 \| 0x80` |
+| `@TM:50` (PMode slot count) | `@tm:D0` | `0x50 \| 0x80` (per the APK parser; this machine answers successfully) |
+
+This unifies four constants the code carried as unrelated magic
+numbers. A `@tm:` reply whose address byte is `request | 0x80` means
+"this machine does not implement that address" — regardless of which
+address it is. Verified against five requests on TT237W V06.11; no
+counter-example seen.
+
+#### Limit load (`@TM:60,<product code><csum>`) — **verified on hardware**
 
 `WifiCommandReadLimitLoad` asks the machine for the ranges it will
 accept for one product *right now*, which is what J.O.E. bounds its
@@ -1046,10 +1192,43 @@ Example (EF1091 Cappuccino, `04`): body `04` `0530` `FFFF` `012D`
 `FFFF` `FFFF` decodes to water 25..240 ml and milk foam 1..45 s, with
 milk / bypass / milk-break not applicable.
 
+**Verified against Kaffeebert (S8 EB / EF1091, TT237W, 2026-08-16 —
+[capture §3](captures/2026-08-16-kaffeebert-s8eb.md)).** Seven products
+were read; the request form, the request checksum, the five-pair
+positional layout and the per-parameter scaling all hold exactly as
+described above:
+
+```
+@TM:60,020B  → @tm:60,020310FFFFFFFFFFFFFFFF0087   espresso
+@TM:60,030A  → @tm:60,030530FFFFFFFFFFFFFFFF0082   coffee
+@TM:60,0706  → @tm:60,070530FFFF012DFFFF003C0001   latte macchiato
+@TM:60,0805  → @tm:60,08FFFFFFFF012DFFFFFFFF006E   milk foam
+@TM:60,0AFC  → @tm:60,0AFFFF012DFFFFFFFFFFFF0065   milk
+@TM:60,0DF9  → @tm:60,0D053CFFFFFFFFFFFFFFFF005E   hot water portion
+@TM:60,2803  → @tm:60,280310FFFFFFFF0030FFFF00D4   café barista
+```
+
+Each product lights up exactly the pairs its XML declares — `milk`
+only pair 2 (`F5`), `milk_foam` only pair 3 (`F6`), `café barista`
+pairs 1 and 4 (`F4` + `F10` bypass), `latte macchiato` pairs 1, 3 and
+5 (`F4` + `F6` + `F11` milk break) — which independently confirms the
+slot→`F<n>` mapping above.
+
+Two refinements the wire adds:
+
+* the request checksum is **required and accepted**; the reply's
+  trailing checksum verifies against `ByteOperations.d` in every case;
+* between the fifth pair and the checksum the machine sends **one
+  trailing `00` byte** (13 payload bytes total, not 12). It was `00`
+  for all seven products; its meaning is unknown.
+
+`@TM:60` reports the **continuous sliders only**. The S8 EB answered
+`FFFF` for every product's coffee strength and temperature even though
+its XML declares both as settable choice lists — those stay bounded by
+the XML.
+
 `JuraClient.read_limit_load()` returns a `ProductLimits` whose
 `allows(kind, value)` bounds a brew against the machine's live limits.
-The request form and the decode come straight from the APK; neither
-has been exercised on hardware.
 
 ### 5.8 **Destructive** commands — gated behind `--allow-destructive-commands`
 
@@ -2057,6 +2236,28 @@ The `@tt:00` inventory is a list of 6-hex-char groups: 2 chars of slot
 index followed by 2 ASCII bytes of language code, with `FFFF` marking an
 empty slot. J.O.E. reads 14 slots (0..13).
 
+#### A machine without the language verbs stays silent — **verified**
+
+Kaffeebert (S8 EB / EF1091, TT237W, 2026-08-16 —
+[capture §4](captures/2026-08-16-kaffeebert-s8eb.md)) does **not**
+reject `@TT:00` with a token. It sends **nothing at all**, while
+continuing its ~2 s `@TF:` broadcast, until the read times out.
+Reproduced three times over 10 s and 15 s windows.
+
+`@TM:23` on the same machine answers `@tm:A3` → `NOT_SUPPORTED`
+(consistent with the `addr | 0x80` rule in §5.7, and with EF1091
+carrying no `<MACHINEMANIFEST><CAPABILITIES>` at all).
+
+So the pair splits cleanly: **`@TM:23` tells you whether the machine
+knows about language slots; `@TT:00` tells you nothing on a machine
+that doesn't.** `language.read_inventory` therefore records the
+`@TT:00` timeout in `LanguageInventory.list_error` and still issues
+`@TM:23`, rather than letting the `TimeoutError` escape — a read-only
+introspection command has to survive the machine it is introspecting.
+The simulator models the silent machine whenever
+`allow_language_download` is off, which is what pins the behaviour
+(`tests/test_language_download.py::test_language_inventory_survives_a_machine_that_ignores_tt00`).
+
 #### The 16-bit field on success — unknown
 
 A successful transfer or finish answers `@tt:0x,FF,<4 hex>`; the error
@@ -2239,7 +2440,7 @@ The three hex digits are a state nibble plus a progress byte
 | ------ | ----- | ------- |
 | `0<xx>` | `idle` | not running; `xx` ≥ `0x64` (100) means "finished" |
 | `1<xx>` | `updating` | in progress, `xx` is the percentage (hex) |
-| `8<xx>` | `no_cooler` | no milk cooler connected — **this is the `@hu:800` the S8 EB answers** |
+| `8<xx>` | `no_cooler` | no milk cooler connected — **this is the `@hu:800` the S8 EB answers**, re-confirmed live 2026-08-16 ([capture §5](captures/2026-08-16-kaffeebert-s8eb.md)) |
 | other | `unknown` | firmware states we have no mapping for |
 
 This settles §9's old "`@HU?` returned `@hu:800` in some probes but
@@ -2543,10 +2744,42 @@ breaks both halves of the test-suite simultaneously.
   the maintainer's machine cannot answer this. If a preselection-free
   `@TP:` comes back `@tp:00` on an `IntakeF18` machine, the 20-byte
   form is the first thing to try.
-* **The batch settings read `@TM:00,FC` (§5.7) has a guessed reply
-  layout.** The XML declares the command on 57 of 89 profiles but
-  J.O.E. never issues it, so nothing pins the response shape.
-  `read_all_settings()` falls back to per-setting reads on any
-  mismatch, which makes this the cheapest open question to close: it is
-  read-only — send `@TM:00,FC` once and diff it against four single
-  `@TM:<arg>` reads.
+* **The batch settings read `@TM:00,FC` (§5.7) still has a guessed
+  reply layout — but the S8 EB rejects it outright.** Asked on
+  2026-08-16, Kaffeebert answered `@tm:80` to both `@TM:00,FC` and the
+  bare `@TM:00`, i.e. address `00` is not implemented at all. The
+  question is no longer "what does the reply look like on an S8 EB" but
+  "does *any* of the 57 declaring profiles actually implement the
+  bank?" — the declaration looks like Jura boilerplate. Closing it
+  needs a different machine; the read is harmless, so anyone with one
+  can settle it in one command.
+* **Does any machine implement `@TR:52` *and* declare it?** The S8 EB
+  implements the special-counter bank and serves real values from it
+  while its XML declares only `@TR:32` (§5.5), so the profile gate in
+  `read_counter_bank` hides data that is actually there. The open
+  design question: keep trusting the XML, or probe every bank and let
+  the machine's own `@tr:00` decide? Probing costs one round trip per
+  undeclared bank and is read-only; trusting the XML is what J.O.E.
+  does. Nobody has checked whether an *over*-declaring XML exists —
+  that is the failure mode probing would fix and declaration-trust
+  would not.
+* **The `@TR:52` slot→function map is still APK-derived.** Kaffeebert's
+  four pages were captured raw (§5.5) but never run through
+  `SpecialCounterStatisticsParser`, because the profile gate refuses
+  the read. Its non-empty slots are 2 (=1), 3 (=14) and 8 (=2661); the
+  APK map claims slot 3 is `sweetFoam` and slots 4+5+6 are `coldBrew`,
+  which does not obviously fit a machine with 2661 of *something* in
+  slot 8. Decoding it needs either a profile override or the probing
+  change above.
+* **`register-read <bank>` cannot work as specified.** A bare
+  `@TR:<bank>` with no page argument draws no reply at all on TT237W
+  (verified for banks `32` and `52`), so the command blocks for its
+  full timeout and then raises. Either it should take a page argument
+  or it should be dropped in favour of `raw '@TR:<bank>,<page>'`.
+* **`AGENTS.md` §2 and `DESTRUCTIVE_PREFIXES` disagree about
+  `@TG:FF`.** The document lists it as destructive; the code does not
+  gate it and `tests/test_commands.py` explicitly classes it as an
+  ungated read ("reclassified, not a reset"). Because of the
+  disagreement `cancel` was **not** exercised during the 2026-08-16
+  hardware run, so its behaviour on an idle machine is still unknown.
+  One of the two needs to change.
