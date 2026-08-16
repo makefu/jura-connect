@@ -12,13 +12,19 @@ Provenance
 The byte layout is **APK-derived** — read out of ``Progress``,
 ``ProgressParser``, ``ProgressState``, ``ProductProgressState`` and
 ``ProductArgument`` in the decompiled J.O.E. app (``ch.toptronic.joe``
-4.6.10). The parts that overlap what we captured from a live brew on an
-S8 EB / EF1091 (``docs/PROTOCOL.md`` §5.9) agree: state ``41`` with the
-value window starting at payload byte 2 puts current/target ticks at
-payload bytes 4/5, exactly where the live capture saw them, and the
-percent index (``values[12]``) is the second-to-last byte of the 16-byte
-frame the app's value table implies. Everything else here is untested
-against hardware — see ``docs/PROTOCOL.md`` §5.10.
+4.6.10) — and the **coffee path is hardware-confirmed**. A full raw
+capture of a hand-started ``cafe_barista`` on an S8 EB / EF1091
+(``docs/captures/2026-08-16-kaffeebert-brew-progress.md``) decoded all
+32 of its ``@TV:`` frames with zero failures, pinning: the value window
+starting at payload byte 2, the percent index (``values[12]``, the
+second-to-last byte of a 16-byte frame), states ``39`` / ``3C`` / ``41``
+/ ``3E``, product resolution off byte 1, and the ``41`` →
+``BYPASS_WATER_VOLUME`` branch below. ``tests/test_progress_capture.py``
+replays those frames verbatim.
+
+Untested against hardware: the milk and steam states, the ``8F``
+extended window, the ``0xFF`` / ``HOTWATER_VOLUME`` branch of ``41``,
+and every non-product frame type — see ``docs/PROTOCOL.md`` §5.10.
 
 Design notes for consumers (e.g. the Home Assistant integration):
 
@@ -507,6 +513,11 @@ def _product_state_for(state_code: int, values: bytes) -> ProductProgressState |
     (window slots 2/3) only when slot 6 is ``0xFF``, and as
     ``BYPASS_WATER_VOLUME`` (slots 6/7) otherwise — including when the
     payload is too short to carry slot 6.
+
+    The bypass branch is hardware-confirmed (the captured
+    ``cafe_barista`` had a 45 ml bypass, slot 6 was never ``0xFF``, and
+    slots 6/7 climbed 0→9 while 2/3 stayed frozen at the finished water
+    figure). The ``0xFF`` branch has never been observed.
     """
     mapped = _STATE_TO_PRODUCT_STATE.get(state_code)
     if state_code != ProgressState.HOTWATER_VOLUME:

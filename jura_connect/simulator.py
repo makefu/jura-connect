@@ -110,6 +110,54 @@ DEFAULT_STATUS_PAYLOAD = bytes.fromhex("0020000020000000")
 # the live decode end-to-end.
 KAFFEEBERT_IDLE_STATUS_PAYLOAD = bytes.fromhex("0004000008000000")
 
+# Every frame a real JURA S8 EB (EF1091, "kaffeebert") pushed while the
+# maintainer brewed a cafe_barista (0x28, strength 7, 45 ml water, 45 ml
+# bypass) by hand on 2026-08-16, in order and verbatim — the brew-start
+# marker, the four grind frames, the water phase, the bypass phase, the
+# five ENJOY repeats and the trailing "@TS". The full trace with
+# timestamps is docs/captures/2026-08-16-kaffeebert-brew-progress.md.
+#
+# This is evidence, not fiction: it is the only brew sequence in the
+# tree that a machine actually emitted. Do not tidy the payloads, and do
+# not "fix" the tick series (the water ticks skip 6, the bypass ticks
+# skip 2/3/5/7 — the machine reported them that way).
+CAPTURED_S8EB_CAFE_BARISTA_BREW: tuple[str, ...] = (
+    "@TB",
+    "@TV:392807070009FFFF000911FFFF110000",
+    "@TV:392807070009FFFF000911FFFF110000",
+    "@TV:392807070009FFFF000911FFFF110000",
+    "@TV:392807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110000",
+    "@TV:3C2807070009FFFF000911FFFF110A00",
+    "@TV:3C2807070109FFFF000911FFFF110A00",
+    "@TV:3C2807070209FFFF000911FFFF111400",
+    "@TV:3C2807070309FFFF000911FFFF111400",
+    "@TV:3C2807070409FFFF000911FFFF111E00",
+    "@TV:3C2807070509FFFF000911FFFF111E00",
+    "@TV:3C2807070509FFFF000911FFFF112800",
+    "@TV:3C2807070709FFFF000911FFFF112800",
+    "@TV:3C2807070709FFFF000911FFFF113200",
+    "@TV:3C2807070809FFFF000911FFFF113200",
+    "@TV:3C2807070909FFFF000911FFFF113C00",
+    "@TV:412807070909FFFF000911FFFF113C00",
+    "@TV:412807070909FFFF010911FFFF113C00",
+    "@TV:412807070909FFFF010911FFFF114600",
+    "@TV:412807070909FFFF040911FFFF115000",
+    "@TV:412807070909FFFF060911FFFF115A00",
+    "@TV:412807070909FFFF080911FFFF116400",
+    "@TV:412807070909FFFF090911FFFF116400",
+    "@TV:3E28",
+    "@TV:3E28",
+    "@TV:3E28",
+    "@TV:3E28",
+    "@TV:3E28",
+    "@TS",
+)
+
 # Sentinel for "no count" inside an @TR:32 page.
 _PC_UNUSED = 0xFFFF
 
@@ -392,6 +440,11 @@ class SimulatorConfig:
     brew_progress_interval: float = 0.0
     # Target water ticks reported as the maximum in the progress frames.
     brew_target_ticks: int = 0x1E
+    # Push these frames verbatim after an accepted @TP: instead of the
+    # generated ones. Set it to CAPTURED_S8EB_CAFE_BARISTA_BREW to replay
+    # a real machine's brew (docs/captures/2026-08-16-kaffeebert-brew-progress.md)
+    # rather than the model above.
+    brew_script: tuple[str, ...] | None = None
 
     # -- maintenance processes ----------------------------------------
     # Off by default for the same reason as brewing: @TG:21..@TG:26 are
@@ -564,7 +617,15 @@ def _brew_frames(blob: str, config: SimulatorConfig) -> list[str]:
     current/target water ticks at slots 2/3 and the percentage at slot
     12. Slot 6 is ``0xFF`` so state ``41`` reads as ``HOTWATER_VOLUME``
     rather than ``BYPASS_WATER_VOLUME``.
+
+    This is a *model*, not a transcript: a real S8 EB walks
+    ``39`` → ``3C`` → ``41`` and repeats ``ENJOY``. Set
+    ``SimulatorConfig.brew_script`` (e.g. to
+    :data:`CAPTURED_S8EB_CAFE_BARISTA_BREW`) to push a captured
+    sequence verbatim instead.
     """
+    if config.brew_script is not None:
+        return list(config.brew_script)
     product = blob[:2].upper() if len(blob) >= 2 else "00"
     frames = ["@TB"]
     steps = max(1, config.brew_progress_steps)
