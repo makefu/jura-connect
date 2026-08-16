@@ -421,6 +421,11 @@ class LanguageInventory:
     download_block: str | None = None
     supports_download: bool = False
     binary_download: bool = False
+    #: Why the ``@TT:00`` inventory is empty, when it is empty because
+    #: the machine would not answer. Machines without the language
+    #: verbs stay silent rather than rejecting — observed on Kaffeebert
+    #: (S8 EB / EF1091), see docs/captures/2026-08-16-kaffeebert-s8eb.md.
+    list_error: str | None = None
 
     @classmethod
     def parse(cls, reply: str) -> "LanguageInventory":
@@ -460,6 +465,8 @@ class LanguageInventory:
         except ValueError:
             block_index = None
         lines = ["Machine languages:"]
+        if self.list_error is not None:
+            lines.append(f"  (no reply to @TT:00: {self.list_error})")
         for s in self.slots:
             marker = "  <- download block" if s.index == block_index else ""
             lines.append(f"  slot {s.index:2d}: {s.code or '-'}{marker}")
@@ -481,6 +488,7 @@ class LanguageInventory:
             "download_block": self.download_block,
             "supports_download": self.supports_download,
             "binary_download": self.binary_download,
+            "list_error": self.list_error,
         }
 
 
@@ -692,12 +700,28 @@ def finish(client: "JuraClient", *, timeout: float = 6.0) -> FinishCode:
 
 
 def read_inventory(client: "JuraClient", *, timeout: float = 6.0) -> LanguageInventory:
-    """``@TT:00`` + ``@TM:23``, decorated with the profile's capabilities."""
-    inventory = list_languages(client, timeout=timeout)
+    """``@TT:00`` + ``@TM:23``, decorated with the profile's capabilities.
+
+    A machine that does not implement the language verbs answers
+    ``@TT:00`` with silence, not with a rejection token — verified on
+    Kaffeebert (S8 EB / EF1091, TT237W V06.11) on 2026-08-16, where the
+    read timed out while the dongle kept broadcasting ``@TF:`` frames.
+    That is an answer, not a failure, so the timeout is recorded in
+    :attr:`LanguageInventory.list_error` and ``@TM:23`` is still asked:
+    its reply (``@tm:A3`` = NOT_SUPPORTED on that machine) is what
+    distinguishes "no languages installed" from "verb unknown".
+    """
+    list_error: str | None = None
+    try:
+        inventory = list_languages(client, timeout=timeout)
+    except (TimeoutError, ValueError) as exc:
+        list_error = str(exc)
+        inventory = LanguageInventory(slots=())
     max_languages = read_max_languages(client, timeout=timeout)
     caps = client.profile.capabilities if client.profile is not None else None
     return dataclasses.replace(
         inventory,
+        list_error=list_error,
         max_languages=max_languages,
         download_block=caps.language_download_block if caps is not None else None,
         supports_download=caps.language_download if caps is not None else False,
