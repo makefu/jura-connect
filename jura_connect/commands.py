@@ -1490,7 +1490,12 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name="register-read",
-        description="read a register bank (@TR:<bank>); firmware-specific",
+        description=(
+            "read a register bank (@TR:<bank>); firmware-specific — "
+            "TT237W answers a page-less bank read with nothing at all, "
+            "so this blocks for the full timeout; use "
+            "raw '@TR:<bank>,<page>'"
+        ),
         arguments=(Argument("bank", "hex bank id, e.g. 32"),),
         runner=_r_register_read,
     ),
@@ -1808,7 +1813,9 @@ _SPECS: tuple[CommandSpec, ...] = (
         name="settings",
         description=(
             "read every machine setting; tries the XML's batch bank "
-            "(@TM:00,FC) and falls back to one @TM:<arg> per setting"
+            "(@TM:00,FC) and falls back to one @TM:<arg> per setting — "
+            "the S8 EB rejects the bank, so the fallback is the normal "
+            "path there"
         ),
         arguments=(),
         runner=_r_settings,
@@ -1827,7 +1834,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         name="pmode-product",
         description=(
             "read one product's stored programmable-recipe settings "
-            "(@TM:41,<code>); APK-derived, hardware-untested"
+            "(@TM:41,<code>); the S8 EB refuses it (@tm:C1), so the "
+            "populated decode stays APK-derived and untested"
         ),
         arguments=(Argument("product", "profile product name or 2-hex code"),),
         runner=_r_pmode_product,

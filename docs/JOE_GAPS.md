@@ -87,7 +87,7 @@ classes.
 | `@TG:01` → `@tg:(01\|00)` | `WiFiCommandNextProductStep` | ✅ `process-next` / `ProcessRunner.next_step` |
 | `@TG:04` / `@TG:10` | `WifiCommandProcessAccept` | ✅ `process-accept` / `ProcessRunner.accept` |
 | `@TG:7E` / `@TG:7E,FF×16` → `@tg:7E` | `WifiCommandCancelQualityAssistantStep` | ✅ `skip-quality-step [one\|all]` (gated — see §8.1) |
-| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ✅ `cancel` (not gated in code, but `AGENTS.md` §2 still calls it destructive — §8.2; never run on hardware) |
+| `@TG:FF` → `@tg:FF` | `WifiCommandCancelProductStep` | ✅ `cancel` (ungated — §8.2; **never run on hardware**) |
 | `@TG:21/23/24/25/26` | `WifiCommandStartProcess` | ✅ `clean` / `descale` / … fire-and-forget, **and** `process-start` / `process-run` as a state machine |
 | `@TG:43` → `@tg:43…` | `WifiCommandReadMaintenanceCounter` | ✅ `counters` |
 | `@TG:C0` → `@tg:C0…` | `WifiCommandReadMaintenanceStatus` | ✅ `percent` |
@@ -418,11 +418,11 @@ because two of them must never be re-probed on hardware.
    command with a tolerant `(?i)^@tg` reply matcher; the simulator
    answers `@tg:FF`. It is also the app's coffee-timer cancel, though
    whether it clears a *pending* timer is untested.
-   *Not fully resolved:* `AGENTS.md` §2 still lists `@TG:FF` among the
-   destructive prefixes. Until the two agree, nobody can safely run
-   `cancel` against hardware — the 2026-08-16 run skipped it for
-   exactly that reason. Either drop it from the `AGENTS.md` list or
-   put it back in `DESTRUCTIVE_PREFIXES`.
+   The policy contradiction that used to sit here — `AGENTS.md` §2
+   still listing `@TG:FF` among the destructive prefixes — has since
+   been fixed on the document side, so code and doc now agree. The
+   2026-08-16 run skipped `cancel` because of it, and nobody has run
+   it since: **the command has still never been sent to a machine.**
 3. **`@HE` is `WifiCommandOTAEnd`** (expects `@he:ok`), while J.O.E.'s
    `WifiCommandCloseConnection` sends an *empty* frame. It is an OTA
    verb, and sending it outside an OTA session is not obviously a no-op
@@ -467,13 +467,19 @@ because two of them must never be re-probed on hardware.
 
 ## 9. Implemented but hardware-unverified — the current top risk
 
-Everything in this section is **APK-derived and verified only against
-`jura_connect/simulator.py`**. The simulator imports the same `crypto`
-and `protocol` modules the client does, so it proves the *framing* and
-the *sequencing* are self-consistent — it proves nothing about what a
-real machine accepts, because its replies were written from the same
-APK reading as the client's expectations. A shared misreading passes
-both halves of the test-suite.
+Everything **still listed in §9.2** is **APK-derived and verified only
+against `jura_connect/simulator.py`**. The simulator imports the same
+`crypto` and `protocol` modules the client does, so it proves the
+*framing* and the *sequencing* are self-consistent — it proves nothing
+about what a real machine accepts, because its replies were written
+from the same APK reading as the client's expectations. A shared
+misreading passes both halves of the test-suite.
+
+§9.1 and §9.1.1 record what the 2026-08-16 hardware sessions took *off*
+that list. Note the scope of everything they settled: **one machine,
+one firmware family** — a JURA S8 EB (EF1091) on TT237W. None of the
+other 88 bundled profiles has been touched by hardware, so "confirmed"
+below always means "confirmed on that machine".
 
 ### 9.1 Closed by the 2026-08-16 hardware run
 
@@ -546,7 +552,7 @@ the observed sequence instead of its model.
 | `@TR:52` **decode** (slot→function map) | the S8 EB *serves* this bank and `--probe` now reads it live, but its pages have still never been checked against what the machine actually counted; a wrong map mislabels real counts. Note slot 0 (the bank total) reads `0xFFFF` there | §5.5 |
 | Counter banks `@TR:34/35/42..45` and the `@TF:05` reset | wrong slot mapping, or an irreversible zeroing of counters nobody meant to clear. The S8 EB rejects all of these with `@tr:00`, so they need a different machine | §5.5 |
 | `@TP:` recipe parameters F2, F5, F6, F8, F11, F17 | misbrew | §5.9 |
-| `cancel` (`@TG:FF`) | **not exercised**: `AGENTS.md` §2 calls it destructive while the code classes it read-only (below). Its behaviour on an idle machine is unknown | §5.8 |
+| `cancel` (`@TG:FF`) | **not exercised** — skipped on 2026-08-16 over a policy contradiction that has since been fixed, and not sent since. Its behaviour on an idle machine is unknown | §5.8 |
 
 ### 9.3 New open questions the run created
 
@@ -566,13 +572,12 @@ the observed sequence instead of its model.
   *over*-declaring XML exists, but that direction never needed probing:
   a declared bank is sent and `@tr:00` answers it.
 
-* **`AGENTS.md` §2 and `commands.DESTRUCTIVE_PREFIXES` disagree about
-  `@TG:FF`.** The document lists it among the prefixes that change
-  machine state; the code does not gate it, the registry classes
-  `cancel` read-only, and `tests/test_commands.py::_UNGATED_READS`
-  carries it with the comment "reclassified, not a reset". A reader
-  following `AGENTS.md` and a caller trusting the gate reach opposite
-  conclusions. `cancel` was skipped on hardware because of it.
+* **`cancel` (`@TG:FF`) has still never been sent to a machine.**
+  It was skipped during the run because `AGENTS.md` §2 then listed
+  `@TG:FF` among the prefixes that change machine state while the code
+  did not gate it and `tests/test_commands.py::_UNGATED_READS` carried
+  it as "reclassified, not a reset". The document has since been fixed
+  and the two now agree — but the command itself remains unexercised.
 
 * **`register-read <bank>` cannot succeed on TT237W.** A bare
   `@TR:<bank>` with no page argument draws no reply at all (verified

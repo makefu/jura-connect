@@ -910,8 +910,13 @@ class JuraClient:
     # -- PMode product / slot writes (APK-derived, hardware-untested) --
     #
     # Everything below mirrors the J.O.E. APK; no Jura machine that
-    # actually exposes PMode was available while it was written, so
-    # treat the wire formats as unverified. See docs/PROTOCOL.md §5.6.
+    # actually exposes PMode has been available, so treat the wire
+    # formats as unverified. What *is* hardware-confirmed is only the
+    # refusal: an S8 EB / EF1091 answers @tm:C1 to every @TM:41,<code>
+    # and @tm:C2 to every @TM:42,<slot>
+    # (docs/captures/2026-08-16-kaffeebert-s8eb.md §7), so the
+    # populated-reply and write paths have still never run against real
+    # data. See docs/PROTOCOL.md §5.6.
 
     def read_pmode_product(
         self, product: "str | int", *, timeout: float = 6.0
@@ -1355,7 +1360,7 @@ class JuraClient:
         S8 EB), i.e. the same values four separate
         :meth:`read_setting` calls would return.
 
-        **APK-derived request, guessed reply layout, untested on
+        **APK-derived request, guessed reply layout, never answered by
         hardware.** J.O.E. 4.6.10 parses ``CommandArgument`` out of the
         XML and then throws it away (``Bank``'s constructor drops it),
         and its WiFi settings path is ``WifiCommandReadPModeComposite``
@@ -1378,7 +1383,14 @@ class JuraClient:
         checksum to the *request* as well (``@TM:00,FCEA``) — the other
         plausible request form, since ``@TM:60,…`` and every settings
         write carry one while ``@TM:41/42,…`` reads do not. Which form
-        (if either) a real machine accepts is unknown.
+        (if either) a real machine accepts is unknown — and on the one
+        machine asked so far it cannot matter: an S8 EB / EF1091
+        answered ``@tm:80`` to ``@TM:00,FC`` *and* to the bare
+        ``@TM:00``, i.e. address ``00`` is not implemented at all, so no
+        checksum variant can help there
+        (``docs/captures/2026-08-16-kaffeebert-s8eb.md`` §1, §2). The
+        reply layout below has therefore still never been reached by a
+        machine.
 
         Raises :class:`ValueError` when the machine rejects the command
         or the reply does not parse; :meth:`read_all_settings` catches
@@ -1493,8 +1505,14 @@ class JuraClient:
         parameters), so they can be compared directly against the values
         :meth:`brew` accepts.
 
-        Wire format and decode are APK-derived (``LimitLoadParser``) but
-        **untested on hardware**. Raises :class:`ValueError` when the
+        Wire format and decode are APK-derived (``LimitLoadParser``) and
+        **confirmed on hardware** — seven products read off an S8 EB /
+        EF1091 on 2026-08-16, request checksum required and accepted
+        (``@TM:60,020B`` → ``@tm:60,020310FFFFFFFFFFFFFFFF0087``), the
+        five positional min/max pairs mapping to F4/F5/F6/F10/F11 (see
+        ``docs/captures/2026-08-16-kaffeebert-s8eb.md`` §3). That is one
+        machine and one firmware family; ``FFFF`` marks a parameter the
+        product does not expose. Raises :class:`ValueError` when the
         machine answers the ``C1`` "product programming not supported"
         token or the reply fails its checksum / product-code check.
         """
@@ -1965,8 +1983,10 @@ class JuraClient:
     # writes takes ``acknowledge_bricking_risk`` and raises
     # :class:`~jura_connect.firmware.FirmwareSafetyError` without it —
     # these commands can leave the dongle without working firmware and
-    # there is no remote recovery. All APK-derived, untested on
-    # hardware; see docs/PROTOCOL.md §5.15.
+    # there is no remote recovery. Every *write* here is APK-derived and
+    # untested on hardware; the only member with hardware evidence is
+    # the read-only ``@HU?`` status (an S8 EB answered ``@hu:800`` =
+    # no cooler on 2026-08-16, capture §5). See docs/PROTOCOL.md §5.15.
 
     def read_milk_cooler_status(
         self, *, timeout: float = 6.0

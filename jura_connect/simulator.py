@@ -624,11 +624,14 @@ def _brew_frames(blob: str, config: SimulatorConfig) -> list[str]:
     Models what PROTOCOL.md §5.9 records from a live S8 EB: a ``@TB``
     brew-start marker, a run of ``@TV:41<product>…`` progress frames
     with a rising tick count and percentage, then ``@TV:3E<product>``
-    (``ENJOY``) when the cup is done. The frame *layout* is APK-derived
-    (§5.10): a 16-byte payload whose 14-byte value window carries the
-    current/target water ticks at slots 2/3 and the percentage at slot
-    12. Slot 6 is ``0xFF`` so state ``41`` reads as ``HOTWATER_VOLUME``
-    rather than ``BYPASS_WATER_VOLUME``.
+    (``ENJOY``) when the cup is done. The frame *layout* is
+    hardware-confirmed (§5.10): a 16-byte payload whose 14-byte value
+    window carries the current/target water ticks at slots 2/3 and the
+    percentage at slot 12. What this script does *not* reproduce is the
+    observed brew: it sets slot 6 to ``0xFF`` so state ``41`` reads as
+    ``HOTWATER_VOLUME`` rather than ``BYPASS_WATER_VOLUME``, and that
+    branch is the one no machine has ever been seen taking — the S8 EB
+    capture only ever exercised the bypass branch.
 
     This is a *model*, not a transcript: a real S8 EB walks
     ``39`` → ``3C`` → ``41`` and repeats ``ENJOY``. Set
@@ -1208,10 +1211,14 @@ class Simulator:
         the stored values of the bank's arguments concatenated in
         declaration order (self-delimited by the ItemSlider type tags)
         plus the usual ``ByteOperations.d`` checksum over
-        ``"00,<values>"``. Nothing about it is hardware-verified — no
-        J.O.E. code path issues this command — so the simulator also
-        models the rejection token that makes the client fall back to
-        per-setting reads.
+        ``"00,<values>"``. Nothing about that layout is
+        hardware-verified — no J.O.E. code path issues this command, and
+        the one machine asked (S8 EB / EF1091) answers ``@tm:80`` to
+        both ``@TM:00,FC`` and the bare ``@TM:00``, so the layout was
+        never reached (docs/captures/2026-08-16-kaffeebert-s8eb.md §1).
+        The rejection branch is therefore the hardware-backed one, and
+        the simulator models it too — it is what makes the client fall
+        back to per-setting reads.
         """
         tail = cmd[len("@TM:00,FC") :].strip().upper()
         expected_request_csum = _settings_checksum("00,FC")
@@ -1274,7 +1281,10 @@ class Simulator:
     # simulator serves both branches — a machine that exposes slots
     # (`pmode_products` set) and the EF1091-style machine that answers
     # the C1 / C2 rejection tokens for everything (`pmode_products`
-    # left None, the default).
+    # left None, the default). Only that second branch has hardware
+    # evidence: an S8 EB / EF1091 answered @tm:C1 / @tm:C2 to every read
+    # (docs/captures/2026-08-16-kaffeebert-s8eb.md §7). The populated
+    # branch is a model.
 
     def _handle_pmode(self, cmd: str) -> str | None:
         head, _, rest = cmd[len("@TM:") :].partition(",")

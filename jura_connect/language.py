@@ -1,7 +1,8 @@
 """Language download — push a translated UI language into the machine.
 
-Wire sequence (all of it **APK-derived and untested against hardware**;
-see ``docs/PROTOCOL.md`` §5.14 for the derivation)::
+Wire sequence (**APK-derived and untested against hardware** apart from
+the two read-only probes, see below; ``docs/PROTOCOL.md`` §5.14 has the
+derivation)::
 
     @TV:81,<line1><csum>   optional: paint the machine display
     @TV:82,<line2><csum>
@@ -14,6 +15,14 @@ see ``docs/PROTOCOL.md`` §5.14 for the derivation)::
     @TT:03                 finish (machine verifies its CRC)
     @TS:00                 release the keypad
     @TV:81,' ' / @TV:82,' '  clear the display lines
+
+Only the two probes have hardware evidence, and only in the negative:
+an S8 EB / EF1091 — which declares no download capability — answers
+``@TT:00`` with **complete silence** (no reply at all, reproduced three
+times) and ``@TM:23`` with ``@tm:A3`` = ``NOT_SUPPORTED``
+(``docs/captures/2026-08-16-kaffeebert-s8eb.md`` §4). Every mutating
+verb, and the whole populated ``@tt:00`` inventory reply, remains
+untested: no machine has ever been asked to swallow a language image.
 
 The corresponding J.O.E. classes are
 ``joe_android_connector.src.connection.command.language_download.*``

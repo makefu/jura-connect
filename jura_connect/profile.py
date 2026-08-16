@@ -382,7 +382,10 @@ class SettingsBank:
 
     See :meth:`jura_connect.client.JuraClient.read_settings_bank`: the
     reply layout is **not** APK-derived (no J.O.E. code path issues the
-    command) and is untested on hardware.
+    command) and has never been answered by a machine — the one asked
+    so far, an S8 EB / EF1091, rejects address ``00`` outright with
+    ``@tm:80`` (``docs/captures/2026-08-16-kaffeebert-s8eb.md`` §1), so
+    the declaration is not evidence that any firmware implements it.
     """
 
     name: str  # the XML Name attribute, always "Setting" so far

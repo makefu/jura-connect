@@ -2297,15 +2297,23 @@ verbatim for firmware that numbers the bits differently.
 
 ### 5.14 Language download (`@TS:F1` / `@TT:xx` / `@TV:8x`)
 
-**APK-derived, never run against hardware.** Every byte below comes
-from the J.O.E. 4.6.10 APK — the `WifiCommand*` classes under
-`connection/command/language_download/`, their `parser/language_download/`
-counterparts, and `CoffeeMachineAdapter.downloadLanguage` (readable only
-in smali; jadx bails out of the coroutine body). `jura_connect.language`
-implements it and `jura_connect.simulator` models it, but no S8 EB has
-ever been asked to swallow a language image. Treat the whole section as
-a hypothesis until someone verifies it on a machine that declares the
-capability.
+**APK-derived; only the "machine does not support it" path has been
+seen.** Every byte below comes from the J.O.E. 4.6.10 APK — the
+`WifiCommand*` classes under `connection/command/language_download/`,
+their `parser/language_download/` counterparts, and
+`CoffeeMachineAdapter.downloadLanguage` (readable only in smali; jadx
+bails out of the coroutine body). `jura_connect.language` implements it
+and `jura_connect.simulator` models it.
+
+The one hardware datapoint is a *negative* one: an S8 EB / EF1091,
+which declares no download capability, ignores `@TT:00` completely and
+answers `@TM:23` with `@tm:A3` = `NOT_SUPPORTED` ([capture
+§4](captures/2026-08-16-kaffeebert-s8eb.md)) — see "A machine without
+the language verbs stays silent" below. That is the *absence* path.
+No machine has ever been asked to swallow a language image, and no
+populated `@tt:00` inventory reply has ever been seen, so treat the
+transfer half of this section as a hypothesis until someone verifies it
+on a machine that declares the capability.
 
 #### Capability gating
 
@@ -2512,7 +2520,9 @@ the caller supplies and pushes them. No network dependency was added.
 > dongle is physically serviced or replaced.
 >
 > **Nothing in this section has ever been run against hardware by this
-> project.** Every byte below is read out of the J.O.E. Android APK
+> project, except the read-only `@HU?` status** (`@hu:800` = no cooler,
+> [capture §5](captures/2026-08-16-kaffeebert-s8eb.md); see below).
+> Every other byte below is read out of the J.O.E. Android APK
 > (`WifiCommandBootloaderMode`, `WifiCommandSendApplicationDat`,
 > `WifiCommandSendApplicationBin`, `WifiCommandOTAEnd`,
 > `WifiCommandRestartFrog`, `WifiCommandMilkCoolerUpdateStart` /
@@ -2933,31 +2943,34 @@ breaks both halves of the test-suite simultaneously.
   can settle it in one command.
 * **Does any machine implement `@TR:52` *and* declare it?** The S8 EB
   implements the special-counter bank and serves real values from it
-  while its XML declares only `@TR:32` (§5.5), so the profile gate in
-  `read_counter_bank` hides data that is actually there. The open
-  design question: keep trusting the XML, or probe every bank and let
-  the machine's own `@tr:00` decide? Probing costs one round trip per
-  undeclared bank and is read-only; trusting the XML is what J.O.E.
-  does. Nobody has checked whether an *over*-declaring XML exists —
-  that is the failure mode probing would fix and declaration-trust
-  would not.
+  while its XML declares only `@TR:32` (§5.5). The design question
+  ("trust the XML, or probe?") is **settled**: the default still trusts
+  the XML, as J.O.E. does, and `probe=True` / `--probe` is the
+  read-only opt-in that sends an undeclared bank anyway and tags the
+  result `source="probed"` (§5.5, "The opt-in probe"). What is still
+  open is whether any of the 14 declaring profiles is a machine that
+  also implements it — and whether an *over*-declaring XML exists,
+  which is the failure mode probing would fix and declaration-trust
+  would not. Nobody has checked that direction.
 * **The `@TR:52` slot→function map is still APK-derived.** Kaffeebert's
-  four pages were captured raw (§5.5) but never run through
-  `SpecialCounterStatisticsParser`, because the profile gate refuses
-  the read. Its non-empty slots are 2 (=1), 3 (=14) and 8 (=2661); the
-  APK map claims slot 3 is `sweetFoam` and slots 4+5+6 are `coldBrew`,
-  which does not obviously fit a machine with 2661 of *something* in
-  slot 8. Decoding it needs either a profile override or the probing
-  change above.
+  four pages were captured raw (§5.5): its non-empty slots are 2 (=1),
+  3 (=14) and 8 (=0x0A65 = 2661), and slot 0 — the bank's own total —
+  sits at the `0xFFFF` unused sentinel. `--probe` now makes the live
+  decode reachable, but nobody has checked the names it prints against
+  what the machine has really poured. The APK map claims slot 3 is
+  `sweetFoam` and slots 4+5+6 are `coldBrew`, and it has **no name at
+  all for slot 8** — the largest count on the machine. So the map
+  remains a reading of the APK, not a fact about this firmware.
 * **`register-read <bank>` cannot work as specified.** A bare
   `@TR:<bank>` with no page argument draws no reply at all on TT237W
   (verified for banks `32` and `52`), so the command blocks for its
   full timeout and then raises. Either it should take a page argument
   or it should be dropped in favour of `raw '@TR:<bank>,<page>'`.
-* **`AGENTS.md` §2 and `DESTRUCTIVE_PREFIXES` disagree about
-  `@TG:FF`.** The document lists it as destructive; the code does not
-  gate it and `tests/test_commands.py` explicitly classes it as an
-  ungated read ("reclassified, not a reset"). Because of the
-  disagreement `cancel` was **not** exercised during the 2026-08-16
-  hardware run, so its behaviour on an idle machine is still unknown.
-  One of the two needs to change.
+* **`cancel` (`@TG:FF`) has still never been sent to a machine.**
+  During the 2026-08-16 run it was skipped because `AGENTS.md` §2
+  listed `@TG:FF` as destructive while the code classed it as an
+  ungated read. That contradiction is now resolved — `@TG:FF` is
+  J.O.E.'s `WifiCommandCancelProductStep` and `AGENTS.md` no longer
+  lists it — but the command itself remains unexercised, so its
+  behaviour on an idle machine is still unknown (as is the related
+  §5.12 question of whether it cancels a *pending* timer).

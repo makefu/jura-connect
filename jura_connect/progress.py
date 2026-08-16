@@ -356,7 +356,18 @@ class ProductProgress:
 
     @property
     def is_complete(self) -> bool:
-        """True on the ``ENJOY`` (``3E``) frame that ends a product."""
+        """True on the ``ENJOY`` (``3E``) frame that ends a product.
+
+        This is a **state, not an event**: the captured S8 EB brew
+        repeated ``@TV:3E28`` five times, ~2 s apart, until something
+        cleared it (docs/captures/2026-08-16-kaffeebert-brew-progress.md).
+        Anything that counts cups or fires a notification must
+        edge-trigger on the transition into ``ENJOY``;
+        :meth:`~jura_connect.client.JuraClient.follow_progress` already
+        breaks on the first one, so only callers driving
+        :meth:`~jura_connect.client.JuraClient.iter_progress`
+        themselves are exposed.
+        """
         return self.state is ProgressState.ENJOY
 
     @property

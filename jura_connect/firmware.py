@@ -1,6 +1,10 @@
 """Dongle firmware OTA, dongle restart and milk-cooler update.
 
-**Everything in this module is APK-derived and untested on hardware.**
+**Everything in this module is APK-derived and untested on hardware,
+except the read-only `@HU?` milk-cooler status** — an S8 EB / EF1091
+answered `@hu:800` (`no_cooler`) to it on 2026-08-16
+(`docs/captures/2026-08-16-kaffeebert-s8eb.md` §5). No OTA, restart or
+milk-cooler *update* verb has ever been put on a wire.
 The wire forms come from the J.O.E. Android app's `WifiCommand*`
 classes (`WifiCommandBootloaderMode`, `WifiCommandSendApplicationDat`,
 `WifiCommandSendApplicationBin`, `WifiCommandOTAEnd`,
