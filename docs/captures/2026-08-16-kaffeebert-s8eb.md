@@ -462,8 +462,37 @@ opposite conclusions.
 Left exactly as found:
 
 * display **unlocked** — verified by a `status` read after the
-  lock/unlock pair returning to `@TF:0004000008000000`;
+  lock/unlock pair returning to `@TF:0004000008000000` (bit 39
+  `LockedKeys` clear), several minutes before the end of the run;
 * nothing in progress — no `@TV:` frame was ever seen;
 * no setting changed — every `@TM:` frame sent was a bare read or the
   XML's own bank command; no `@TS:01`-wrapped write was issued;
 * no counter reset, no maintenance cycle started, no product brewed.
+
+### The machine left the network at the end of the run
+
+The last command (`languages`, a re-run of `@TT:00` + `@TM:23` to check
+the fix) succeeded normally. Roughly ten minutes later the machine
+stopped answering: first a TCP connect timeout, then
+`OSError: [Errno 113] No route to host`, then ICMP
+`Destination Host Unreachable` — i.e. it disappeared from ARP, the
+dongle is off the WiFi, not merely refusing sessions.
+
+The overwhelmingly likely cause is the machine's own power-save: this
+run read `auto_off = 30min` out of `@TM:13`, the idle status frame
+carried `energy_safe` throughout, and nobody used the machine
+physically during the session. An S8 that hits its auto-off timer
+takes the WiFi dongle down with it.
+
+It is recorded here because "the machine stopped answering" is a stop
+condition regardless of the explanation, and because the reader should
+be able to rule the run out as a cause:
+
+* no destructive frame was ever put on the wire — the harness raised
+  rather than writing anything `match_destructive()` flagged;
+* the last frames sent were two reads (`@TT:00`, `@TM:23`), one of
+  which the machine ignores entirely;
+* the display was confirmed unlocked well before the disappearance,
+  and a power cycle clears a leaked lock anyway (PROTOCOL.md §9).
+
+Nothing further was sent after the machine went quiet.
