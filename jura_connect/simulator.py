@@ -445,6 +445,18 @@ class SimulatorConfig:
     # a real machine's brew (docs/captures/2026-08-16-kaffeebert-brew-progress.md)
     # rather than the model above.
     brew_script: tuple[str, ...] | None = None
+    # Frames the dongle pushes *ahead of* the next command reply, once.
+    # Models the markers a real machine emits without being asked: the
+    # S8 EB pushed a bare "@TS" ~10 s after the last ENJOY of a brew
+    # (docs/captures/2026-08-16-kaffeebert-brew-progress.md), i.e. it can
+    # land on the socket while an unrelated command is in flight, and
+    # "@TB" opens every brew and every @TS:01 screen lock (PROTOCOL.md
+    # §5.1). Drained before the first reply and then cleared.
+    pushes_before_reply: tuple[str, ...] = ()
+    # Same idea for the handshake: frames pushed before the @hp4/@hp5
+    # answer. A machine that is mid-brew (or mid-lock) when a client
+    # pairs has markers on the wire before it ever replies.
+    handshake_pushes: tuple[str, ...] = ()
 
     # -- maintenance processes ----------------------------------------
     # Off by default for the same reason as brewing: @TG:21..@TG:26 are
@@ -665,6 +677,8 @@ class Simulator:
         # Frames queued by a command handler to be pushed after its
         # reply (the brew progress stream, the process state walk).
         self._queued: list[str] = []
+        # Unsolicited frames pushed *before* the next reply, drained once.
+        self._pending_pushes: list[str] = list(self.config.pushes_before_reply)
         self._pmode_reads = 0  # for SimulatorConfig.pmode_reset_after_slot
         # Running maintenance process: the start command, how far into
         # its state sequence we are, and the confirmation the current
@@ -764,6 +778,8 @@ class Simulator:
             log.debug("simulator <- %r", text)
             if text.startswith("@HP:"):
                 reply = self._handle_handshake(text)
+                for frame in self.config.handshake_pushes:
+                    self._send(conn, frame)
                 self._send(conn, reply)
                 if reply.startswith("@hp4"):
                     authenticated = True
@@ -784,6 +800,7 @@ class Simulator:
                 continue  # mimic dongle's silent ignore for unknown commands
             if reply == "@@CLOSE":
                 return
+            self._push_pending(conn)
             self._send(conn, reply)
             self._drain_queue(conn)
 
@@ -1116,6 +1133,19 @@ class Simulator:
         self._process_awaiting = None
 
     # -- queued (unsolicited) frames -----------------------------------
+    def _push_pending(self, conn: socket.socket) -> None:
+        """Push :attr:`SimulatorConfig.pushes_before_reply` ahead of a reply.
+
+        A real dongle interleaves its own markers with command replies —
+        the frame the client is waiting for is not necessarily the next
+        one on the socket. Drained once so a test models "a marker was
+        in flight when the command went out", not "every reply is
+        preceded by a marker".
+        """
+        pending, self._pending_pushes = self._pending_pushes, []
+        for frame in pending:
+            self._send(conn, frame)
+
     def _drain_queue(self, conn: socket.socket) -> None:
         """Push frames a handler queued behind its reply, in order."""
         queued, self._queued = self._queued, []
