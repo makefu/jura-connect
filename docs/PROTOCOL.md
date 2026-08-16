@@ -331,6 +331,25 @@ cleartext body is just the inner CRLF. `JuraClient.close()` sends that.
 | `@TS` | **bare, no colon, no payload** — pushed 1.8 s after the last `ENJOY` of a captured brew, 3 ms before the `@TF:` broadcast resumed. Meaning unresolved; J.O.E. has no handler for it. See §9 |
 | `@hu:<code>` | milk-cooler / OTA-family acknowledgement code — 3 hex chars (`800` seen on Kaffeebert); also carries `ok` / `wait` / `busy` / `abort` / `error` tails on other verbs |
 
+#### `@TB` / `@TS` are markers, and a reader must skip them
+
+`@TB` and `@TS` are the only pushes with **no colon and no payload**: a
+bare two-letter uppercase verb and nothing else. That shape is the whole
+rule — every reply in this protocol is lowercase (`@tp`, `@ts`,
+`@tg:43…`, `@hu:800`) and every push is uppercase, so an uppercase
+payloadless frame can never be an answer to a command.
+
+They are not rare or brew-only: `@TB` opens a brew *and* a `@TS:01`
+screen lock (§5.1), and the captured brew's `@TS` arrived ~10 s after the
+last `ENJOY` — long enough to land on the socket while an unrelated
+command is in flight. Anything reading replies must therefore skip them
+the way it skips `@TF:` / `@TV:`, or it will hand a marker back as "the
+reply". `jura_connect` does this in `JuraClient._await_frame` /
+`request_raw` (recording each skipped marker in `status_history`), and
+`brew()` additionally pins its own reply with `BREW_REPLY_MATCH`
+(`(?i)^@(?:tp|an)\b`) so the accept / `@tp:00`-reject decision can only
+be made from a real `@TP:` answer.
+
 ### 5.3 Maintenance counter layout (`@TG:43`, `@TG:C0`)
 
 Big-endian u16 per counter after the `@tg:43` prefix — **but neither
@@ -2838,15 +2857,26 @@ breaks both halves of the test-suite simultaneously.
   been recorded as answering `@TB` **then** `@ts`, so `@TB` is not
   brew-specific either). Cheap experiment: lock and unlock an idle
   machine with `@TS:01` / `@TS:00` and watch for an unsolicited `@TS`.
-* **A pushed marker can be mistaken for a reply.** `@TB` and `@TS` are
-  uppercase and payloadless, and `JuraClient.request()` without a
-  `match` pattern returns the first frame that is not `@TF:`/`@TV:` —
-  so a marker arriving between a command and its answer would be
-  returned as the answer. `lock_screen` / `unlock_screen` are safe by
-  accident (they match the lowercase `^@ts`), but `brew()` sends
-  `@TP:` with no matcher, and the capture cannot rule out that the
-  dongle emits `@TB` *before* the `@tp` ack on a remote start. Untested
-  either way; worth a matcher when someone next brews over the wire.
+  **What it means is still open, but the library no longer cares**: a
+  bare `@TS` (like a bare `@TB`) is skipped as a marker wherever a reply
+  is awaited and recorded in `status_history`, so the answer to the
+  question can only add meaning, never fix a bug (§5.2).
+* ~~**A pushed marker can be mistaken for a reply.**~~ **Fixed.** `@TB`
+  and `@TS` are uppercase and payloadless, and `JuraClient.request()`
+  without a `match` pattern used to return the first frame that was not
+  `@TF:`/`@TV:` — so a marker arriving between a command and its answer
+  was returned as the answer. `brew()` was the live exposure: it sent
+  `@TP:` with no matcher and then classified the result with
+  `_is_brew_accept`, so a marker could invert "did the machine accept my
+  brew" and drive the `retry` / `follow` branches off it.
+  `lock_screen` / `unlock_screen` were safe only by accident of case
+  (they match the lowercase `^@ts`). Now: the matcher-less path skips
+  markers (§5.2), `brew()` matches `BREW_REPLY_MATCH`, and
+  `process.PROCESS_REPLY_MATCH` — an "anything that is not a push"
+  pattern that *did* accept `@TB` — excludes them explicitly. Still
+  unobserved on hardware: whether a remote `@TP:` start ever puts `@TB`
+  ahead of its `@tp` ack. The client now survives either ordering, so
+  the question is no longer load-bearing.
 * **Window slots 8 and 11 held a constant `0x11`** through every frame
   of the captured brew (slot 8 is `max water temperature` in the app's
   table, slot 11 the unused `INTAKE_PERCENTAGE`). Neither 17 corresponds
