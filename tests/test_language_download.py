@@ -419,6 +419,35 @@ def test_languages_command_is_not_gated(sim_factory) -> None:
     assert _verbs(sim) == ["@TT:00", "@TM:23"]
 
 
+def test_language_inventory_survives_a_machine_that_ignores_tt00(sim_factory) -> None:
+    """A machine without the language verbs never answers ``@TT:00``.
+
+    Observed on Kaffeebert (S8 EB / EF1091, TT237W V06.11) on
+    2026-08-16: ``@TT:00`` draws no reply at all — only the dongle's
+    periodic ``@TF:`` broadcasts — and ``@TM:23`` answers ``@tm:A3``
+    (NOT_SUPPORTED). The simulator models exactly that when
+    ``allow_language_download`` is off. Reading the inventory must
+    still produce a usable answer instead of raising, because
+    "this machine has no language slots" is the whole point of asking.
+    """
+    sim = sim_factory(max_languages_reply="@tm:A3")
+    c = _paired(sim, machine=NO_CAPABILITY_MACHINE)
+    try:
+        result = run_named(c, "languages", timeout=0.5)
+    finally:
+        c.close()
+
+    payload = result.to_dict()["value"]
+    assert payload["slots"] == []
+    assert payload["max_languages"] == "NOT_SUPPORTED"
+    assert payload["supports_download"] is False
+    assert "@TT:00" in str(payload["list_error"])
+    assert "no reply" in result.format()
+    # @TM:23 must still be asked: the machine's own answer is the part
+    # that distinguishes "no slots" from "verb unknown".
+    assert _verbs(sim) == ["@TT:00", "@TM:23"]
+
+
 # --------------------------------------------------------------------- #
 # Destructive gating
 # --------------------------------------------------------------------- #
