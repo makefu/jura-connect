@@ -10,12 +10,14 @@ end-to-end against a **JURA S8 EB** running firmware **TT237W V06.11**
 
 ## Status
 
-53 named commands, 770 tests. The table splits by *how well verified*
+53 named commands, 805 tests. The tables split by *how well verified*
 each area is, because that is the thing worth knowing before you point
 this at your machine.
 
 **Verified against physical hardware** (a JURA S8 EB / EF1091 running
-TT237W V06.11, plus an E6 for the brew blob):
+TT237W V06.11, plus an E6 for the brew blob and a Z10/EF545 for the milk
+parameters). The raw frames behind these rows are in
+[`docs/captures/`](docs/captures/):
 
 | Capability | Status |
 | --- | --- |
@@ -26,6 +28,10 @@ TT237W V06.11, plus an E6 for the brew blob):
 | Per-machine profiles — 89 bundled XMLs from the J.O.E. APK; alert names + product codes are looked up per `EF_code` so a Cortado on an S8 EB names itself, not `0x2B=2` | ✓ |
 | Machine settings: single-setting read and checksummed write | ✓ |
 | Brewing by product name — `brew hotwater water=220 temp=high` — with water / strength / temperature / bypass overrides validated against the machine XML | ✓ ; the `@TP:` recipe-blob format is verified by physically brewing, see §5.9 of [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
+| Product progress — `@TV:` decoding, `brew(follow=True)`, `progress` | ✓ **for the coffee path**: a whole `cafe_barista` decoded frame-for-frame (grind → water → bypass → `ENJOY`), percentage, product resolution. Milk, steam and the maintenance states are *not* covered — see the second table |
+| Live per-product limits (`@TM:60`) | ✓ ; seven products, checksum required and accepted |
+| Milk-cooler **status** read (`@HU?`) | ✓ ; `@hu:800` = no cooler connected. The *update* verb is untested |
+| Counter-bank probe (`--probe`) | ✓ ; an S8 EB serves `@TR:52` while declaring only `@TR:32`, so an XML declaration is a lower bound. The slot→name map is still unverified |
 
 **Implemented, simulator-verified, never run against hardware** — see
 the warning below. Section numbers refer to
@@ -33,15 +39,15 @@ the warning below. Section numbers refer to
 
 | Capability | Wire | Doc |
 | --- | --- | --- |
-| Product progress: 87 decoded states, live percentage, `brew(follow=True)` | `@TV:` | §5.10 |
+| The other 83 progress states — milk, steam, maintenance, the `8F` window | `@TV:` | §5.10 |
 | Interactive maintenance processes (start, watch, confirm, advance) | `@TG:01` / `@TG:04` / `@TG:10` | §5.11 |
-| Extra counter banks: special, barista, daily + daily reset | `@TR:52/53/34/35/42..45`, `@TF:05` | §5.5 |
-| Batch settings read, live per-product limits | `@TM:00,FC`, `@TM:60` | §5.7 |
+| Barista and daily counter banks + daily reset; the `@TR:52` slot→name map | `@TR:34/35/42..45`, `@TF:05` | §5.5 |
+| Batch settings read — the address is *confirmed absent* on an S8 EB, so the reply layout remains a guess with a per-setting fallback | `@TM:00,FC` | §5.7 |
 | Programmable-recipe (PMode) writes | `@TM:41` / `@TM:42` | §5.6 |
 | Brew preselections (extra shot, double, powder, cold brew, sweet foam) | `@TP:` mask / overwrites | §5.13 |
 | Coffee timer (scheduled brew) | `@TM:3C` + `@TV:84` | §5.12 |
-| Language download | `@TS:F1` / `@TT:xx` / `@TV:8x` | §5.14 |
-| Milk cooler update, dongle restart, dongle firmware OTA | `@HU` / `@HT:3` / `@HB`…`@HE` | §5.15 |
+| Language download **transfer** (a machine that declares no support was seen to answer `@TT:00` with silence) | `@TS:F1` / `@TT:xx` / `@TV:8x` | §5.14 |
+| Milk cooler **update**, dongle restart, dongle firmware OTA | `@HU` / `@HT:3` / `@HB`…`@HE` | §5.15 |
 
 > ### ⚠ Read this before using anything in the second table
 >
@@ -49,8 +55,15 @@ the warning below. Section numbers refer to
 > and is exercised only against `jura_connect.simulator` — a TCP server
 > in this repo that speaks the same protocol. **The simulator's replies
 > were written from the same APK reading as the client's expectations,
-> so a shared misreading passes both halves of the test-suite.** No
-> byte in that table has ever been confirmed by a real Jura machine.
+> so a shared misreading passes both halves of the test-suite.** No byte
+> in that table has been confirmed by a real Jura machine.
+>
+> That is not a theoretical worry. The first hardware session found four
+> such misreadings within an hour — a settings bank that does not exist
+> on the machine, a command that answers with silence rather than a
+> rejection, a bank-register read that cannot work at all, and a pushed
+> frame the client could mistake for a reply. Everything in the first
+> table earned its place; nothing in the second has yet.
 >
 > Practically: a wrong preselection or recipe byte **misbrews**, a
 > maintenance confirmation sent at the wrong moment **consumes a
@@ -968,8 +981,9 @@ Concretely the gate is:
 1. `ruff check jura_connect/ tests/` — lint.
 2. `ruff format --check jura_connect/ tests/` — formatting drift.
 3. `ty check jura_connect/` — Astral's type checker on the library.
-4. `pytest tests/ -q` — the 770-case test suite against the in-tree
-   simulator, including 89-XML profile-registry coverage.
+4. `pytest tests/ -q` — the 805-case test suite against the in-tree
+   simulator, including 89-XML profile-registry coverage and the frames
+   captured from a real machine in [`docs/captures/`](docs/captures/).
 
 If you want to run any one of them ad-hoc without the whole build,
 enter the dev shell (`nix develop`) which has all four tools on

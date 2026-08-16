@@ -16,11 +16,20 @@ the machine talks back mid-operation — was missing, and four commands
 carried the wrong meaning. `docs/JOE_GAPS.md` records the full
 comparison.
 
-Unless a bullet says otherwise, the new work is derived from the
-decompiled app and verified against the simulator only: no coffee
-machine was available while it was written. The wire formats that *are*
-hardware-verified (the `@TP:` recipe blob, the `@TV:` value window) say
-so in `docs/PROTOCOL.md`.
+Most of it was written against the decompiled app and the in-tree
+simulator, then **validated on a real machine** — a JURA S8 EB (EF1091)
+running TT237W V06.11. Two read-only sessions and one hand-started brew
+are recorded frame-by-frame in `docs/captures/`, and `README.md` splits
+every capability by whether hardware has seen it. That distinction is
+load-bearing here: the simulator's replies were written from the same
+reading of the APK as the client's expectations, so a shared misreading
+passes both halves of the suite. The hardware sessions found four such
+misreadings, all fixed below.
+
+Anything still labelled APK-derived in `docs/PROTOCOL.md` has genuinely
+never been near a machine — the maintenance processes, the coffee timer,
+preselections, the language transfer, the firmware OTA and the PMode
+writes among them.
 
 ### Added
 - **Product progress (`@TV:`) is decoded** —
@@ -96,6 +105,12 @@ so in `docs/PROTOCOL.md`.
   machine available to the project declares the bank, so this path is
   covered by the simulator and by the decompiled app only.
 
+- **Hardware capture corpus** — `docs/captures/` records the raw frames
+  behind every "verified" claim, and `tests/test_progress_capture.py`
+  replays a real brew (grind → water → bypass → `ENJOY`) through the
+  decoder, so the frames a machine actually sent are now part of the
+  suite rather than a paragraph in a doc.
+
 ### Breaking changes for library consumers
 
 Checked mechanically against the `v0.12.0` tag: **no public class or
@@ -170,6 +185,29 @@ only gained fields.
   refuses destructive frames with `@an:error` by default.
 
 ### Fixed
+- **A machine that does not support a command can answer with silence,
+  not a rejection.** `@TT:00` (list languages) drew no reply at all from
+  an S8 EB — three times — and `LanguageInventory` let the resulting
+  `TimeoutError` escape instead of reporting "this machine has no
+  language download". Every APK-derived rejection token had been modelled;
+  a machine simply not answering had not.
+- **`register-read <bank>` could never have worked.** Bare `@TR:32` /
+  `@TR:52` draw no reply: counter banks are page-addressed only. The
+  command now says so rather than timing out with no explanation.
+- **A frame the machine pushes on its own could be read as a reply.**
+  Only `@TF:` and `@TV:` were skipped while awaiting one, but a real
+  brew showed the dongle also pushes bare uppercase markers — `@TB` when
+  a brew starts, and a `@TS` about ten seconds after the last `ENJOY`.
+  `brew()` awaited its acknowledgement with no pattern at all, so a
+  marker could be taken for the answer and invert the accept/reject
+  decision that drives its `retry` and `follow` branches;
+  `ProcessRunner.start()` could likewise report a running maintenance
+  cycle as refused. Markers are now skipped wherever a reply is awaited
+  (and recorded in `status_history`), `brew()` pins its reply with
+  `BREW_REPLY_MATCH`, and the process matcher excludes them explicitly.
+  Found only because a real machine pushes frames the simulator never
+  did — the class of bug this release's hardware validation existed to
+  catch.
 - **Maintenance counters were labelled wrong on 21 of the 89 known
   machines.** The `@TG:43` / `@TG:C0` field order is declared per
   machine by the XML's `<BANK>` `<TEXTITEM Type=…>` children, not fixed:
