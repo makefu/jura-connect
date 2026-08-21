@@ -225,6 +225,21 @@ def test_milk_alert_blocks_every_kind_containing_milk() -> None:
     assert set(no_milk.blocked_kinds) == {"M", "CM", "TM"}
 
 
+@pytest.mark.parametrize(
+    ("bit", "name"),
+    [
+        (14, "no_milk_sensor"),
+        (15, "milk_sensor_error"),
+        (16, "milk_sensor_no_signal"),
+    ],
+)
+def test_status_uses_canonical_milk_sensor_alert_names(bit: int, name: str) -> None:
+    status = MachineStatus.parse(_frame(bit), profile=load_profile("EF545"))
+
+    assert status.active_alerts == (name,)
+    assert status.info == (name,)
+
+
 # --------------------------------------------------------------------- #
 # MachineStatus: blocked kinds + clearing processes
 # --------------------------------------------------------------------- #

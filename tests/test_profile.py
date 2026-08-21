@@ -59,6 +59,23 @@ def test_alert_severity_lifted_from_xml_type_attribute():
     assert p.alert_by_bit[35].severity == "process"
 
 
+@pytest.mark.parametrize(
+    ("bit", "name", "raw_name"),
+    [
+        (14, "no_milk_sensor", "no milk (milk sensor)"),
+        (15, "milk_sensor_error", "error milk (milk sensor)"),
+        (16, "milk_sensor_no_signal", "no signal (milk sensor)"),
+    ],
+)
+def test_z10_milk_sensor_alerts_keep_canonical_names(bit, name, raw_name):
+    """Profile decoding must not rename the established status API."""
+    p = load_profile("EF545")
+    alert = p.alert_by_bit[bit]
+
+    assert alert.name == name
+    assert alert.raw_name == raw_name
+
+
 def test_ef1069_maps_high_byte7_status_bits():
     """The J8 (SAS / EF1069) status frame carries bits in byte 7 that the
     EF536 baseline codebook (which stops at bit 38) doesn't know about.

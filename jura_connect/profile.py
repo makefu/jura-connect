@@ -42,6 +42,16 @@ _XML_TYPE_TO_SEVERITY = {
     "ip": "process",
 }
 
+# Keep profile-backed status names compatible with the original EF536
+# codebook and with callers that consume MachineStatus.active_alerts. The
+# parenthetical wording in Jura's XML is useful as raw metadata, but blindly
+# snake-casing it duplicates or reorders "milk" in these three API names.
+_ALERT_NAME_ALIASES = {
+    "no_milk_milk_sensor": "no_milk_sensor",
+    "error_milk_milk_sensor": "milk_sensor_error",
+    "no_signal_milk_sensor": "milk_sensor_no_signal",
+}
+
 #: Wire commands of the two maintenance banks whose field order the XML
 #: declares. Used as the ``<BANK Command=…>`` lookup key.
 MAINTENANCE_COUNTER_BANK = "@TG:43"
@@ -1392,6 +1402,7 @@ def _parse_xml(text: str, code: str, version: str) -> MachineProfile:
         # The Jura XMLs spell the descaling alert "decalc alert"; expose
         # it under the consistent "descale" key the rest of the API uses.
         name = _snake(raw_name).replace("decalc", "descale")
+        name = _ALERT_NAME_ALIASES.get(name, name)
         blocked = alert.get("Blocked")
         # Type="block" stops every product regardless of Blocked (which
         # such alerts never carry); info/ip block only what Blocked names.
