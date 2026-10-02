@@ -17,6 +17,7 @@ from jura_connect.client import (
     MaintenancePercent,
 )
 from jura_connect.commands import CommandError, DestructiveCommandError, run_named
+from jura_connect.profile import load_profile
 
 
 def _paired(sim) -> JuraClient:
@@ -398,6 +399,74 @@ def test_kaffeebert_idle_frame_decodes_to_coffee_ready_energy_safe() -> None:
     assert "energy_safe" in st.active_alerts
     assert "no_beans" not in st.active_alerts
     assert "cappu_rinse_alert" not in st.active_alerts
+
+
+def test_milk_clean_alert_decodes_without_a_profile() -> None:
+    """Regression for makefu/jura-connect-hass#17: the "clean milk
+    system" prompt (bit 41, set by the machine after a milk drink) was
+    undecodable on machines without a machine_type, because the
+    hard-coded fallback codebook stopped at bit 38. It must surface in
+    ``process`` (Type="ip" severity) like the other maintenance
+    prompts, and the profile decode must agree."""
+    frame = _tf_frame(41)  # byte 5 = 0x40 -> global bit 41
+    st = MachineStatus.parse(frame)
+    assert st.active_alerts == ("cappu_clean_alert",)
+    assert st.process == ("cappu_clean_alert",)
+    st_profiled = MachineStatus.parse(frame, profile=load_profile("EF1069"))
+    assert st_profiled.process == ("cappu_clean_alert",)
+    assert st_profiled.alert_processes == (("cappu_clean_alert", "cappu_clean"),)
+
+
+@pytest.mark.parametrize(
+    ("bit", "name", "severity"),
+    [
+        (39, "locked_keys", "info"),
+        (40, "close_tab", "errors"),
+        (41, "cappu_clean_alert", "process"),
+        (42, "info_cappu_clean_alert", "info"),
+        (43, "info_coffee_clean_alert", "info"),
+        (44, "info_descale_alert", "info"),
+        (45, "info_filter_used_up_alert", "info"),
+        (46, "steam_ready", "info"),
+        (47, "switch_off_delay_active", "errors"),
+    ],
+)
+def test_fallback_status_bits_match_the_ef536_profile(
+    bit: int, name: str, severity: str
+) -> None:
+    """Bits 39..47 exist on every bundled profile but were missing from
+    ``STATUS_BITS``; the fallback names/severities must match the
+    EF536 XML so profile-less machines label them identically."""
+    frame = _tf_frame(bit)
+    st = MachineStatus.parse(frame)
+    assert st.active_alerts == (name,)
+    assert getattr(st, severity) == (name,)
+    prof = MachineStatus.parse(frame, profile=load_profile("EF536"))
+    assert prof.active_alerts == st.active_alerts
+    assert prof.errors == st.errors
+    assert prof.info == st.info
+    assert prof.process == st.process
+
+
+def test_fallback_codebook_matches_ef536_everywhere() -> None:
+    """The whole fallback codebook must stay a subset-consistent mirror
+    of the EF536 XML it claims to encode — a per-bit drift here is
+    invisible until a profile-less machine hits the bit."""
+    from jura_connect.client import STATUS_BITS
+
+    profile = load_profile("EF536")
+    assert set(STATUS_BITS) == set(profile.alert_by_bit)
+    for bit, (name, severity) in STATUS_BITS.items():
+        alert = profile.alert_by_bit[bit]
+        assert (alert.name, alert.severity) == (name, severity), f"bit {bit}"
+
+
+def _tf_frame(*bits: int) -> str:
+    data = bytearray(8)
+    for bit in bits:
+        byte_i, bit_in_byte = divmod(bit, 8)
+        data[byte_i] |= 1 << (7 - bit_in_byte)
+    return "@TF:" + data.hex().upper()
 
 
 def test_hex_body_pads_odd_length_to_even() -> None:

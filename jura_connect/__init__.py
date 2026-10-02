@@ -33,6 +33,7 @@ __version__ = "0.13.1"
 
 from .client import (
     PRODUCT_NAMES,
+    STATUS_BITS,
     HandshakeError,
     HandshakeResult,
     JuraClient,
@@ -160,6 +161,7 @@ __all__ = [
     "PRODUCT_NAMES",
     "PModeSlot",
     "PairingTimeout",
+    "STATUS_BITS",
     "MachineProcess",
     "ProcessAction",
     "ProcessCatalogue",

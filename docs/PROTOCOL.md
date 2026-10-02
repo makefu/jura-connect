@@ -442,15 +442,16 @@ every status bit by 7 positions per byte. The `<ALERT Bit="N" …>`
 attribute in the machine XML uses the SAME N that the APK decoder
 expects; only the byte/bit extraction matters.
 
-The client decodes the well-known S8 alert set (cf.
-`jura_connect.client._STATUS_BITS`) and groups each bit by the
+The client decodes the full EF536 baseline alert set — the whole
+`<ALERTS>` table, bits 0..47 (exported as `jura_connect.STATUS_BITS`)
+— and groups each bit by the
 *severity* lifted from the XML's `ALERT.Type` attribute:
 
 | XML `Type` | Python severity | Meaning |
 | ---------- | --------------- | ------- |
 | `block`    | `error`         | the machine is genuinely stuck and needs user action (insert tray, fill water, …) |
 | `info` or none | `info`      | informational state or low-supply reminder (`no_beans` with `Blocked="C"`, `heating_up`, `coffee_ready`, …) — not an error, just a flag |
-| `ip`       | `process`       | a "schedule maintenance" prompt (descale / cleaning / filter / cappu rinse alerts) shown *before* it actually blocks brewing |
+| `ip`       | `process`       | a "schedule maintenance" prompt (descale / cleaning / filter / cappu rinse / **cappu-clean = milk-system clean**) shown *before* it actually blocks brewing |
 
 Live frame from Kaffeebert at idle: `@TF:0004000008000000`. Byte 1 =
 `0x04` → MSB-position 5 set → global bit 13 = `coffee_ready`
