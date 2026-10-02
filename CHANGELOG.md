@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-02
+
 ### Added
 - **Twin-grinder ratios are a public, settable recipe parameter.**
   `KIND_GRINDER_RATIO`, `brew(..., grinder_ratio=...)`, the `grinder`
