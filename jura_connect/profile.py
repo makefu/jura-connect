@@ -34,7 +34,7 @@ from functools import lru_cache
 _PACKAGE = "jura_connect"
 
 # Per-XML alert Type -> internal severity. Mirrors the categorisation
-# in :mod:`jura_connect.client._STATUS_BITS` but is now sourced from
+# in :mod:`jura_connect.client.STATUS_BITS` but is now sourced from
 # the XML rather than hard-coded.
 _XML_TYPE_TO_SEVERITY = {
     "block": "error",

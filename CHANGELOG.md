@@ -6,12 +6,27 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-02
+
 ### Added
 - **Twin-grinder ratios are a public, settable recipe parameter.**
   `KIND_GRINDER_RATIO`, `brew(..., grinder_ratio=...)`, the `grinder`
   CLI alias and coffee-timer override all use the enumerated F2 values
   from the selected machine profile. The `100_0=00` and `0_100=04`
   endpoints were physically verified as left:right on a GIGA 6 / EF566.
+
+### Fixed
+- **The "clean milk system" prompt is decodable without a machine
+  profile.** The fallback `@TF:` codebook stopped at bit 38, so on
+  machines paired without `machine_type` the milk-system clean alert
+  (bit 41, `cappu_clean_alert` — set after every milk drink, shown by
+  J.O.E.) decoded to nothing. `jura_connect.STATUS_BITS` (formerly
+  the private `_STATUS_BITS`, now public) covers the full EF536
+  `<ALERTS>` table, bits 0..47: locked keys, close tab, the four
+  info-alert mirrors, steam ready and the switch-off delay. A parity
+  test pins the codebook against the EF536 XML.
+  Fixes makefu/jura-connect-hass#17 for profile-less setups;
+  profile-backed machines were already correct.
 
 ## [0.13.1] — 2026-09-06
 

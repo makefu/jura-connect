@@ -29,10 +29,11 @@ APK. Layered as:
 * :mod:`jura_connect.credentials` -- JSON file storage of pairing secrets.
 """
 
-__version__ = "0.13.1"
+__version__ = "0.14.0"
 
 from .client import (
     PRODUCT_NAMES,
+    STATUS_BITS,
     HandshakeError,
     HandshakeResult,
     JuraClient,
@@ -160,6 +161,7 @@ __all__ = [
     "PRODUCT_NAMES",
     "PModeSlot",
     "PairingTimeout",
+    "STATUS_BITS",
     "MachineProcess",
     "ProcessAction",
     "ProcessCatalogue",

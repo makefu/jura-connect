@@ -2328,8 +2328,10 @@ class MaintenancePercent:
         return out
 
 
-# Bit-to-alert mapping for the S8 / EF536 (see assets/documents/xml/EF536/1.0.xml).
-# Bit index is global: byte_index*8 + bit_within_byte.
+#: Bit-to-alert mapping for the S8 / EF536 baseline (the whole
+#: ``<ALERTS>`` table of assets/documents/xml/EF536/1.0.xml, bits 0..47).
+#: Public: consumers without a per-machine profile (e.g. the Home
+#: Assistant integration creating one entity per alert) enumerate this.
 #
 # Each entry is (name, severity). The XML carries a Type attribute that
 # distinguishes blocking errors from informational / in-progress states:
@@ -2344,7 +2346,7 @@ class MaintenancePercent:
 #   * "process" -> XML Type="ip": an in-process / reminder bit, typically
 #     a "schedule maintenance" prompt (descale / cleaning / filter / cappu
 #     rinse) that the user is supposed to action eventually.
-_STATUS_BITS: dict[int, tuple[str, str]] = {
+STATUS_BITS: dict[int, tuple[str, str]] = {
     0: ("insert_tray", "error"),
     1: ("fill_water", "error"),
     2: ("empty_grounds", "error"),
@@ -2384,6 +2386,15 @@ _STATUS_BITS: dict[int, tuple[str, str]] = {
     36: ("energy_safe", "info"),
     37: ("active_rf_filter", "info"),
     38: ("remote_screen", "info"),
+    39: ("locked_keys", "info"),
+    40: ("close_tab", "error"),
+    41: ("cappu_clean_alert", "process"),
+    42: ("info_cappu_clean_alert", "info"),
+    43: ("info_coffee_clean_alert", "info"),
+    44: ("info_descale_alert", "info"),
+    45: ("info_filter_used_up_alert", "info"),
+    46: ("steam_ready", "info"),
+    47: ("switch_off_delay_active", "error"),
 }
 
 
@@ -2398,7 +2409,8 @@ class MachineStatus:
     state transitions and low-supply reminders (e.g. "no beans" when the
     bean container is low — informational, not an error); ``process``
     holds the periodic maintenance prompts (descale / cleaning / filter /
-    cappu rinse) which the machine surfaces *before* they block brewing.
+    cappu rinse / cappu clean — the milk-system clean) which the machine
+    surfaces *before* they block brewing.
 
     ``active_alerts`` is kept as the union of all active named bits for
     backwards compatibility — it's what older callers and the legacy
@@ -2471,7 +2483,7 @@ class MachineStatus:
         if alerts:
             bits = {bit: (a.name, a.severity) for bit, a in alerts.items()}
         else:
-            bits = _STATUS_BITS
+            bits = STATUS_BITS
         for bit_index, (name, severity) in bits.items():
             # MSB-first within each byte, per the J.O.E. APK's
             # `Status.a()`: `(1 << (7 - (i%8))) & bArr[i/8]`.

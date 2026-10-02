@@ -303,7 +303,8 @@ Status output distinguishes blocking **errors** (machine is stuck,
 user must act) from **info** flags (low-supply reminders and
 state-of-being bits such as `no_beans`, `coffee_ready`,
 `energy_safe`) and **process** flags (periodic maintenance prompts
-such as `cleaning_alert` and `descale_alert`). The unsplit
+such as `cleaning_alert`, `descale_alert` and `cappu_clean_alert` —
+the milk-system clean prompt after milk drinks). The unsplit
 ``active_alerts`` is still on the dataclass for backwards
 compatibility.
 
