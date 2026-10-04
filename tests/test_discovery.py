@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import datetime
+import socket
 
 import pytest
 
-from jura_connect.discovery import parse_reply
+from jura_connect.discovery import (
+    _open_unicast_probe_socket,
+    parse_reply,
+)
 
 
 def _build_reply(
@@ -84,3 +88,29 @@ def test_flag_helpers() -> None:
     assert m.standby is True
     assert m.ready is True  # bit 4
     assert m.busy is False  # bit 0 set -> S=False -> not busy
+
+
+@pytest.mark.parametrize("occupy_source_port", [False, True])
+def test_unicast_probe_binds_only_routed_interface(occupy_source_port: bool) -> None:
+    """Unicast receive sockets stay on the routed interface, including fallback."""
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    blocker.bind(("127.0.0.1", 0))
+    preferred_port = blocker.getsockname()[1]
+    if not occupy_source_port:
+        blocker.close()
+
+    probe_socket: socket.socket | None = None
+    try:
+        probe_socket = _open_unicast_probe_socket("127.0.0.1", preferred_port)
+        bind_address, bind_port = probe_socket.getsockname()
+    finally:
+        if probe_socket is not None:
+            probe_socket.close()
+        if occupy_source_port:
+            blocker.close()
+
+    assert bind_address == "127.0.0.1"
+    if occupy_source_port:
+        assert bind_port != preferred_port
+    else:
+        assert bind_port == preferred_port
