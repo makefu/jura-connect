@@ -157,6 +157,14 @@ A static 16-byte UDP datagram, sent to the broadcast address of every
 local /24. The reply (when one comes — only seen on older firmware than
 TT237W) carries the structure below.
 
+The broadcast listener deliberately binds UDP/51515 on all IPv4 interfaces:
+a socket bound to one interface's unicast address does not receive datagrams
+whose destination is the broadcast address. The listener exists only for the
+bounded discovery interval and rejects packets that do not match the Jura
+reply structure. A targeted unicast probe instead binds only the local IPv4
+address selected by the route to that machine, falling back to an ephemeral
+port on the same interface if UDP/51515 is already occupied.
+
 ### 3.2 Reply layout
 
 | Offset | Size | Field |

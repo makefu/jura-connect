@@ -197,6 +197,41 @@ def _broadcast_addresses() -> list[str]:
     return targets
 
 
+def _source_ipv4_address(address: str) -> str:
+    """Return the local IPv4 address the kernel routes toward ``address``.
+
+    Connecting a UDP socket selects a route without sending a packet.  The
+    selected source address lets unicast probes listen only on the relevant
+    interface instead of exposing their receive port on every interface.
+    """
+    route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        route.connect((address, JURA_PORT))
+        source = route.getsockname()[0]
+    finally:
+        route.close()
+    if not isinstance(source, str) or source in {"", "0.0.0.0"}:
+        raise OSError(f"no IPv4 route to {address}")
+    return source
+
+
+def _open_unicast_probe_socket(
+    address: str, preferred_port: int = JURA_PORT
+) -> socket.socket:
+    """Open a UDP socket on the routed interface for a targeted probe."""
+    bind_address = _source_ipv4_address(address)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        try:
+            sock.bind((bind_address, preferred_port))
+        except OSError:
+            sock.bind((bind_address, 0))
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 def discover(
     timeout: float = 3.0,
     *,
@@ -208,8 +243,10 @@ def discover(
     """Broadcast the scan probe and yield each discovered machine once.
 
     The Android app uses a sustained 1 s broadcast loop on port 51515. We
-    bind the same port so machines that reply via broadcast (not unicast)
-    are also caught.
+    bind the same port on all interfaces so machines that reply to a broadcast
+    destination (not the sender's unicast address) are also caught. The socket
+    is open only for this bounded scan and malformed or non-Jura replies are
+    discarded by :func:`parse_reply`.
     """
     if targets is None:
         targets = _broadcast_addresses()
@@ -270,13 +307,9 @@ def probe(address: str, timeout: float = 2.0) -> Machine | None:
     ``None`` even though the machine is reachable. Use :func:`tcp_probe`
     as a fallback to verify reachability over the TCP control port.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = _open_unicast_probe_socket(address)
     sock.settimeout(timeout)
     try:
-        try:
-            sock.bind(("", JURA_PORT))
-        except OSError:
-            sock.bind(("", 0))
         sock.sendto(SCAN_PROBE, (address, JURA_PORT))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
