@@ -207,12 +207,9 @@ def _source_ipv4_address(address: str) -> str:
     route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         route.connect((address, JURA_PORT))
-        source = route.getsockname()[0]
+        return route.getsockname()[0]
     finally:
         route.close()
-    if not isinstance(source, str) or source in {"", "0.0.0.0"}:
-        raise OSError(f"no IPv4 route to {address}")
-    return source
 
 
 def _open_unicast_probe_socket(
