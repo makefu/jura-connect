@@ -29,6 +29,7 @@ escape hatch can't be used as an accidental bypass.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import re
 from collections.abc import Callable, Sequence
 
@@ -91,6 +92,14 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     # because they cannot make the machine do anything physical; this
     # one can.
     b"@TM:3C,",
+    b"@TM:14,",  # weekday timer: unattended switch-on/off
+    b"@TM:15,",  # weekday timer: unattended switch-on/off
+    b"@TM:16,",  # weekday timer: unattended switch-on/off
+    b"@TM:17,",  # weekday timer: unattended switch-on/off
+    b"@TM:18,",  # weekday timer: unattended switch-on/off
+    b"@TM:19,",  # weekday timer: unattended switch-on/off
+    b"@TM:1A,",  # weekday timer: unattended switch-on/off
+    b"@TM:1B,",  # weekday timer: unattended switch-on/off
     # Language download (§5.14). Listed verb by verb on purpose: the
     # reads of the same families — @TT:00 (slot inventory) and @TM:23
     # (max languages) — must stay ungated, and this tuple is matched by
@@ -1002,6 +1011,20 @@ def _format_setting_result(definition, raw_value: str) -> str:
     return f"{definition.name} = 0x{cleaned} (unknown — not in catalogue)"
 
 
+def _r_weekday_timers(_spec, client, _args, timeout):
+    from .timers import TimerUpdate
+
+    return TimerUpdate(client.read_weekday_timers(timeout=timeout), None)
+
+
+def _r_set_weekday_timer(_spec, client, args, timeout):
+    try:
+        on = None if args[1] == "off" else datetime.time.fromisoformat(args[1])
+    except ValueError as err:
+        raise CommandError("weekday timer: expected HH:MM or off") from err
+    return client.set_weekday_timer(args[0], on, timeout=timeout)
+
+
 def _r_setting(_spec, client, args, timeout):
     profile = _require_profile(client)
     if not args:
@@ -1523,6 +1546,27 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="send a verbatim '@…' command; payload checked against the destructive set",
         arguments=(Argument("frame", "command frame, e.g. '@TG:43'"),),
         runner=_r_raw,
+    ),
+    CommandSpec(
+        name="weekday-timers",
+        description="read EF566 weekday and all-days switch-on/off timers",
+        arguments=(),
+        runner=_r_weekday_timers,
+    ),
+    CommandSpec(
+        name="set-weekday-timer",
+        description="[destructive] change one EF566 weekday switch-on time",
+        arguments=(
+            Argument("weekday", "monday through sunday"),
+            Argument("time", "local HH:MM or off"),
+        ),
+        runner=_r_set_weekday_timer,
+        destructive=True,
+        danger=(
+            "changes an unattended switch-on time. Switch-off and other days "
+            "are preserved. Use the machine's timer menu to restore it; read "
+            "back before retrying any uncertain write."
+        ),
     ),
     CommandSpec(
         name="setting",
