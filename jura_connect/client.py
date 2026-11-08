@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 
-from . import firmware, language, profile, protocol
+from . import firmware, language, profile, protocol, timers
 from .language import LanguageDownloadResult, LanguageInventory, LanguagePayload
 from .process import (
     ProcessRun,
@@ -1105,6 +1105,22 @@ class JuraClient:
                 "stored."
             )
         return reply
+
+    def read_weekday_timers(
+        self, *, timeout: float = 1.5
+    ) -> dict[str, "timers.TimerSlot"]:
+        """Read EF566 weekday and all-days switch-on/off settings."""
+        return timers.read_timers(self, timeout=timeout)
+
+    def set_weekday_timer(
+        self, day: str, on: datetime.time | None, *, timeout: float = 3.0
+    ) -> "timers.TimerUpdate":
+        """Set one weekday's switch-on time, or disable it with None.
+
+        Preserves switch-off, other days, clock and date; verifies the
+        whole block after releasing the keypad. Caller owns UI staging.
+        """
+        return timers.set_timer(self, day, on, timeout=timeout)
 
     def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:
         """Read one machine setting via ``@TM:<p_argument>``.
