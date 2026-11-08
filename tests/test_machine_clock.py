@@ -19,6 +19,42 @@ def paired(sim):
     return client
 
 
+def test_prewrite_guard_runs_after_lock_and_before_setting_write(sim_factory):
+    sim = sim_factory(allow_setting_writes=True, require_user_accept=False)
+    client = paired(sim)
+    observations = []
+
+    def before_write():
+        observations.append(sim.config.screen_locked)
+        assert not any(command.startswith(b"@TM:05,") for command in sim.sent_commands)
+
+    try:
+        assert client.set_clock(time(7, 20), before_write=before_write) == "@tm:05"
+        assert observations == [True]
+        assert not sim.config.screen_locked
+    finally:
+        client.close()
+
+
+def test_rejected_prewrite_guard_never_writes_and_still_releases_keys(sim_factory):
+    sim = sim_factory(allow_setting_writes=True, require_user_accept=False)
+    client = paired(sim)
+
+    def before_write():
+        raise ValueError("The caller cancelled the write")
+
+    try:
+        with pytest.raises(ValueError, match="caller cancelled"):
+            client.set_clock(time(7, 20), before_write=before_write)
+        assert not any(command.startswith(b"@TM:05,") for command in sim.sent_commands)
+        assert any(
+            command.decode().strip() == "@TS:00" for command in sim.sent_commands
+        )
+        assert not sim.config.screen_locked
+    finally:
+        client.close()
+
+
 def test_clock_roundtrip_preserves_date_and_all_timers(sim_factory):
     sim = sim_factory(allow_setting_writes=True, require_user_accept=False)
     sim.config.settings.update(RAW)

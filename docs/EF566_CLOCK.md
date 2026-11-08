@@ -42,3 +42,8 @@ release at 0/3/6/10 seconds and confirmed continued running after a minute.
 Earlier immediate-read tests saw stale values and did not establish failure
 of the write itself. Host time conversion and automatic DST policy belong to
 the caller; the wire takes minute-precision local wall time.
+
+`set_clock(..., before_write=guard)` optionally runs a caller-provided check
+after keypad locking and immediately before the single write. Raising from
+the guard prevents that write and still runs the keypad-release transaction.
+The callback should be quick and must not start another machine operation.

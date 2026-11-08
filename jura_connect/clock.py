@@ -8,6 +8,7 @@ machine has applied the setting: callers must verify after unlocking.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, time
 from typing import TYPE_CHECKING
 
@@ -71,12 +72,19 @@ def read_timers(client: JuraClient, *, timeout: float) -> tuple[TimerTimes, ...]
     )
 
 
-def set_clock(client: JuraClient, value: time, *, timeout: float) -> str:
+def set_clock(
+    client: JuraClient,
+    value: time,
+    *,
+    timeout: float,
+    before_write: Callable[[], None] | None = None,
+) -> str:
     """Send one minute-precision clock write, requiring a confirmed unlock.
 
     Caller must ensure a ready machine, a matching date and a safe distance
     from midnight and timer events. Never retry this call after an uncertain
     reply: read the clock first. The machine's own clock menu still works.
+    A caller guard may reject the write after locking; unlocking still runs.
     """
     from .client import _settings_checksum
 
@@ -95,6 +103,8 @@ def set_clock(client: JuraClient, value: time, *, timeout: float) -> str:
             != "@ts"
         ):
             raise ValueError("Machine rejected the keypad lock")
+        if before_write is not None:
+            before_write()
         reply = client.request(
             f"@TM:{body}{_settings_checksum(body)}",
             match=r"(?i)^@(tm|an):",

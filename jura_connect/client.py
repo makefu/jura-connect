@@ -1126,15 +1126,22 @@ class JuraClient:
 
         return clock.read_timers(self, timeout=timeout)
 
-    def set_clock(self, value: datetime.time, *, timeout: float = 3.0) -> str:
+    def set_clock(
+        self,
+        value: datetime.time,
+        *,
+        timeout: float = 3.0,
+        before_write: Callable[[], None] | None = None,
+    ) -> str:
         """Write local HH:MM on EF566 and confirm keypad release.
 
         No timezone conversion or NTP. Caller must validate the date and
         schedule and verify application/continued running after this ACK.
+        The optional guard runs after locking, immediately before writing.
         """
         from . import clock
 
-        return clock.set_clock(self, value, timeout=timeout)
+        return clock.set_clock(self, value, timeout=timeout, before_write=before_write)
 
     def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:
         """Read one machine setting via ``@TM:<p_argument>``.
