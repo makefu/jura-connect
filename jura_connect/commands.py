@@ -29,6 +29,7 @@ escape hatch can't be used as an accidental bypass.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import re
 from collections.abc import Callable, Sequence
 
@@ -91,6 +92,7 @@ DESTRUCTIVE_PREFIXES: tuple[bytes, ...] = (
     # because they cannot make the machine do anything physical; this
     # one can.
     b"@TM:3C,",
+    b"@TM:05,",  # machine clock: may cross an unattended timer event
     # Language download (§5.14). Listed verb by verb on purpose: the
     # reads of the same families — @TT:00 (slot inventory) and @TM:23
     # (max languages) — must stay ungated, and this tuple is matched by
@@ -1002,6 +1004,18 @@ def _format_setting_result(definition, raw_value: str) -> str:
     return f"{definition.name} = 0x{cleaned} (unknown — not in catalogue)"
 
 
+def _r_machine_clock(_spec, client, _args, timeout):
+    return client.read_clock(timeout=timeout).isoformat(timespec="minutes")
+
+
+def _r_set_machine_clock(_spec, client, args, timeout):
+    try:
+        value = datetime.time.fromisoformat(args[0])
+    except ValueError as err:
+        raise CommandError("machine clock: expected local HH:MM") from err
+    return client.set_clock(value, timeout=timeout)
+
+
 def _r_setting(_spec, client, args, timeout):
     profile = _require_profile(client)
     if not args:
@@ -1523,6 +1537,25 @@ _SPECS: tuple[CommandSpec, ...] = (
         description="send a verbatim '@…' command; payload checked against the destructive set",
         arguments=(Argument("frame", "command frame, e.g. '@TG:43'"),),
         runner=_r_raw,
+    ),
+    CommandSpec(
+        name="machine-clock",
+        description="read the local EF566 machine clock (not a coffee timer)",
+        arguments=(),
+        runner=_r_machine_clock,
+    ),
+    CommandSpec(
+        name="set-machine-clock",
+        description="[destructive] set the EF566 machine clock to local HH:MM",
+        arguments=(Argument("time", "local HH:MM, without seconds or timezone"),),
+        runner=_r_set_machine_clock,
+        destructive=True,
+        danger=(
+            "changes the machine clock and can cross scheduled on/off events. "
+            "Check the machine date and timer schedule first; the machine's "
+            "clock menu can correct it. After an uncertain reply, read back "
+            "instead of retrying the write."
+        ),
     ),
     CommandSpec(
         name="setting",

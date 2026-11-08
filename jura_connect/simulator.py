@@ -562,6 +562,15 @@ class SimulatorConfig:
         }
     )
 
+    # Optional setting transaction faults; normal behaviour is unchanged.
+    allow_setting_writes: bool = False
+    setting_write_reply: str | None = None
+    setting_apply_after_reads: int = 0
+    setting_collateral: dict[str, str] = dataclasses.field(default_factory=dict)
+    setting_corrupt_checksum: bool = False
+    keypad_lock_reply: str = "@ts"
+    keypad_unlock_reply: str = "@ts"
+
     # Batch settings read (@TM:00,FC). The CommandArgument the simulated
     # machine's XML declares — the values are answered in this order.
     # None models a machine with no batch read at all, which replies
@@ -682,6 +691,7 @@ class Simulator:
         self._queued: list[str] = []
         # Unsolicited frames pushed *before* the next reply, drained once.
         self._pending_pushes: list[str] = list(self.config.pushes_before_reply)
+        self._pending_settings: dict[str, tuple[str, int]] = {}
         self._pmode_reads = 0  # for SimulatorConfig.pmode_reset_after_slot
         # Running maintenance process: the start command, how far into
         # its state sequence we are, and the confirmation the current
@@ -981,7 +991,13 @@ class Simulator:
         # One matcher for the whole guardrail: prefix patterns plus the
         # exact-match ones (@HU, which must not swallow the @HU? read).
         pattern = match_destructive(cmd)
-        if pattern is not None:
+        setting_write = any(
+            cmd.startswith(f"@TM:{slot},")
+            for slot in ("05", *(f"{n:02X}" for n in range(0x14, 0x1C)))
+        )
+        if pattern is not None and not (
+            self.config.allow_setting_writes and setting_write
+        ):
             if pattern in _FIRMWARE_PATTERNS and self.config.firmware_enabled:
                 return self._handle_firmware(cmd)
             log.warning("simulator: refusing destructive command %r", cmd)
@@ -1008,9 +1024,11 @@ class Simulator:
         if cmd == "@TG:C0":
             return "@tg:C0" + self.config.maint_percent.hex().upper()
         if cmd == "@TS:01":
-            self.config.screen_locked = True
-            return "@ts"
+            self.config.screen_locked = self.config.keypad_lock_reply == "@ts"
+            return self.config.keypad_lock_reply
         if cmd == "@TS:00":
+            if self.config.keypad_unlock_reply != "@ts":
+                return self.config.keypad_unlock_reply
             self.config.screen_locked = False
             # Same verb releases a language-download lock (@TS:F1).
             self.language.locked = False
@@ -1052,14 +1070,32 @@ class Simulator:
                         expected,
                     )
                     return "@an:error"
-                self.config.settings[arg] = value_hex
+                if self.config.setting_write_reply is not None:
+                    return self.config.setting_write_reply
+                if self.config.setting_apply_after_reads:
+                    self._pending_settings[arg] = (
+                        value_hex,
+                        self.config.setting_apply_after_reads,
+                    )
+                else:
+                    self.config.settings[arg] = value_hex
+                self.config.settings.update(self.config.setting_collateral)
                 return f"@tm:{arg.lower()}"
             arg = arg_full.upper()
+            if arg in self._pending_settings:
+                pending, remaining = self._pending_settings[arg]
+                if remaining <= 0:
+                    self.config.settings[arg] = pending
+                    del self._pending_settings[arg]
+                else:
+                    self._pending_settings[arg] = (pending, remaining - 1)
             stored = self.config.settings.get(arg)
             if stored is not None:
                 # Real dongle appends the same ByteOperations.d checksum
                 # used on the write side; the client verifies it.
                 csum = _settings_checksum(f"{arg},{stored}")
+                if self.config.setting_corrupt_checksum:
+                    csum = f"{int(csum, 16) ^ 1:02X}"
                 return f"@tm:{arg.lower()},{stored}{csum}"
             # Unknown address — echo the high nibble like the real dongle.
             return f"@tm:{arg_full[:2].lower()}"
