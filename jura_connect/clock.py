@@ -12,22 +12,28 @@ from collections.abc import Callable
 from datetime import date, time
 from typing import TYPE_CHECKING
 
+from . import timers
+from .settings import locked_setting_write
+
 if TYPE_CHECKING:
     from .client import JuraClient
 
-TIMER_ADDRESSES = tuple(f"{n:02X}" for n in range(0x14, 0x1C))
+SUPPORTED_CLOCK_PROFILES = timers.SUPPORTED_TIMER_PROFILES
+TIMER_ADDRESSES = timers.TIMER_SLOTS
 TimerTimes = tuple[time | None, time | None]
 
 
 def require_supported(client: JuraClient) -> None:
-    if client.profile is None or client.profile.code != "EF566":
-        raise ValueError("Machine clock support is only verified for EF566")
+    timers.require_supported(client)
 
 
 def _tagged(raw: str, tag: int, length: int) -> bytes:
     if len(raw) != 2 * (length + 1):
         raise ValueError("Unexpected machine clock/date/timer payload length")
-    data = bytes.fromhex(raw)
+    try:
+        data = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid machine clock/date payload: {raw!r}") from exc
     if len(data) != length + 1 or data[0] != tag:
         raise ValueError("Unexpected machine clock/date/timer payload tag")
     return data[1:]
@@ -35,6 +41,8 @@ def _tagged(raw: str, tag: int, length: int) -> bytes:
 
 def parse_clock(raw: str) -> time:
     hour, minute = _tagged(raw, 0x22, 2)
+    if hour >= 24 or minute >= 60:
+        raise ValueError(f"Invalid JURA clock slot 05 payload: {raw!r}")
     return time(hour, minute)
 
 
@@ -42,16 +50,15 @@ def parse_date(raw: str) -> date:
     year, month, day = _tagged(raw, 0x23, 3)
     if year > 99:
         raise ValueError("Unexpected machine clock year")
-    return date(2000 + year, month, day)
+    try:
+        return date(2000 + year, month, day)
+    except ValueError as exc:
+        raise ValueError(f"Invalid JURA date slot 06 payload: {raw!r}") from exc
 
 
 def parse_timer(raw: str) -> TimerTimes:
-    data = _tagged(raw, 0x24, 4)
-
-    def pair(hour: int, minute: int) -> time | None:
-        return None if (hour, minute) == (0x80, 0) else time(hour, minute)
-
-    return pair(data[0], data[1]), pair(data[2], data[3])
+    slot = timers.TimerSlot.parse(raw)
+    return slot.on, slot.off
 
 
 def read_clock(client: JuraClient, *, timeout: float) -> time:
@@ -66,10 +73,8 @@ def read_date(client: JuraClient, *, timeout: float) -> date:
 
 def read_timers(client: JuraClient, *, timeout: float) -> tuple[TimerTimes, ...]:
     """Read on/off pairs for the seven weekdays and the all-days slot."""
-    require_supported(client)
-    return tuple(
-        parse_timer(client.read_setting(n, timeout=timeout)) for n in TIMER_ADDRESSES
-    )
+    slots = timers.read_timers(client, timeout=timeout)
+    return tuple((slots[n].on, slots[n].off) for n in TIMER_ADDRESSES)
 
 
 def set_clock(
@@ -86,43 +91,9 @@ def set_clock(
     reply: read the clock first. The machine's own clock menu still works.
     A caller guard may reject the write after locking; unlocking still runs.
     """
-    from .client import _settings_checksum
-
     require_supported(client)
-    if (
-        not isinstance(value, time)
-        or value.second
-        or value.microsecond
-        or value.tzinfo is not None
-    ):
-        raise ValueError("Machine clock requires local hours and minutes only")
+    timers.timer_minute(value)
     body = f"05,22{value.hour:02X}{value.minute:02X}"
-    try:
-        if (
-            client.request("@TS:01", match=r"^@(ts|an)(?::|$)", timeout=timeout)
-            != "@ts"
-        ):
-            raise ValueError("Machine rejected the keypad lock")
-        if before_write is not None:
-            before_write()
-        reply = client.request(
-            f"@TM:{body}{_settings_checksum(body)}",
-            match=r"(?i)^@(tm|an):",
-            timeout=timeout,
-        )
-        if reply.lower() != "@tm:05":
-            raise ValueError("Machine did not acknowledge the clock write")
-        return reply
-    finally:
-        try:
-            unlocked = client.request(
-                "@TS:00", match=r"^@(ts|an)(?::|$)", timeout=timeout
-            )
-        except OSError as err:
-            raise ValueError(
-                "Machine clock result unknown: keypad unlock not confirmed"
-            ) from err
-        if unlocked != "@ts":
-            raise ValueError(
-                "Machine clock result unknown: keypad unlock not confirmed"
-            )
+    return locked_setting_write(
+        client, body, timeout=timeout, before_write=before_write
+    )

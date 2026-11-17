@@ -1,6 +1,6 @@
 """EF566 clock protocol against the real TCP simulator; no machine writes."""
 
-from datetime import date, time, timezone
+from datetime import date, datetime, time, timezone
 
 import pytest
 
@@ -79,17 +79,25 @@ def test_clock_roundtrip_preserves_date_and_all_timers(sim_factory):
 
 @pytest.mark.parametrize(
     "value",
-    [time(7, 20, 1), time(7, 20, 0, 1), time(7, 20, tzinfo=timezone.utc), "07:20"],
+    [
+        time(7, 20, 1),
+        time(7, 20, 0, 1),
+        time(7, 20, tzinfo=timezone.utc),
+        "07:20",
+        datetime(2026, 11, 17, 7, 20),
+    ],
 )
 def test_invalid_time_never_connects(value):
-    client = JuraClient("127.0.0.1", profile=load_profile("EF566"))
+    client = JuraClient("127.0.0.1", port=1, profile=load_profile("EF566"))
     with pytest.raises(ValueError, match="hours and minutes"):
         client.set_clock(value)
 
 
 @pytest.mark.parametrize("model", [None, "EF1091", "EF566V2"])
 def test_other_profiles_never_connect(model):
-    client = JuraClient("127.0.0.1", profile=load_profile(model) if model else None)
+    client = JuraClient(
+        "127.0.0.1", port=1, profile=load_profile(model) if model else None
+    )
     for op in (
         client.read_clock,
         client.read_clock_date,
@@ -186,6 +194,152 @@ def test_named_and_raw_writes_require_the_gate(sim_factory):
                 client, "set-machine-clock", ["07:20"], allow_destructive=True
             ).value
             == "@tm:05"
+        )
+    finally:
+        client.close()
+
+
+def test_unsupported_profile_cannot_lock_or_write_to_armed_simulator(sim_factory):
+    sim = sim_factory(allow_setting_writes=True, require_user_accept=False)
+    client = JuraClient(*sim.address, profile=load_profile("EF1091"))
+    try:
+        with pytest.raises(ValueError, match="only verified"):
+            client.set_clock(time(7, 20))
+        assert not sim.sent_commands
+        assert not sim.handshakes
+    finally:
+        client.close()
+
+
+def test_timer_guard_order_uses_eight_distinct_slots(sim_factory):
+    # Literal wire addresses pin Monday..Sunday and all-days independently
+    # of the implementation's TIMER_ADDRESSES constant.
+    raw = {
+        "14": "2401008000",
+        "15": "2402008000",
+        "16": "2403008000",
+        "17": "2404008000",
+        "18": "2405008000",
+        "19": "2406008000",
+        "1A": "2407008000",
+        "1B": "2408008000",
+    }
+    sim = sim_factory(require_user_accept=False)
+    sim.config.settings.update(raw)
+    client = paired(sim)
+    try:
+        assert client.read_clock_timers() == tuple(
+            (time(hour), None) for hour in range(1, 9)
+        )
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("unlock_reply", [None, "@an:error"])
+def test_guard_exception_is_preserved_when_unlock_also_fails(sim_factory, unlock_reply):
+    sim = sim_factory(
+        allow_setting_writes=True,
+        require_user_accept=False,
+        keypad_unlock_reply=unlock_reply,
+    )
+    client = paired(sim)
+    cancelled = RuntimeError("caller cancelled before writing")
+
+    def guard():
+        raise cancelled
+
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            client.set_clock(time(7, 20), timeout=0.1, before_write=guard)
+        assert exc.value is cancelled
+        assert any(
+            "unlock also failed" in note and "No setting write sent" in note
+            for note in exc.value.__notes__
+        )
+        assert not any(c.startswith(b"@TM:05,") for c in sim.sent_commands)
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("unlock_reply", [None, "@an:error", "@ts"])
+def test_write_timeout_survives_unlock_failures(sim_factory, unlock_reply):
+    sim = sim_factory(
+        allow_setting_writes=True,
+        require_user_accept=False,
+        setting_write_timeout=True,
+        keypad_unlock_reply=unlock_reply,
+    )
+    client = paired(sim)
+    try:
+        with pytest.raises(TimeoutError) as exc:
+            client.set_clock(time(7, 20), timeout=0.1)
+        assert any("read back before retrying" in note for note in exc.value.__notes__)
+        assert len([c for c in sim.sent_commands if c.startswith(b"@TM:05,")]) == 1
+        assert sim.config.settings["05"] == "220714"
+        if unlock_reply != "@ts":
+            assert any("unlock also failed" in note for note in exc.value.__notes__)
+        assert not sim.config.screen_locked
+    finally:
+        client.close()
+
+
+def test_unlock_timeout_remains_timeout(sim_factory):
+    sim = sim_factory(
+        allow_setting_writes=True, require_user_accept=False, keypad_unlock_reply=None
+    )
+    client = paired(sim)
+    try:
+        with pytest.raises(TimeoutError) as exc:
+            client.set_clock(time(7, 20), timeout=0.1)
+        assert any("unlock not confirmed" in note for note in exc.value.__notes__)
+        assert sim.config.settings["05"] == "220714"
+    finally:
+        client.close()
+
+
+def test_explicit_rejection_survives_unlock_failure(sim_factory):
+    from jura_connect.settings import SettingRejectedError
+
+    sim = sim_factory(
+        allow_setting_writes=True,
+        require_user_accept=False,
+        setting_write_reply="@an:error",
+        keypad_unlock_reply=None,
+    )
+    client = paired(sim)
+    try:
+        with pytest.raises(SettingRejectedError) as exc:
+            client.set_clock(time(7, 20), timeout=0.1)
+        assert any("explicitly rejected" in note for note in exc.value.__notes__)
+        assert "05" not in sim.config.settings
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("slot", ["05", "14", "15", "16", "17", "18", "19", "1A", "1B"])
+def test_every_setting_write_gated_case_insensitively_and_reads_ungated(
+    slot, sim_factory
+):
+    from jura_connect.commands import DESTRUCTIVE_PREFIXES, match_destructive
+
+    prefix = f"@TM:{slot},"
+    assert prefix.encode() in DESTRUCTIVE_PREFIXES
+    assert match_destructive(f"@TM:{slot}") is None
+    assert match_destructive(f"@tm:{slot.lower()}") is None
+    sim = sim_factory(require_user_accept=False)
+    client = paired(sim)
+    try:
+        frame = (prefix + "2207143E").lower()
+        with pytest.raises(DestructiveCommandError):
+            run_named(client, "raw", [frame])
+        assert not any(
+            c.lower().startswith(prefix.lower().encode()) for c in sim.sent_commands
+        )
+        # Explicit client opt-in still reaches the refusing simulator guard.
+        result = run_named(client, "raw", [frame], allow_destructive=True)
+        assert result.value == "@an:error"
+        assert any(
+            c.lower().startswith(prefix.lower().encode()) for c in sim.sent_commands
         )
     finally:
         client.close()

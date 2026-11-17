@@ -47,3 +47,19 @@ the caller; the wire takes minute-precision local wall time.
 after keypad locking and immediately before the single write. Raising from
 the guard prevents that write and still runs the keypad-release transaction.
 The callback should be quick and must not start another machine operation.
+
+## Failure contract and supported variants
+
+`SUPPORTED_CLOCK_PROFILES` shares the timer profile allowlist. Only EF566 is
+verified; variants such as EF566V2 are rejected pending hardware evidence.
+`SettingRejectedError` means an explicit lock/write rejection;
+`SettingUncertainError` means an unexpected acknowledgement or failed release.
+Transport timeouts remain `TimeoutError`. A failed guard or primary operation
+retains its original exception when releasing the keypad also fails; that
+secondary failure is attached with `Exception.add_note()`. Named-command runners
+wrap library validation/protocol errors in `CommandError`, preserving timeouts.
+Read back before retrying any write whose application is uncertain. Timer raw
+writes, including lowercase frames, use the same destructive gate; bare reads
+stay ungated. The shared `timers.TimerSlot` codec owns the timer layout.
+The simulator clears keypad and language lock state when it processes release,
+even when the configured release response is rejected or silently lost.

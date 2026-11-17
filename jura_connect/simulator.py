@@ -82,6 +82,7 @@ from .client import (
     OVERFLOW_COUNTER_BANK,
     _settings_checksum,
 )
+from . import timers
 from .commands import DESTRUCTIVE_EXACT, DESTRUCTIVE_PREFIXES, match_destructive
 from .process import ACCEPT_COMMANDS as _PROCESS_ACCEPT_COMMANDS
 from .process import NEXT_STEP_COMMAND as _NEXT_STEP_COMMAND
@@ -566,10 +567,10 @@ class SimulatorConfig:
     allow_setting_writes: bool = False
     setting_write_reply: str | None = None
     setting_apply_after_reads: int = 0
-    setting_collateral: dict[str, str] = dataclasses.field(default_factory=dict)
     setting_corrupt_checksum: bool = False
     keypad_lock_reply: str = "@ts"
-    keypad_unlock_reply: str = "@ts"
+    keypad_unlock_reply: str | None = "@ts"
+    setting_write_timeout: bool = False
 
     # Batch settings read (@TM:00,FC). The CommandArgument the simulated
     # machine's XML declares — the values are answered in this order.
@@ -992,8 +993,8 @@ class Simulator:
         # exact-match ones (@HU, which must not swallow the @HU? read).
         pattern = match_destructive(cmd)
         setting_write = any(
-            cmd.startswith(f"@TM:{slot},")
-            for slot in ("05", *(f"{n:02X}" for n in range(0x14, 0x1C)))
+            cmd.upper().startswith(f"@TM:{slot},")
+            for slot in ("05", *timers.TIMER_SLOTS)
         )
         if pattern is not None and not (
             self.config.allow_setting_writes and setting_write
@@ -1027,12 +1028,11 @@ class Simulator:
             self.config.screen_locked = self.config.keypad_lock_reply == "@ts"
             return self.config.keypad_lock_reply
         if cmd == "@TS:00":
-            if self.config.keypad_unlock_reply != "@ts":
-                return self.config.keypad_unlock_reply
             self.config.screen_locked = False
             # Same verb releases a language-download lock (@TS:F1).
             self.language.locked = False
-            return "@ts"
+            # Even a lost ACK models a processed release, including language locks.
+            return self.config.keypad_unlock_reply
         if cmd == "@TM:50":
             # Per-kind slot counts. Append a fake checksum byte so the
             # client's parser sees a well-formed reply (the checksum
@@ -1079,7 +1079,8 @@ class Simulator:
                     )
                 else:
                     self.config.settings[arg] = value_hex
-                self.config.settings.update(self.config.setting_collateral)
+                if self.config.setting_write_timeout:
+                    return None
                 return f"@tm:{arg.lower()}"
             arg = arg_full.upper()
             if arg in self._pending_settings:

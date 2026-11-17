@@ -607,20 +607,29 @@ def test_destructive_command_reaches_wire_with_flag(sim, name, args) -> None:
     refuses with @an:error — that's the proof it reached the wire."""
     c = _paired(sim)
     try:
-        if name == "set-machine-clock":
+        setting_frames = {"set-machine-clock": b"@TM:05,"}
+        expected = setting_frames.get(name)
+        if expected is not None:
             c.profile = load_profile("EF566")
-            with pytest.raises(ValueError, match="acknowledge"):
-                run_named(c, name, args, timeout=2.0, allow_destructive=True)
-            assert not sim.config.screen_locked
-            return
-        result = run_named(c, name, args, timeout=2.0, allow_destructive=True)
+        try:
+            result = run_named(c, name, args, timeout=2.0, allow_destructive=True)
+            rendered = result.format()
+        except CommandError as exc:
+            rendered = str(exc)
+        assert any(
+            commands.match_destructive(frame.strip())
+            or frame.startswith((b"@TM:41,", b"@TM:42,"))
+            for frame in sim.sent_commands
+        )
+        if expected is not None:
+            assert any(frame.startswith(expected) for frame in sim.sent_commands)
+        assert not sim.config.screen_locked
     finally:
         c.close()
     # Either we get @an:error (simulator's wire-level refusal) or, for
     # restart/power-off, the connection-closed sentinel. Commands whose
     # runner returns a structured result (coffee-timer) render the same
     # reply through format().
-    rendered = result.format()
     assert "@an:error" in rendered or "connection closed" in rendered, (
         f"unexpected reply for {name!r}: {rendered!r}"
     )

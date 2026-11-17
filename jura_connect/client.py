@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 
-from . import firmware, language, profile, protocol
+from . import clock, firmware, language, profile, protocol
 from .language import LanguageDownloadResult, LanguageInventory, LanguagePayload
 from .process import (
     ProcessRun,
@@ -1108,22 +1108,16 @@ class JuraClient:
 
     def read_clock(self, *, timeout: float = 1.5) -> datetime.time:
         """Read the EF566 machine clock; distinct from the coffee timer."""
-        from . import clock
-
         return clock.read_clock(self, timeout=timeout)
 
     def read_clock_date(self, *, timeout: float = 1.5) -> datetime.date:
         """Read the EF566 date. Writing the date is not supported."""
-        from . import clock
-
         return clock.read_date(self, timeout=timeout)
 
     def read_clock_timers(
         self, *, timeout: float = 1.5
     ) -> tuple[tuple[datetime.time | None, datetime.time | None], ...]:
         """Read weekday/all-days on/off times for a clock-change guard."""
-        from . import clock
-
         return clock.read_timers(self, timeout=timeout)
 
     def set_clock(
@@ -1139,8 +1133,6 @@ class JuraClient:
         schedule and verify application/continued running after this ACK.
         The optional guard runs after locking, immediately before writing.
         """
-        from . import clock
-
         return clock.set_clock(self, value, timeout=timeout, before_write=before_write)
 
     def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:

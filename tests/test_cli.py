@@ -30,6 +30,82 @@ def test_command_without_name_errors(capsys) -> None:
     assert "command name required" in err
 
 
+@pytest.mark.parametrize(
+    "model,command,args",
+    [
+        ("EF1091", "machine-clock", []),
+        ("EF1091", "set-machine-clock", ["07:20"]),
+        ("EF566", "set-machine-clock", ["07:20:30"]),
+        ("EF566", "set-machine-clock", ["07:20.5"]),
+        ("EF566", "set-machine-clock", ["07:20:00"]),
+        ("EF566", "set-machine-clock", ["24:00"]),
+    ],
+)
+def test_clock_errors_are_cli_errors_without_tracebacks(
+    sim, tmp_path, capsys, model, command, args
+):
+    host, port, store_path, auth_hash = _setup_paired_simulator(sim, tmp_path)
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            auth_hash,
+            "--conn-id",
+            "cli-tests",
+            "--machine-type",
+            model,
+            "--allow-destructive-commands",
+            command,
+            *args,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert not any(c.startswith((b"@TS:", b"@TM:")) for c in sim.sent_commands)
+
+
+def test_clock_unlock_timeout_reaches_cli_timeout_handler(
+    sim_factory, tmp_path, capsys
+):
+    sim = sim_factory(allow_setting_writes=True, keypad_unlock_reply=None)
+    host, port, store_path, auth_hash = _setup_paired_simulator(sim, tmp_path)
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--auth-hash",
+            auth_hash,
+            "--conn-id",
+            "cli-tests",
+            "--machine-type",
+            "EF566",
+            "--cmd-timeout",
+            "0.1",
+            "--allow-destructive-commands",
+            "set-machine-clock",
+            "07:20",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "timeout:" in captured.err
+    assert "Traceback" not in captured.err
+    assert len([c for c in sim.sent_commands if c.startswith(b"@TM:05,")]) == 1
+
+
 def test_command_runs_info_through_simulator(sim, tmp_path, capsys) -> None:
     host, port = sim.address
     store_path = tmp_path / "creds.json"
