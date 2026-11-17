@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from .timers import require_supported
+from .timers import _remaining, require_supported
 
 if TYPE_CHECKING:
     from .client import JuraClient
@@ -25,6 +25,7 @@ def locked_setting_write(
     *,
     timeout: float,
     before_write: Callable[[], None] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """Lock, send at most one write, and always attempt keypad release.
 
@@ -39,7 +40,9 @@ def locked_setting_write(
     try:
         if (
             client.request(
-                "@TS:01", match=r"(?i)^@(ts|an)(?::|$)", timeout=timeout
+                "@TS:01",
+                match=r"(?i)^@(ts|an)(?::|$)",
+                timeout=_remaining(timeout, deadline),
             ).lower()
             != "@ts"
         ):
@@ -48,11 +51,12 @@ def locked_setting_write(
             )
         if before_write is not None:
             before_write()
+        write_timeout = _remaining(timeout, deadline)
         state = "Setting write may have been applied; read back before retrying"
         reply = client.request(
             f"@TM:{body}{_settings_checksum(body)}",
             match=r"(?i)^@(tm|an):",
-            timeout=timeout,
+            timeout=write_timeout,
         )
         if reply.lower() == "@an:error":
             state = "Machine explicitly rejected the setting write"

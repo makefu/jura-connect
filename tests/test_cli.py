@@ -102,6 +102,8 @@ def test_clock_unlock_timeout_reaches_cli_timeout_handler(
     captured = capsys.readouterr()
     assert rc == 2
     assert "timeout:" in captured.err
+    assert "Keypad unlock not confirmed" in captured.err
+    assert "read back before retrying" in captured.err
     assert "Traceback" not in captured.err
     assert len([c for c in sim.sent_commands if c.startswith(b"@TM:05,")]) == 1
 
@@ -811,3 +813,78 @@ def test_creds_json_redacts_pin(capsys, tmp_path) -> None:
     assert payload[0]["pin_stored"] is True
     assert "pin" not in payload[0]
     assert "4711" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "profile,command,arguments,expected",
+    [
+        ("EF1091", "weekday-timers", [], "only verified"),
+        ("EF1091", "set-weekday-timer", ["monday", "07:20"], "only verified"),
+        ("EF566", "set-weekday-timer", ["Monday", "07:20"], "weekday name"),
+        ("EF566", "set-weekday-timer", ["monday", "07:20:30"], "HH:MM"),
+        ("EF566", "set-weekday-timer", ["monday", "07:20.5"], "HH:MM"),
+    ],
+)
+def test_timer_cli_returns_readable_errors(
+    sim_factory, tmp_path, capsys, profile, command, arguments, expected
+):
+    sim = sim_factory(require_user_accept=False)
+    host, port, store_path, auth = _setup_paired_simulator(sim, tmp_path)
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--conn-id",
+            "cli-tests",
+            "--auth-hash",
+            auth,
+            "--machine-type",
+            profile,
+            "--allow-destructive-commands",
+            command,
+            *arguments,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2 and "error:" in captured.err and expected in captured.err
+    assert "Traceback" not in captured.err
+    assert not any(c.startswith(b"@TS:") for c in sim.sent_commands)
+
+
+def test_timer_cli_accepts_uppercase_off_and_prints_all_days(
+    sim_factory, tmp_path, capsys
+):
+    from jura_connect.timers import TIMER_SLOTS
+
+    sim = sim_factory(require_user_accept=False)
+    sim.config.settings.update(dict.fromkeys(TIMER_SLOTS, "2480008000"))
+    host, port, store_path, auth = _setup_paired_simulator(sim, tmp_path)
+    rc = main(
+        [
+            "--store",
+            str(store_path),
+            "command",
+            "--name",
+            "Sim",
+            "--address",
+            f"{host}:{port}",
+            "--conn-id",
+            "cli-tests",
+            "--auth-hash",
+            auth,
+            "--machine-type",
+            "EF566",
+            "--allow-destructive-commands",
+            "set-weekday-timer",
+            "monday",
+            "OFF",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0 and "all_days:" in captured.out and "previous_on:" in captured.out
+    assert not any(c.startswith(b"@TS:") for c in sim.sent_commands)

@@ -571,6 +571,7 @@ class SimulatorConfig:
     keypad_lock_reply: str = "@ts"
     keypad_unlock_reply: str | None = "@ts"
     setting_write_timeout: bool = False
+    setting_collateral: dict[str, str] = dataclasses.field(default_factory=dict)
 
     # Batch settings read (@TM:00,FC). The CommandArgument the simulated
     # machine's XML declares — the values are answered in this order.
@@ -692,7 +693,7 @@ class Simulator:
         self._queued: list[str] = []
         # Unsolicited frames pushed *before* the next reply, drained once.
         self._pending_pushes: list[str] = list(self.config.pushes_before_reply)
-        self._pending_settings: dict[str, tuple[str, int]] = {}
+        self._pending_settings: dict[str, tuple[dict[str, str], int]] = {}
         self._pmode_reads = 0  # for SimulatorConfig.pmode_reset_after_slot
         # Running maintenance process: the start command, how far into
         # its state sequence we are, and the confirmation the current
@@ -1072,13 +1073,14 @@ class Simulator:
                     return "@an:error"
                 if self.config.setting_write_reply is not None:
                     return self.config.setting_write_reply
+                updates = {arg: value_hex, **self.config.setting_collateral}
                 if self.config.setting_apply_after_reads:
                     self._pending_settings[arg] = (
-                        value_hex,
+                        updates,
                         self.config.setting_apply_after_reads,
                     )
                 else:
-                    self.config.settings[arg] = value_hex
+                    self.config.settings.update(updates)
                 if self.config.setting_write_timeout:
                     return None
                 return f"@tm:{arg.lower()}"
@@ -1086,7 +1088,7 @@ class Simulator:
             if arg in self._pending_settings:
                 pending, remaining = self._pending_settings[arg]
                 if remaining <= 0:
-                    self.config.settings[arg] = pending
+                    self.config.settings.update(pending)
                     del self._pending_settings[arg]
                 else:
                     self._pending_settings[arg] = (pending, remaining - 1)

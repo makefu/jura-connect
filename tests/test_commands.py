@@ -538,6 +538,7 @@ def test_string_result_to_dict_passthrough(sim) -> None:
 # (name, args) pairs covering every destructive command in the registry.
 _DESTRUCTIVE_INVOCATIONS = [
     ("set-machine-clock", ["07:20"]),
+    ("set-weekday-timer", ["monday", "07:20"]),
     ("clean", []),
     ("descale", []),
     ("filter-change", []),
@@ -607,10 +608,16 @@ def test_destructive_command_reaches_wire_with_flag(sim, name, args) -> None:
     refuses with @an:error — that's the proof it reached the wire."""
     c = _paired(sim)
     try:
-        setting_frames = {"set-machine-clock": b"@TM:05,"}
+        setting_frames = {
+            "set-machine-clock": b"@TM:05,",
+            "set-weekday-timer": b"@TM:14,",
+        }
         expected = setting_frames.get(name)
         if expected is not None:
             c.profile = load_profile("EF566")
+            from jura_connect.timers import TIMER_SLOTS
+
+            sim.config.settings.update(dict.fromkeys(TIMER_SLOTS, "2480008000"))
         try:
             result = run_named(c, name, args, timeout=2.0, allow_destructive=True)
             rendered = result.format()

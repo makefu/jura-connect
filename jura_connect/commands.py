@@ -1031,6 +1031,21 @@ def _r_set_machine_clock(_spec, client, args, timeout):
         raise CommandError(str(exc)) from exc
 
 
+def _r_weekday_timers(_spec, client, _args, timeout):
+    try:
+        return timers.TimerRead(client.read_weekday_timers(timeout=timeout))
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
+def _r_set_weekday_timer(_spec, client, args, timeout):
+    value = None if args[1].lower() == "off" else _local_minute_arg(args[1])
+    try:
+        return client.set_weekday_timer(args[0], value, timeout=timeout)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from exc
+
+
 def _r_setting(_spec, client, args, timeout):
     profile = _require_profile(client)
     if not args:
@@ -1570,6 +1585,27 @@ _SPECS: tuple[CommandSpec, ...] = (
             "Check the machine date and timer schedule first; the machine's "
             "clock menu can correct it. After an uncertain reply, read back "
             "instead of retrying the write."
+        ),
+    ),
+    CommandSpec(
+        name="weekday-timers",
+        description="read EF566 weekday and all-days switch-on/off timers",
+        arguments=(),
+        runner=_r_weekday_timers,
+    ),
+    CommandSpec(
+        name="set-weekday-timer",
+        description="[destructive] change one EF566 weekday switch-on time",
+        arguments=(
+            Argument("weekday", "monday through sunday"),
+            Argument("time", "local HH:MM or off"),
+        ),
+        runner=_r_set_weekday_timer,
+        destructive=True,
+        danger=(
+            "changes an unattended switch-on time. Switch-off and other days "
+            "are preserved. Use the machine's timer menu to restore it; read "
+            "back before retrying any uncertain write."
         ),
     ),
     CommandSpec(
