@@ -148,7 +148,7 @@ rename, not muting the diagnostic.
 * Every release gets a CHANGELOG entry **before** tagging, in
   Keep-A-Changelog format with absolute dates.
 
-Release flow (see README "Releasing" for the full walkthrough):
+Release flow (see `docs/DEVELOPMENT.md` "Releasing" for the full walkthrough):
 
 ```sh
 $EDITOR jura_connect/__init__.py pyproject.toml flake.nix CHANGELOG.md
@@ -156,7 +156,7 @@ nix build .#default                                # verify
 git commit -m "jura-connect: release vX.Y.Z"
 git push
 git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z
-gh release create vX.Y.Z --notes-file <(...)       # see README
+gh release create vX.Y.Z --notes-file <(...)       # see docs/DEVELOPMENT.md
 ```
 
 Tagging fires `.github/workflows/publish.yml`, which re-runs the

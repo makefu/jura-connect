@@ -6,6 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **README is user-facing only.** Deep-dive material moved to new
+  `docs/VERIFICATION.md` (hardware- vs simulator-verified tables),
+  `docs/COMMANDS.md` (named-command catalogue), `docs/DESTRUCTIVE.md`
+  (gate, gated patterns, risk notes), `docs/CLI.md` (per-feature
+  walkthroughs) and `docs/DEVELOPMENT.md` (QA gate, tests, releasing,
+  PyPI setup). The README gains a supported/tested machines table and
+  a model-specific features section (Z10 split-phase milk and counter
+  quirk, GIGA 6 twin grinders and clock/timer APIs, TT237W discovery
+  and PMode behaviour, catalogue-wide capability counts).
+
 ## [0.14.0] — 2026-10-02
 
 ### Added
