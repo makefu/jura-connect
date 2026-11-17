@@ -224,6 +224,16 @@ def _print_command_list() -> None:
             print(f"    {s.usage().ljust(width)}  {s.description}")
 
 
+def _print_command_failure(prefix: str, exc: BaseException) -> None:
+    """Keep transaction uncertainty and secondary release failures visible."""
+    print(f"{prefix}: {exc}", file=sys.stderr)
+    notes = [*getattr(exc, "__notes__", ())]
+    if exc.__cause__ is not None:
+        notes.extend(getattr(exc.__cause__, "__notes__", ()))
+    for note in dict.fromkeys(notes):
+        print(f"  {note}", file=sys.stderr)
+
+
 def cmd_command(args: argparse.Namespace) -> int:
     if args.list:
         _print_command_list()
@@ -318,10 +328,10 @@ def cmd_command(args: argparse.Namespace) -> int:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
         except CommandError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _print_command_failure("error", exc)
             return 2
         except TimeoutError as exc:
-            print(f"timeout: {exc}", file=sys.stderr)
+            _print_command_failure("timeout", exc)
             return 2
         if args.json:
             json.dump(result.to_dict(), sys.stdout, indent=2, sort_keys=False)

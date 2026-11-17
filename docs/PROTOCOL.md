@@ -981,6 +981,13 @@ they are not PMode-specific magic numbers but the dongle's generic
 
 ### 5.7 Machine settings (`@TM:<arg>` read / write)
 
+For independently captured GIGA 6 / EF566 clock/date slots 05/06 and
+weekday/all-days slots 14–1B, see [EF566_CLOCK.md](EF566_CLOCK.md)
+and [EF566_WEEKDAY_TIMERS.md](EF566_WEEKDAY_TIMERS.md).
+These observations are limited to one EF566, excluding EF1091 and unverified
+profile variants. Clock and timer writes use the destructive gate; bare reads
+stay ungated.
+
 Every machine XML carries a ``<MACHINESETTINGS>`` block. Each
 ``SWITCH`` / ``COMBOBOX`` / ``SLIDER`` element has a ``P_Argument``
 attribute (e.g. ``"02"`` for hardness on EF1091); reading the setting

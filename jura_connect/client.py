@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 
-from . import firmware, language, profile, protocol
+from . import clock, firmware, language, profile, protocol, timers
 from .language import LanguageDownloadResult, LanguageInventory, LanguagePayload
 from .process import (
     ProcessRun,
@@ -1105,6 +1105,65 @@ class JuraClient:
                 "stored."
             )
         return reply
+
+    def read_clock(self, *, timeout: float = 1.5) -> datetime.time:
+        """Read the EF566 machine clock; distinct from the coffee timer."""
+        return clock.read_clock(self, timeout=timeout)
+
+    def read_clock_date(self, *, timeout: float = 1.5) -> datetime.date:
+        """Read the EF566 date. Writing the date is not supported."""
+        return clock.read_date(self, timeout=timeout)
+
+    def read_clock_timers(
+        self, *, timeout: float = 1.5
+    ) -> tuple[tuple[datetime.time | None, datetime.time | None], ...]:
+        """Read weekday/all-days on/off times for a clock-change guard."""
+        return clock.read_timers(self, timeout=timeout)
+
+    def set_clock(
+        self,
+        value: datetime.time,
+        *,
+        timeout: float = 3.0,
+        before_write: Callable[[], None] | None = None,
+    ) -> str:
+        """Write local HH:MM on EF566 and confirm keypad release.
+
+        No timezone conversion or NTP. Caller must validate the date and
+        schedule and verify application/continued running after this ACK.
+        The optional guard runs after locking, immediately before writing.
+        """
+        return clock.set_clock(self, value, timeout=timeout, before_write=before_write)
+
+    def read_weekday_timers(
+        self, *, timeout: float = 1.5
+    ) -> dict[str, timers.TimerSlot]:
+        """Read the EF566 weekday and all-days switch-on/off block."""
+        return timers.read_timers(self, timeout=timeout)
+
+    def set_weekday_timer(
+        self,
+        day: str,
+        on: datetime.time | None,
+        *,
+        timeout: float = 3.0,
+        total_timeout: float = 60.0,
+        before_write: Callable[[], None] | None = None,
+    ) -> timers.TimerUpdate:
+        """Change one switch-on value and verify the complete timer block.
+
+        total_timeout caps reply waits and polling; send timeouts remain owned
+        by the connected transport. Final release gets a separate reply timeout.
+        A before_write guard runs after locking and must return promptly.
+        """
+        return timers.set_timer(
+            self,
+            day,
+            on,
+            timeout=timeout,
+            total_timeout=total_timeout,
+            before_write=before_write,
+        )
 
     def read_setting(self, p_argument: str, *, timeout: float = 3.0) -> str:
         """Read one machine setting via ``@TM:<p_argument>``.
